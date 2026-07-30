@@ -20,15 +20,24 @@ source "$ENV_FILE"
 set +a
 PG_DATABASE_URL="${DATABASE_URL/postgresql+psycopg:/postgresql:}"
 
-if ! command -v brew >/dev/null 2>&1; then
-  echo "Homebrew is required for PostgreSQL 17. Install it first, then rerun start.sh." >&2
+if command -v brew >/dev/null 2>&1 && brew --prefix postgresql@17 >/dev/null 2>&1; then
+  PG_BIN="$(brew --prefix postgresql@17)/bin"
+  PG_DATA_DIR=""
+elif [[ -x "$ROOT_DIR/.local/Postgres.app/Contents/Versions/17/bin/pg_ctl" ]]; then
+  PG_BIN="$ROOT_DIR/.local/Postgres.app/Contents/Versions/17/bin"
+  PG_DATA_DIR="$ROOT_DIR/.local/pgdata"
+else
+  echo "PostgreSQL 17 is unavailable. Install Homebrew PostgreSQL or place Postgres.app in .local/." >&2
   exit 1
 fi
-PG_BIN="$(brew --prefix postgresql@17)/bin"
 export PATH="$PG_BIN:$PATH"
 
 if ! pg_isready -d "$PG_DATABASE_URL" >/dev/null 2>&1; then
-  brew services start postgresql@17
+  if [[ -n "$PG_DATA_DIR" ]]; then
+    pg_ctl -D "$PG_DATA_DIR" -l "$ROOT_DIR/.local/postgresql.log" start
+  else
+    brew services start postgresql@17
+  fi
 fi
 until pg_isready -d "$PG_DATABASE_URL" >/dev/null 2>&1; do sleep 1; done
 
