@@ -12,7 +12,12 @@
       <h1>留一段日语，<br>慢慢读进去。</h1>
       <p class="intro">材料会在后台生成朗读。完成后，打开 iPhone 上的 Harvest 开始听读。</p>
       {% if error %}<p class="notice error">{{ error }}</p>{% endif %}
-      {% if request.query_params.get('created') %}<p class="notice">已加入材料库，正在后台处理。</p>{% endif %}
+      {% if created_material_id %}
+      <section class="job-status" data-material-id="{{ created_material_id }}" aria-live="polite">
+        <p class="status-label">准备朗读</p>
+        <p class="status-message">已加入材料库，正在连接后台。</p>
+      </section>
+      {% endif %}
       <form method="post" action="/ingest-web">
         <label>标题 <span>可选</span><input name="title" maxlength="160" placeholder="例如：雨の日の散歩"></label>
         <label>粘贴日语文本<textarea name="source_text" rows="12" placeholder="ここに読みたい日本語を貼り付けます。"></textarea></label>
@@ -22,5 +27,38 @@
       </form>
       <p class="hint">一次只提交一种来源。链接会在后台提取正文。</p>
     </main>
+    {% if created_material_id %}
+    <script>
+      const statusBox = document.querySelector(".job-status");
+      const statusMessage = statusBox.querySelector(".status-message");
+      const materialID = statusBox.dataset.materialId;
+
+      function describe(material) {
+        switch (material.status) {
+          case "pending": return "已加入队列，等待开始准备。";
+          case "processing": return "正在生成朗读。完成后会自动提示你。";
+          case "ready": return "朗读已准备好。现在可在 iPhone 打开 Harvest 开始听读。";
+          case "failed": return `准备没有完成：${material.error_message || "请查看后台日志后重试。"}`;
+          default: return "正在确认材料状态。";
+        }
+      }
+
+      async function refreshStatus() {
+        try {
+          const response = await fetch(`/materials/${materialID}`, { cache: "no-store" });
+          if (!response.ok) throw new Error("状态暂时不可用");
+          const material = await response.json();
+          statusBox.dataset.status = material.status;
+          statusMessage.textContent = describe(material);
+          if (material.status === "ready" || material.status === "failed") return;
+        } catch (_) {
+          statusMessage.textContent = "暂时无法读取状态，后台仍会继续处理。";
+        }
+        window.setTimeout(refreshStatus, 3000);
+      }
+
+      refreshStatus();
+    </script>
+    {% endif %}
   </body>
 </html>

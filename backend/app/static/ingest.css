@@ -17,6 +17,12 @@ button { border:0; border-radius:11px; width:100%; padding:14px; background:var(
 button:hover { filter:brightness(.96); }
 .notice { margin:24px 0 -18px; padding:11px 13px; border-radius:9px; background:#F0ECE2; color:var(--ink); font-size:14px; }
 .error { color:#8D3B30; background:#F6E8E3; }
+.job-status { margin:26px 0 -18px; padding:16px 18px; border:1px solid var(--line); border-radius:12px; background:var(--card); box-shadow:0 8px 22px rgb(65 49 19 / 3%); }
+.status-label { margin:0 0 5px; color:var(--accent); font-size:12px; font-weight:650; letter-spacing:.08em; }
+.status-message { margin:0; color:var(--muted); font-size:14px; line-height:1.55; }
+.job-status[data-status="ready"] { border-color:color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.job-status[data-status="failed"] { border-color:#D7A69B; background:#F9EFEB; }
+.job-status[data-status="failed"] .status-message { color:#8D3B30; }
 .hint { color:var(--muted); font-size:13px; line-height:1.6; }
 @media (prefers-color-scheme:dark) { :root { --paper:#211F1A; --ink:#F2EDDF; --muted:#BBB2A1; --line:#474239; --card:#28251F; } }
 @media (max-width:600px) { main { padding-top:56px; } h1 { font-size:40px; } form { padding:20px; } }

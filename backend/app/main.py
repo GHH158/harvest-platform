@@ -127,8 +127,16 @@ def get_job(job_id: int) -> dict:
 
 
 @app.get("/ingest-web", response_class=HTMLResponse)
-def ingest_page(request: Request, error: str | None = None) -> HTMLResponse:
-    return templates.TemplateResponse(request, "ingest.html", {"error": error})
+def ingest_page(
+    request: Request,
+    created: int | None = None,
+    error: str | None = None,
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "ingest.html",
+        {"error": error, "created_material_id": created},
+    )
 
 
 @app.post("/ingest-web", response_class=HTMLResponse)
