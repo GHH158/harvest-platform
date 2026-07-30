@@ -26,8 +26,6 @@ def estimated_segments(text: str, duration_ms: int) -> list[dict[str, int | str]
             end_ms = duration_ms
         else:
             end_ms = round(duration_ms * (sum(weights[: idx + 1]) / total_weight))
-        result.append(
-            {"idx": idx, "text_ja": sentence, "start_ms": cursor, "end_ms": max(cursor + 1, end_ms)}
-        )
+        result.append({"idx": idx, "text_ja": sentence, "start_ms": cursor, "end_ms": max(cursor + 1, end_ms)})
         cursor = end_ms
     return result

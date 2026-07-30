@@ -6,8 +6,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+import trafilatura
 from bs4 import BeautifulSoup
 from mutagen import File as MutagenFile
+from trafilatura.metadata import extract_metadata
 
 from .config import Settings, get_settings
 from .db import make_engine
@@ -25,7 +27,10 @@ class Worker:
         self.storage = ObjectStorage(settings)
 
     def run_one(self) -> bool:
-        job = self.repository.claim_next_job()
+        exhausted = self.repository.fail_exhausted_pending_jobs(max_attempts=self.settings.worker_max_attempts)
+        if exhausted:
+            print(f"marked {exhausted} exhausted job(s) as failed", flush=True)
+        job = self.repository.claim_next_job(max_attempts=self.settings.worker_max_attempts)
         if job is None:
             return False
         try:
@@ -53,10 +58,12 @@ class Worker:
         title, article_text = extract_article(url)
         if not article_text:
             raise RuntimeError("未能从网页提取可朗读的正文。")
+        if title and not bool(job.payload.get("title_provided")):
+            self.repository.update_material_title(job.material_id or 0, title)
         self.repository.enqueue_job(
             kind="tts",
             material_id=job.material_id or 0,
-            payload={"text": article_text, "title_from_page": title},
+            payload={"text": article_text},
         )
 
     def _synthesize(self, job: Job) -> None:
@@ -80,19 +87,29 @@ class Worker:
 
 
 def extract_article(url: str) -> tuple[str | None, str]:
-    with httpx.Client(
-        timeout=30.0, follow_redirects=True, headers={"User-Agent": "Harvest/0.1"}
-    ) as client:
+    with httpx.Client(timeout=30.0, follow_redirects=True, headers={"User-Agent": "Harvest/0.1"}) as client:
         response = client.get(url)
         response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
+    return extract_article_html(response.text, url)
+
+
+def extract_article_html(html: str, source_url: str) -> tuple[str | None, str]:
+    """Use a readability-class extractor, with a conservative HTML fallback."""
+    metadata = extract_metadata(html)
+    title = metadata.title if metadata and metadata.title else urlparse(source_url).netloc
+    soup = BeautifulSoup(html, "html.parser")
     for ignored in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
         ignored.decompose()
+    extracted = trafilatura.extract(str(soup), include_comments=False, include_tables=False)
+    if extracted:
+        return title, extracted.strip()
+
     root = soup.find("article") or soup.find("main") or soup.body
     if root is None:
-        return soup.title.get_text(" ", strip=True) if soup.title else None, ""
+        return title, ""
     text = "\n".join(part.strip() for part in root.stripped_strings)
-    title = soup.title.get_text(" ", strip=True) if soup.title else urlparse(url).netloc
+    if not title and soup.title:
+        title = soup.title.get_text(" ", strip=True)
     return title, text
 
 
@@ -105,12 +122,14 @@ def audio_duration_ms(path: Path) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Harvest P1 job worker.")
-    parser.add_argument(
-        "--once", action="store_true", help="Process at most one pending job, then exit."
-    )
+    parser.add_argument("--once", action="store_true", help="Process at most one pending job, then exit.")
     args = parser.parse_args()
     settings = get_settings()
-    worker = Worker(Repository(make_engine(settings)), settings)
+    repository = Repository(make_engine(settings))
+    recovered = repository.recover_stale_running_jobs(stale_seconds=settings.worker_stale_running_seconds)
+    if recovered:
+        print(f"requeued {recovered} interrupted job(s)", flush=True)
+    worker = Worker(repository, settings)
     if args.once:
         worker.run_one()
         return

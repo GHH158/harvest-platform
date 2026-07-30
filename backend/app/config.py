@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     oss_public_base_url: str | None = None
     tailscale_hostname: str | None = None
     worker_poll_seconds: float = 2.0
+    worker_stale_running_seconds: int = 900
+    worker_max_attempts: int = 3
     data_dir: Path = ROOT_DIR / "backend" / "data"
 
     @property

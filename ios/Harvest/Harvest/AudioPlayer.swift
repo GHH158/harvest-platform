@@ -27,6 +27,9 @@ final class AudioPlayer: ObservableObject {
                 self?.positionMs = max(0, Int(time.seconds * 1_000))
                 if let duration = self?.player?.currentItem?.duration.seconds, duration.isFinite {
                     self?.durationMs = Int(duration * 1_000)
+                    if duration > 0 && time.seconds >= duration {
+                        self?.isPlaying = false
+                    }
                 }
             }
         }

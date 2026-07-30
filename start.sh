@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 VENV_PYTHON="$ROOT_DIR/.venv/bin/python"
 RUN_DIR="$ROOT_DIR/run"
+TAILSCALE_APP_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Missing .env. Copy .env.example and fill DATABASE_URL first." >&2
@@ -61,6 +62,15 @@ nohup "$VENV_PYTHON" -m app.worker >"$RUN_DIR/worker.log" 2>&1 &
 echo $! >"$RUN_DIR/worker.pid"
 
 if [[ -n "${TAILSCALE_HOSTNAME:-}" ]]; then
+  if command -v tailscale >/dev/null 2>&1; then
+    TAILSCALE_BIN="$(command -v tailscale)"
+  elif [[ -x "$TAILSCALE_APP_BIN" ]]; then
+    TAILSCALE_BIN="$TAILSCALE_APP_BIN"
+  else
+    echo "TAILSCALE_HOSTNAME is set but the Tailscale CLI is unavailable." >&2
+    exit 1
+  fi
+  "$TAILSCALE_BIN" serve --bg --https=443 http://127.0.0.1:8000
   echo "Harvest ingest: https://$TAILSCALE_HOSTNAME/ingest-web"
 else
   echo "Harvest ingest: http://127.0.0.1:8000/ingest-web"

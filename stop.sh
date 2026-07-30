@@ -3,6 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_DIR="$ROOT_DIR/run"
+TAILSCALE_APP_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  set -a
+  source "$ROOT_DIR/.env"
+  set +a
+fi
 
 for service in api worker; do
   pid_file="$RUN_DIR/$service.pid"
@@ -19,3 +26,15 @@ for service in api worker; do
     echo "$service was not running."
   fi
 done
+
+if [[ -n "${TAILSCALE_HOSTNAME:-}" ]]; then
+  if command -v tailscale >/dev/null 2>&1; then
+    TAILSCALE_BIN="$(command -v tailscale)"
+  elif [[ -x "$TAILSCALE_APP_BIN" ]]; then
+    TAILSCALE_BIN="$TAILSCALE_APP_BIN"
+  fi
+  if [[ -n "${TAILSCALE_BIN:-}" ]]; then
+    "$TAILSCALE_BIN" serve --https=443 off >/dev/null 2>&1 || true
+    echo "Stopped the private Tailscale HTTPS route."
+  fi
+fi

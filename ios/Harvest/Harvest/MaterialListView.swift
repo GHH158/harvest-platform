@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 struct MaterialListView: View {
@@ -5,6 +6,7 @@ struct MaterialListView: View {
     @State private var materials: [Material] = []
     @State private var errorMessage: String?
     @State private var isLoading = true
+    private let statusRefresh = Timer.publish(every: 4, on: .main, in: .common).autoconnect()
 
     var body: some View {
         NavigationStack {
@@ -64,13 +66,21 @@ struct MaterialListView: View {
             }
         }
         .task(id: configuration.endpoint) { await load() }
+        .onReceive(statusRefresh) { _ in
+            guard materials.contains(where: { $0.status == "pending" || $0.status == "processing" }) else {
+                return
+            }
+            Task { await load(showingProgress: false) }
+        }
     }
 
     @MainActor
-    private func load() async {
+    private func load(showingProgress: Bool = true) async {
         guard let endpoint = configuration.endpoint else { return }
-        isLoading = true
-        defer { isLoading = false }
+        if showingProgress { isLoading = true }
+        defer {
+            if showingProgress { isLoading = false }
+        }
         do {
             materials = try await APIClient(baseURL: endpoint).materials()
             errorMessage = nil

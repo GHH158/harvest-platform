@@ -40,9 +40,7 @@ def serialise_material(material: dict) -> dict:
     settings = get_settings()
     audio_key = material.pop("audio_oss_key", None)
     material["audio_url"] = (
-        f"{settings.oss_public_base_url.rstrip('/')}/{audio_key}"
-        if audio_key and settings.oss_public_base_url
-        else None
+        f"{settings.oss_public_base_url.rstrip('/')}/{audio_key}" if audio_key and settings.oss_public_base_url else None
     )
     return material
 
@@ -75,12 +73,13 @@ def create_material(payload: MaterialCreate) -> tuple[int, int]:
         )
     assert payload.url
     source_url = payload.url.strip()
+    title_provided = bool((payload.title or "").strip())
     return repo.create_material_with_job(
         title=(payload.title or "").strip() or title_for_url(source_url),
         source_type="url",
         source_ref=source_url,
         job_kind="fetch",
-        payload={"url": source_url},
+        payload={"url": source_url, "title_provided": title_provided},
     )
 
 
@@ -147,13 +146,7 @@ def ingest_form(
     source_url: Annotated[str | None, Form()] = None,
 ):
     try:
-        material_id, _ = create_material(
-            MaterialCreate(title=title, text=source_text, url=source_url)
-        )
+        material_id, _ = create_material(MaterialCreate(title=title, text=source_text, url=source_url))
     except ValueError as error:
-        return templates.TemplateResponse(
-            request, "ingest.html", {"error": str(error)}, status_code=422
-        )
-    return RedirectResponse(
-        url=f"/ingest-web?created={material_id}", status_code=status.HTTP_303_SEE_OTHER
-    )
+        return templates.TemplateResponse(request, "ingest.html", {"error": str(error)}, status_code=422)
+    return RedirectResponse(url=f"/ingest-web?created={material_id}", status_code=status.HTTP_303_SEE_OTHER)

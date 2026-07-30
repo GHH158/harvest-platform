@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 struct ReaderView: View {
@@ -7,6 +8,7 @@ struct ReaderView: View {
     @State private var material: MaterialDetail?
     @State private var errorMessage: String?
     @State private var isLoading = true
+    private let statusRefresh = Timer.publish(every: 4, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Group {
@@ -27,6 +29,10 @@ struct ReaderView: View {
         }
         .background(DesignTokens.canvas.ignoresSafeArea())
         .task { await load() }
+        .onReceive(statusRefresh) { _ in
+            guard let material, material.status != "ready", material.status != "failed" else { return }
+            Task { await load(showingProgress: false) }
+        }
         .onDisappear { player.stop() }
     }
 
@@ -87,7 +93,14 @@ struct ReaderView: View {
     }
 
     private func currentSegment(in material: MaterialDetail) -> Segment? {
-        material.segments.first { segment in player.positionMs >= segment.startMs && player.positionMs < segment.endMs }
+        for (index, segment) in material.segments.enumerated() {
+            let isLast = index == material.segments.count - 1
+            if player.positionMs >= segment.startMs
+                && (player.positionMs < segment.endMs || (isLast && player.positionMs <= segment.endMs)) {
+                return segment
+            }
+        }
+        return nil
     }
 
     private func isCurrent(_ segment: Segment) -> Bool {
@@ -96,10 +109,12 @@ struct ReaderView: View {
     }
 
     @MainActor
-    private func load() async {
+    private func load(showingProgress: Bool = true) async {
         guard let endpoint = configuration.endpoint else { return }
-        isLoading = true
-        defer { isLoading = false }
+        if showingProgress { isLoading = true }
+        defer {
+            if showingProgress { isLoading = false }
+        }
         do {
             material = try await APIClient(baseURL: endpoint).material(id: materialID)
             errorMessage = nil

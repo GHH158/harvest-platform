@@ -120,14 +120,10 @@ class Repository:
 
     def get_job(self, job_id: int) -> dict[str, Any] | None:
         with self.engine.connect() as connection:
-            row = (
-                connection.execute(text("SELECT * FROM job WHERE id = :job_id"), {"job_id": job_id})
-                .mappings()
-                .first()
-            )
+            row = connection.execute(text("SELECT * FROM job WHERE id = :job_id"), {"job_id": job_id}).mappings().first()
         return dict(row) if row else None
 
-    def claim_next_job(self) -> Job | None:
+    def claim_next_job(self, *, max_attempts: int) -> Job | None:
         with self.engine.begin() as connection:
             row = (
                 connection.execute(
@@ -135,7 +131,7 @@ class Repository:
                         """
                     WITH next_job AS (
                         SELECT id FROM job
-                        WHERE status = 'pending'
+                        WHERE status = 'pending' AND attempts < :max_attempts
                         ORDER BY created_at
                         FOR UPDATE SKIP LOCKED
                         LIMIT 1
@@ -146,7 +142,8 @@ class Repository:
                     WHERE job.id = next_job.id
                     RETURNING job.id, job.kind, job.material_id, job.payload, job.attempts
                     """
-                    )
+                    ),
+                    {"max_attempts": max_attempts},
                 )
                 .mappings()
                 .first()
@@ -160,6 +157,53 @@ class Repository:
             payload=dict(row["payload"] or {}),
             attempts=int(row["attempts"]),
         )
+
+    def recover_stale_running_jobs(self, *, stale_seconds: int) -> int:
+        """Requeue jobs abandoned by a worker process that ended unexpectedly."""
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    WITH recovered AS (
+                        UPDATE job
+                        SET status = 'pending', error_message = 'Worker interrupted; automatically requeued.'
+                        WHERE status = 'running'
+                          AND updated_at < now() - (:stale_seconds * interval '1 second')
+                        RETURNING material_id
+                    )
+                    UPDATE material
+                    SET status = 'pending', error_message = NULL
+                    WHERE status = 'processing'
+                      AND id IN (SELECT material_id FROM recovered WHERE material_id IS NOT NULL)
+                    RETURNING id
+                    """
+                ),
+                {"stale_seconds": stale_seconds},
+            ).all()
+        return len(rows)
+
+    def fail_exhausted_pending_jobs(self, *, max_attempts: int) -> int:
+        """Stop a repeatedly interrupted job from looping forever."""
+        message = f"Worker stopped after {max_attempts} interrupted attempts."
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    WITH exhausted AS (
+                        UPDATE job
+                        SET status = 'failed', error_message = :message
+                        WHERE status = 'pending' AND attempts >= :max_attempts
+                        RETURNING material_id
+                    )
+                    UPDATE material
+                    SET status = 'failed', error_message = :message
+                    WHERE id IN (SELECT material_id FROM exhausted WHERE material_id IS NOT NULL)
+                    RETURNING id
+                    """
+                ),
+                {"max_attempts": max_attempts, "message": message},
+            ).all()
+        return len(rows)
 
     def enqueue_job(self, *, kind: str, material_id: int, payload: dict[str, Any]) -> int:
         with self.engine.begin() as connection:
@@ -179,18 +223,21 @@ class Repository:
             ).scalar_one()
         return int(job_id)
 
-    def mark_job_done(self, job_id: int) -> None:
+    def update_material_title(self, material_id: int, title: str) -> None:
         with self.engine.begin() as connection:
             connection.execute(
-                text("UPDATE job SET status = 'done' WHERE id = :job_id"), {"job_id": job_id}
+                text("UPDATE material SET title = :title WHERE id = :material_id"),
+                {"material_id": material_id, "title": title},
             )
+
+    def mark_job_done(self, job_id: int) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text("UPDATE job SET status = 'done' WHERE id = :job_id"), {"job_id": job_id})
 
     def mark_job_failed(self, job_id: int, material_id: int | None, message: str) -> None:
         with self.engine.begin() as connection:
             connection.execute(
-                text(
-                    "UPDATE job SET status = 'failed', error_message = :message WHERE id = :job_id"
-                ),
+                text("UPDATE job SET status = 'failed', error_message = :message WHERE id = :job_id"),
                 {"job_id": job_id, "message": message},
             )
             if material_id is not None:
@@ -207,9 +254,7 @@ class Repository:
     def mark_material_processing(self, material_id: int) -> None:
         with self.engine.begin() as connection:
             connection.execute(
-                text(
-                    "UPDATE material SET status = 'processing', error_message = NULL WHERE id = :material_id"
-                ),
+                text("UPDATE material SET status = 'processing', error_message = NULL WHERE id = :material_id"),
                 {"material_id": material_id},
             )
 
@@ -224,6 +269,10 @@ class Repository:
         segments: list[dict[str, Any]],
     ) -> None:
         with self.engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM media_asset WHERE material_id = :material_id"),
+                {"material_id": material_id},
+            )
             connection.execute(
                 text("DELETE FROM segment WHERE material_id = :material_id"),
                 {"material_id": material_id},

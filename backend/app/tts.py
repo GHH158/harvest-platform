@@ -14,12 +14,8 @@ class TTSService:
     def synthesize(self, *, text: str, destination: Path) -> None:
         """Request a non-streaming Qwen-Audio TTS file and retain it locally."""
         if not self.settings.dashscope_api_key:
-            raise RuntimeError(
-                "DASHSCOPE_API_KEY 尚未配置；按 PROJECT.md §2.5 注册并配置后再处理任务。"
-            )
-        endpoint = (
-            f"{self.settings.dashscope_base_url.rstrip('/')}/services/audio/tts/SpeechSynthesizer"
-        )
+            raise RuntimeError("DASHSCOPE_API_KEY 尚未配置；按 PROJECT.md §2.5 注册并配置后再处理任务。")
+        endpoint = f"{self.settings.dashscope_base_url.rstrip('/')}/services/audio/tts/SpeechSynthesizer"
         payload = {
             "model": self.settings.dashscope_tts_model,
             "input": {
