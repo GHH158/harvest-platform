@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Harvest · 添加阅读材料</title>
+    <link rel="stylesheet" href="/static/ingest.css">
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">HARVEST · 阅读跟读</p>
+      <h1>留一段日语，<br>慢慢读进去。</h1>
+      <p class="intro">材料会在后台生成朗读。完成后，打开 iPhone 上的 Harvest 开始听读。</p>
+      {% if error %}<p class="notice error">{{ error }}</p>{% endif %}
+      {% if request.query_params.get('created') %}<p class="notice">已加入材料库，正在后台处理。</p>{% endif %}
+      <form method="post" action="/ingest-web">
+        <label>标题 <span>可选</span><input name="title" maxlength="160" placeholder="例如：雨の日の散歩"></label>
+        <label>粘贴日语文本<textarea name="source_text" rows="12" placeholder="ここに読みたい日本語を貼り付けます。"></textarea></label>
+        <div class="or"><span>或</span></div>
+        <label>网页链接<input type="url" name="source_url" placeholder="https://example.com/article"></label>
+        <button type="submit">开始准备朗读</button>
+      </form>
+      <p class="hint">一次只提交一种来源。链接会在后台提取正文。</p>
+    </main>
+  </body>
+</html>
