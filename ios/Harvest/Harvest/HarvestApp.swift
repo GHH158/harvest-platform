@@ -18,6 +18,7 @@ struct HarvestApp: App {
             .environmentObject(offlineLibrary)
             .tint(DesignTokens.accent)
             .background(DesignTokens.canvas)
+            .task { offlineLibrary.resumeIncompleteDownloads() }
         }
     }
 }

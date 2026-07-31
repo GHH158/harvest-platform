@@ -169,14 +169,20 @@ class Worker:
         if not source.exists() or job.material_id is None:
             raise RuntimeError("transcode 任务缺少本地视频文件。")
         output_dir = self.settings.data_dir / "video" / f"material-{job.material_id}"
-        delivery = output_dir / "delivery-720p.mp4"
-        audio = output_dir / "audio.m4a"
-        self.video.transcode_delivery(source, delivery)
-        self.video.extract_audio(source, audio)
+        video_directory = output_dir / "hls-video"
+        audio_directory = output_dir / "hls-audio"
+        asr_audio = output_dir / "asr-audio.m4a"
+        self.video.create_hls(source, video_directory, audio_directory)
+        self.video.extract_audio(source, asr_audio)
         self.repository.enqueue_job(
             kind="upload_video",
             material_id=job.material_id,
-            payload={"source_path": str(source), "delivery_path": str(delivery), "audio_path": str(audio)},
+            payload={
+                "source_path": str(source),
+                "video_directory": str(video_directory),
+                "audio_directory": str(audio_directory),
+                "asr_audio_path": str(asr_audio),
+            },
         )
 
     def _extract_photo(self, job: Job) -> None:
@@ -188,27 +194,37 @@ class Worker:
 
     def _upload_video(self, job: Job) -> None:
         assert job.material_id is not None
-        delivery = Path(str(job.payload.get("delivery_path", "")))
-        audio = Path(str(job.payload.get("audio_path", "")))
+        video_directory = Path(str(job.payload.get("video_directory", "")))
+        audio_directory = Path(str(job.payload.get("audio_directory", "")))
+        video_playlist = video_directory / "index.m3u8"
+        audio_playlist = audio_directory / "index.m3u8"
+        asr_audio = Path(str(job.payload.get("asr_audio_path", "")))
         source = Path(str(job.payload.get("source_path", "")))
-        if not source.exists() or not delivery.exists() or not audio.exists():
-            raise RuntimeError("upload_video 任务缺少转码文件。")
-        video_key = f"materials/{job.material_id}/video-720p.mp4"
-        audio_key = f"materials/{job.material_id}/video-audio.m4a"
-        self.storage.upload_audio(delivery, video_key)
-        self.storage.upload_audio(audio, audio_key)
+        if not source.exists() or not video_playlist.exists() or not audio_playlist.exists() or not asr_audio.exists():
+            raise RuntimeError("upload_video 任务缺少 HLS 或 ASR 音轨。")
+        video_prefix = f"materials/{job.material_id}/hls/video"
+        audio_prefix = f"materials/{job.material_id}/hls/audio"
+        video_playlist_key = f"{video_prefix}/index.m3u8"
+        audio_playlist_key = f"{audio_prefix}/index.m3u8"
+        temporary_audio_key = f"materials/{job.material_id}/temporary/asr-audio.m4a"
+        self.storage.upload_tree(video_directory, video_prefix)
+        self.storage.upload_tree(audio_directory, audio_prefix)
+        self.storage.upload_file(asr_audio, temporary_audio_key)
         self.repository.store_video_assets(
             material_id=job.material_id,
             source_path=str(source),
-            video_path=str(delivery),
-            audio_path=str(audio),
-            video_key=video_key,
-            audio_key=audio_key,
+            video_playlist_path=str(video_playlist),
+            audio_playlist_path=str(audio_playlist),
+            video_playlist_key=video_playlist_key,
+            audio_playlist_key=audio_playlist_key,
         )
         self.repository.enqueue_job(
             kind="asr_video",
             material_id=job.material_id,
-            payload={"audio_url": self.storage.public_url(audio_key)},
+            payload={
+                "audio_url": self.storage.public_url(temporary_audio_key),
+                "temporary_audio_key": temporary_audio_key,
+            },
         )
 
     def _transcribe_video(self, job: Job) -> None:
@@ -246,7 +262,10 @@ class Worker:
         self.repository.enqueue_job(
             kind="translate_video",
             material_id=job.material_id,
-            payload={"sentences": [item["text_ja"] for item in segments]},
+            payload={
+                "sentences": [item["text_ja"] for item in segments],
+                "temporary_audio_key": str(job.payload.get("temporary_audio_key", "")),
+            },
         )
 
     def _translate_video(self, job: Job) -> None:
@@ -267,6 +286,12 @@ class Worker:
         if not isinstance(translations, list) or len(translations) != len(sentences):
             raise RuntimeError("字幕翻译返回数量不匹配。")
         self.repository.complete_video_translation(job.material_id, [str(item) for item in translations])
+        temporary_audio_key = str(job.payload.get("temporary_audio_key", ""))
+        if temporary_audio_key:
+            try:
+                self.storage.delete(temporary_audio_key)
+            except Exception as error:
+                print(f"job={job.id} 无法删除 ASR 临时音轨: {error}", flush=True)
 
 
 def extract_article(url: str) -> tuple[str | None, str]:

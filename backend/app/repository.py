@@ -506,7 +506,14 @@ class Repository:
             )
 
     def store_video_assets(
-        self, *, material_id: int, source_path: str, video_path: str, audio_path: str, video_key: str, audio_key: str
+        self,
+        *,
+        material_id: int,
+        source_path: str,
+        video_playlist_path: str,
+        audio_playlist_path: str,
+        video_playlist_key: str,
+        audio_playlist_key: str,
     ) -> None:
         with self.engine.begin() as connection:
             connection.execute(
@@ -519,9 +526,10 @@ class Repository:
                 {"material_id": material_id, "local_path": source_path, "bytes": Path(source_path).stat().st_size},
             )
             for kind, local_path, oss_key in (
-                ("video", video_path, video_key),
-                ("audio", audio_path, audio_key),
+                ("video", video_playlist_path, video_playlist_key),
+                ("audio", audio_playlist_path, audio_playlist_key),
             ):
+                playlist = Path(local_path)
                 connection.execute(
                     text("""INSERT INTO media_asset (material_id, kind, purpose, local_path, oss_key, bytes)
                     VALUES (:material_id, :kind, 'delivery', :local_path, :oss_key, :bytes)"""),
@@ -530,7 +538,7 @@ class Repository:
                         "kind": kind,
                         "local_path": local_path,
                         "oss_key": oss_key,
-                        "bytes": Path(local_path).stat().st_size,
+                        "bytes": sum(path.stat().st_size for path in playlist.parent.rglob("*") if path.is_file()),
                     },
                 )
 

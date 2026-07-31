@@ -139,9 +139,11 @@ def test_failed_asr_only_fails_enhancement_job() -> None:
 
 
 class FakeVideoProcessor:
-    def transcode_delivery(self, source: Path, destination: Path) -> None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"delivery")
+    def create_hls(self, source: Path, video_directory: Path, audio_directory: Path) -> None:
+        for directory in (video_directory, audio_directory):
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "index.m3u8").write_text("#EXTM3U\nsegment-00000.ts\n")
+            (directory / "segment-00000.ts").write_bytes(b"segment")
 
     def extract_audio(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -155,6 +157,20 @@ class FakeStorage:
     def upload_audio(self, local_path: Path, oss_key: str) -> str:
         self.uploads.append((local_path, oss_key))
         return self.public_url(oss_key)
+
+    def upload_file(self, local_path: Path, oss_key: str) -> str:
+        return self.upload_audio(local_path, oss_key)
+
+    def upload_tree(self, directory: Path, oss_prefix: str) -> list[str]:
+        keys = []
+        for path in sorted(item for item in directory.rglob("*") if item.is_file()):
+            key = f"{oss_prefix}/{path.relative_to(directory).as_posix()}"
+            self.uploads.append((path, key))
+            keys.append(key)
+        return keys
+
+    def delete(self, oss_key: str) -> None:
+        self.deleted_key = oss_key
 
     def public_url(self, oss_key: str) -> str:
         return f"https://media.example/{oss_key}"
@@ -241,10 +257,13 @@ def test_video_pipeline_reaches_translation_completion(tmp_path: Path) -> None:
     assert repository.processing == [7, 7, 7, 7]
     assert repository.failed == []
     assert repository.video_assets is not None
+    assert repository.video_assets["video_playlist_key"].endswith("/hls/video/index.m3u8")
+    assert repository.video_assets["audio_playlist_key"].endswith("/hls/audio/index.m3u8")
     assert repository.video_segments == [
         {"idx": 0, "text_ja": "これは。", "start_ms": 0, "end_ms": 1_200}
     ]
     assert repository.video_translations == ["这是。"]
+    assert worker.storage.deleted_key.endswith("/temporary/asr-audio.m4a")  # type: ignore[attr-defined]
 
 
 def test_shadowing_failure_sets_attempt_failure(tmp_path: Path) -> None:
