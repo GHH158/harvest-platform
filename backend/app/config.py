@@ -22,7 +22,16 @@ class Settings(BaseSettings):
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/api/v1"
     dashscope_tts_model: str = "qwen-audio-3.0-tts-plus"
     dashscope_tts_voice: str = "longanhuan_v3.6"
+    dashscope_asr_model: str = "fun-asr"
+    dashscope_asr_poll_seconds: float = 2.0
+    dashscope_asr_timeout_seconds: int = 900
     deepseek_api_key: str | None = None
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
+    deepseek_model: str = "deepseek-chat"
+    dashscope_chat_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    dashscope_chat_model: str = "qwen-plus"
+    dashscope_omni_model: str = "qwen3.5-omni-flash-realtime"
+    dashscope_vl_model: str = "qwen-vl-plus"
     oss_endpoint: str | None = None
     oss_bucket: str | None = None
     oss_access_key_id: str | None = None

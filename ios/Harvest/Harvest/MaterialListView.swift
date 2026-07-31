@@ -55,6 +55,18 @@ struct MaterialListView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
+                        NavigationLink { PhotoReadingView() } label: {
+                            Label("拍照阅读", systemImage: "camera")
+                        }
+                        NavigationLink { VoiceTeacherView() } label: {
+                            Label("语音老师", systemImage: "waveform")
+                        }
+                        NavigationLink { ChatView() } label: {
+                            Label("聊天老师", systemImage: "bubble.left.and.bubble.right")
+                        }
+                        NavigationLink { DownloadsView() } label: {
+                            Label("已下载材料", systemImage: "arrow.down.circle")
+                        }
                         NavigationLink { SettingsView() } label: {
                             Label("连接设置", systemImage: "gearshape")
                         }

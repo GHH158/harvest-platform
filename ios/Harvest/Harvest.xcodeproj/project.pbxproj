@@ -17,6 +17,13 @@
 		A00000000000000000000009 /* MaterialListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000009 /* MaterialListView.swift */; };
 		A00000000000000000000010 /* ReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010 /* ReaderView.swift */; };
 		A00000000000000000000011 /* HarvestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* HarvestTests.swift */; };
+		A00000000000000000000012 /* OfflineLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* OfflineLibrary.swift */; };
+		A00000000000000000000013 /* DownloadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* DownloadsView.swift */; };
+		A00000000000000000000014 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* ChatView.swift */; };
+		A00000000000000000000015 /* ShadowingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* ShadowingView.swift */; };
+		A00000000000000000000016 /* VideoLearningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* VideoLearningView.swift */; };
+		A00000000000000000000017 /* PhotoReadingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* PhotoReadingView.swift */; };
+		A00000000000000000000018 /* VoiceTeacherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000020 /* VoiceTeacherView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -37,6 +44,13 @@
 		A10000000000000000000011 /* HarvestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarvestTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000012 /* Harvest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Harvest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000013 /* HarvestTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HarvestTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000014 /* OfflineLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLibrary.swift; sourceTree = "<group>"; };
+		A10000000000000000000015 /* DownloadsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadsView.swift; sourceTree = "<group>"; };
+		A10000000000000000000016 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		A10000000000000000000017 /* ShadowingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShadowingView.swift; sourceTree = "<group>"; };
+		A10000000000000000000018 /* VideoLearningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoLearningView.swift; sourceTree = "<group>"; };
+		A10000000000000000000019 /* PhotoReadingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoReadingView.swift; sourceTree = "<group>"; };
+		A10000000000000000000020 /* VoiceTeacherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTeacherView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -46,7 +60,7 @@
 
 /* Begin PBXGroup section */
 		A20000000000000000000001 = {isa = PBXGroup; children = (A20000000000000000000002 /* Harvest */, A20000000000000000000003 /* HarvestTests */, A20000000000000000000004 /* Products */); sourceTree = "<group>"; };
-		A20000000000000000000002 /* Harvest */ = {isa = PBXGroup; children = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, A10000000000000000000007, A10000000000000000000008, A10000000000000000000009, A10000000000000000000010); path = Harvest; sourceTree = "<group>"; };
+		A20000000000000000000002 /* Harvest */ = {isa = PBXGroup; children = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, A10000000000000000000007, A10000000000000000000008, A10000000000000000000009, A10000000000000000000010, A10000000000000000000014, A10000000000000000000015, A10000000000000000000016, A10000000000000000000017, A10000000000000000000018, A10000000000000000000019, A10000000000000000000020); path = Harvest; sourceTree = "<group>"; };
 		A20000000000000000000003 /* HarvestTests */ = {isa = PBXGroup; children = (A10000000000000000000011); path = HarvestTests; sourceTree = "<group>"; };
 		A20000000000000000000004 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000012, A10000000000000000000013); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
@@ -61,7 +75,7 @@
 /* End PBXProject section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000006, A00000000000000000000007, A00000000000000000000008, A00000000000000000000009, A00000000000000000000010); runOnlyForDeploymentPostprocessing = 0; };
+		A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000006, A00000000000000000000007, A00000000000000000000008, A00000000000000000000009, A00000000000000000000010, A00000000000000000000012, A00000000000000000000013, A00000000000000000000014, A00000000000000000000015, A00000000000000000000016, A00000000000000000000017, A00000000000000000000018); runOnlyForDeploymentPostprocessing = 0; };
 		A60000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000011); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 

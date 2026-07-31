@@ -1,13 +1,17 @@
 import Combine
 import SwiftUI
+import UIKit
 
 struct ReaderView: View {
     @EnvironmentObject private var configuration: AppConfiguration
+    @EnvironmentObject private var offlineLibrary: OfflineLibrary
     let materialID: Int
     @StateObject private var player = AudioPlayer()
     @State private var material: MaterialDetail?
     @State private var errorMessage: String?
     @State private var isLoading = true
+    @State private var downloadError: String?
+    @State private var isDownloading = false
     private let statusRefresh = Timer.publish(every: 4, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -51,7 +55,7 @@ struct ReaderView: View {
                     .foregroundStyle(DesignTokens.muted)
             }
         } else {
-            readyReader(material)
+            if material.kind == "video" { VideoLearningView(material: material) } else { readyReader(material) }
         }
     }
 
@@ -64,9 +68,36 @@ struct ReaderView: View {
                         .tracking(-0.5)
                         .foregroundStyle(DesignTokens.ink)
                         .padding(.bottom, 18)
+                    HStack {
+                        if offlineLibrary.localAudioURL(for: material.id) != nil {
+                            Label("已下载", systemImage: "arrow.down.circle.fill")
+                                .font(.footnote)
+                                .foregroundStyle(DesignTokens.muted)
+                        } else {
+                            Button(isDownloading ? "正在下载" : "下载朗读") {
+                                Task { await download(material) }
+                            }
+                            .disabled(isDownloading)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(DesignTokens.accent)
+                        }
+                        Spacer()
+                    }
+                    if let current = currentSegment(in: material) {
+                        NavigationLink("跟读这一句") { ShadowingView(segment: current) }
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(DesignTokens.accent)
+                    }
+                    if let downloadError {
+                        Text(downloadError)
+                            .font(.footnote)
+                            .foregroundStyle(DesignTokens.accent)
+                    }
                     ForEach(material.segments) { segment in
                         SentenceButton(
                             segment: segment,
+                            tokens: tokens(for: segment, in: material),
+                            currentTokenID: currentToken(in: material)?.id,
                             isCurrent: isCurrent(segment),
                             onSelect: { player.seek(to: segment.startMs) }
                         )
@@ -87,8 +118,24 @@ struct ReaderView: View {
                 PlayerBar(player: player, durationMs: material.durationMs ?? player.durationMs)
             }
         }
-        .task(id: material.audioURL) {
-            if let audioURL = material.audioURL { await player.prepare(url: audioURL) }
+        .task(id: playbackURL(for: material)) {
+            if let audioURL = playbackURL(for: material) { await player.prepare(url: audioURL) }
+        }
+    }
+
+    private func playbackURL(for material: MaterialDetail) -> URL? {
+        offlineLibrary.localAudioURL(for: material.id) ?? material.audioURL
+    }
+
+    @MainActor
+    private func download(_ material: MaterialDetail) async {
+        isDownloading = true
+        defer { isDownloading = false }
+        do {
+            try await offlineLibrary.download(material)
+            downloadError = nil
+        } catch {
+            downloadError = error.localizedDescription
         }
     }
 
@@ -106,6 +153,16 @@ struct ReaderView: View {
     private func isCurrent(_ segment: Segment) -> Bool {
         guard let material else { return false }
         return currentSegment(in: material)?.id == segment.id
+    }
+
+    private func currentToken(in material: MaterialDetail) -> Token? {
+        material.tokens.first { token in
+            player.positionMs >= token.startMs && player.positionMs < token.endMs
+        }
+    }
+
+    private func tokens(for segment: Segment, in material: MaterialDetail) -> [Token] {
+        material.tokens.filter { $0.segmentID == segment.id }
     }
 
     @MainActor
@@ -126,12 +183,14 @@ struct ReaderView: View {
 
 private struct SentenceButton: View {
     let segment: Segment
+    let tokens: [Token]
+    let currentTokenID: Int?
     let isCurrent: Bool
     let onSelect: () -> Void
 
     var body: some View {
         Button(action: onSelect) {
-            Text(segment.textJA)
+            Text(attributedText)
                 .font(.system(size: DesignTokens.readingSize, weight: .regular))
                 .foregroundStyle(DesignTokens.ink)
                 .lineSpacing(DesignTokens.readingLineSpacing)
@@ -143,6 +202,29 @@ private struct SentenceButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("跳转到：\(segment.textJA)")
+    }
+
+    private var attributedText: AttributedString {
+        guard !tokens.isEmpty else { return AttributedString(segment.textJA) }
+        var result = AttributedString()
+        var tokenIndex = 0
+        for character in segment.textJA {
+            var part = AttributedString(String(character))
+            if !isIgnorable(character), tokenIndex < tokens.count {
+                if tokens[tokenIndex].surface == String(character) {
+                    if tokens[tokenIndex].id == currentTokenID {
+                        part.backgroundColor = UIColor(DesignTokens.accentWash)
+                    }
+                    tokenIndex += 1
+                }
+            }
+            result += part
+        }
+        return result
+    }
+
+    private func isIgnorable(_ character: Character) -> Bool {
+        character.isWhitespace || "、。！？!?，,.…ー・『』「」（）()[]{}".contains(character)
     }
 }
 

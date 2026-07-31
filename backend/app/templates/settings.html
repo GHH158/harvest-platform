@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Harvest · 服务设置</title><link rel="stylesheet" href="/static/ingest.css"></head><body>
+<main class="ingest-shell">
+  <p class="eyebrow">HARVEST · 服务设置</p>
+  <h1>把服务准备好，<br>其余交给后台。</h1>
+  <p class="lede">此页仅由本机或 Tailscale 私有网络访问。密钥写入本机 <code>.env</code>（权限 600），保存后不会回显；重启服务后 worker 才会读取新配置。</p>
+  {% if saved %}<p class="notice">已保存。准备实调时运行 <code>./stop.sh && ./start.sh</code>。</p>{% endif %}
+  <form method="post" class="ingest-card settings-card">
+    <h2>本机与网络</h2>
+    <label>数据库地址（已配置：{{ "是" if status.DATABASE_URL else "否" }}）<input type="password" name="DATABASE_URL" placeholder="留空则保持现有值"></label>
+    <label>Tailscale 主机名<input name="TAILSCALE_HOSTNAME" value="{{ values.TAILSCALE_HOSTNAME }}"></label>
+    <h2>百炼（免费额度优先）</h2>
+    <label>百炼 API Key（已配置：{{ "是" if status.DASHSCOPE_API_KEY else "否" }}）<input type="password" name="DASHSCOPE_API_KEY" placeholder="留空则保持现有值"></label>
+    <label>TTS 服务地址<input name="DASHSCOPE_BASE_URL" value="{{ values.DASHSCOPE_BASE_URL }}"></label>
+    <label>TTS 模型<input name="DASHSCOPE_TTS_MODEL" value="{{ values.DASHSCOPE_TTS_MODEL }}"></label>
+    <label>TTS 音色 ID<input name="DASHSCOPE_TTS_VOICE" value="{{ values.DASHSCOPE_TTS_VOICE }}"></label>
+    <label>ASR 模型<input name="DASHSCOPE_ASR_MODEL" value="{{ values.DASHSCOPE_ASR_MODEL }}"></label>
+    <label>聊天兼容接口<input name="DASHSCOPE_CHAT_BASE_URL" value="{{ values.DASHSCOPE_CHAT_BASE_URL }}"></label>
+    <label>聊天模型<input name="DASHSCOPE_CHAT_MODEL" value="{{ values.DASHSCOPE_CHAT_MODEL }}"></label>
+    <label>语音聊天模型<input name="DASHSCOPE_OMNI_MODEL" value="{{ values.DASHSCOPE_OMNI_MODEL }}"></label>
+    <h2>DeepSeek（百炼额度耗尽后的备用）</h2>
+    <label>DeepSeek API Key（已配置：{{ "是" if status.DEEPSEEK_API_KEY else "否" }}）<input type="password" name="DEEPSEEK_API_KEY" placeholder="留空则保持现有值"></label>
+    <label>DeepSeek 服务地址<input name="DEEPSEEK_BASE_URL" value="{{ values.DEEPSEEK_BASE_URL }}"></label>
+    <label>DeepSeek 模型<input name="DEEPSEEK_MODEL" value="{{ values.DEEPSEEK_MODEL }}"></label>
+    <h2>OSS</h2>
+    <label>Endpoint<input name="OSS_ENDPOINT" value="{{ values.OSS_ENDPOINT }}"></label><label>Bucket<input name="OSS_BUCKET" value="{{ values.OSS_BUCKET }}"></label>
+    <label>Access Key ID（已配置：{{ "是" if status.OSS_ACCESS_KEY_ID else "否" }}）<input type="password" name="OSS_ACCESS_KEY_ID" placeholder="留空则保持现有值"></label>
+    <label>Access Key Secret（已配置：{{ "是" if status.OSS_ACCESS_KEY_SECRET else "否" }}）<input type="password" name="OSS_ACCESS_KEY_SECRET" placeholder="留空则保持现有值"></label>
+    <label>公网访问前缀<input name="OSS_PUBLIC_BASE_URL" value="{{ values.OSS_PUBLIC_BASE_URL }}"></label>
+    <button type="submit">保存本机设置</button>
+  </form>
+</main></body></html>

@@ -47,6 +47,11 @@ def test_recovery_attempt_limit_and_repeated_completion_are_safe() -> None:
             duration_ms=1_000,
             segments=segments,
         )
+        repository.replace_tokens(
+            material_id,
+            [{"segment_idx": 0, "idx": 0, "surface": "雨", "start_ms": 0, "end_ms": 500}],
+        )
+        assert repository.get_tokens(material_id)[0]["surface"] == "雨"
         with engine.connect() as connection:
             asset_count = connection.execute(
                 text("SELECT count(*) FROM media_asset WHERE material_id = :material_id"),

@@ -28,17 +28,18 @@ class Repository:
         source_ref: str | None,
         job_kind: str,
         payload: dict[str, Any],
+        kind: str = "reading",
     ) -> tuple[int, int]:
         with self.engine.begin() as connection:
             material_id = connection.execute(
                 text(
                     """
                     INSERT INTO material (kind, title, source_type, source_ref, status)
-                    VALUES ('reading', :title, :source_type, :source_ref, 'pending')
+                    VALUES (:kind, :title, :source_type, :source_ref, 'pending')
                     RETURNING id
                     """
                 ),
-                {"title": title, "source_type": source_type, "source_ref": source_ref},
+                {"kind": kind, "title": title, "source_type": source_type, "source_ref": source_ref},
             ).scalar_one()
             job_id = connection.execute(
                 text(
@@ -62,13 +63,17 @@ class Repository:
                 connection.execute(
                     text(
                         """
-                    SELECT m.*, delivery.oss_key AS audio_oss_key
+                    SELECT m.*, delivery.oss_key AS audio_oss_key, video_delivery.oss_key AS video_oss_key
                     FROM material m
                     LEFT JOIN LATERAL (
                         SELECT oss_key FROM media_asset
                         WHERE material_id = m.id AND kind = 'audio' AND purpose = 'delivery'
                         ORDER BY id DESC LIMIT 1
                     ) delivery ON true
+                    LEFT JOIN LATERAL (
+                        SELECT oss_key FROM media_asset WHERE material_id = m.id AND kind = 'video' AND purpose = 'delivery'
+                        ORDER BY id DESC LIMIT 1
+                    ) video_delivery ON true
                     WHERE m.id = :material_id
                     """
                     ),
@@ -85,13 +90,17 @@ class Repository:
                 connection.execute(
                     text(
                         """
-                    SELECT m.*, delivery.oss_key AS audio_oss_key
+                    SELECT m.*, delivery.oss_key AS audio_oss_key, video_delivery.oss_key AS video_oss_key
                     FROM material m
                     LEFT JOIN LATERAL (
                         SELECT oss_key FROM media_asset
                         WHERE material_id = m.id AND kind = 'audio' AND purpose = 'delivery'
                         ORDER BY id DESC LIMIT 1
                     ) delivery ON true
+                    LEFT JOIN LATERAL (
+                        SELECT oss_key FROM media_asset WHERE material_id = m.id AND kind = 'video' AND purpose = 'delivery'
+                        ORDER BY id DESC LIMIT 1
+                    ) video_delivery ON true
                     ORDER BY m.created_at DESC
                     """
                     )
@@ -117,6 +126,111 @@ class Repository:
                 .all()
             )
         return [dict(row) for row in rows]
+
+    def get_tokens(self, material_id: int) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    text(
+                        """
+                    SELECT t.id, t.segment_id, t.idx, t.surface, t.start_ms, t.end_ms
+                    FROM token t
+                    JOIN segment s ON s.id = t.segment_id
+                    WHERE s.material_id = :material_id
+                    ORDER BY s.idx, t.idx
+                    """
+                    ),
+                    {"material_id": material_id},
+                )
+                .mappings()
+                .all()
+            )
+        return [dict(row) for row in rows]
+
+    def segment_context(self, material_id: int, segment_id: int, radius: int = 2) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            current_idx = connection.execute(
+                text("SELECT idx FROM segment WHERE id = :segment_id AND material_id = :material_id"),
+                {"segment_id": segment_id, "material_id": material_id},
+            ).scalar_one_or_none()
+            if current_idx is None:
+                return []
+            rows = connection.execute(
+                text(
+                    """SELECT id, idx, text_ja, text_zh FROM segment
+                    WHERE material_id = :material_id AND idx BETWEEN :start AND :end ORDER BY idx"""
+                ),
+                {"material_id": material_id, "start": int(current_idx) - radius, "end": int(current_idx) + radius},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def add_companion_message(self, material_id: int, segment_id: int | None, role: str, content: str) -> dict[str, Any]:
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text("""INSERT INTO companion_message (material_id, segment_id, role, content)
+                VALUES (:material_id, :segment_id, :role, :content) RETURNING *"""),
+                {"material_id": material_id, "segment_id": segment_id, "role": role, "content": content},
+            ).mappings().one()
+        return dict(row)
+
+    def companion_messages(self, material_id: int) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text("SELECT * FROM companion_message WHERE material_id = :material_id ORDER BY id"),
+                {"material_id": material_id},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def add_chat_message(self, session_id: str, role: str, content: str) -> dict[str, Any]:
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text("INSERT INTO chat_message (session_id, role, content) VALUES (:session_id, :role, :content) RETURNING *"),
+                {"session_id": session_id, "role": role, "content": content},
+            ).mappings().one()
+        return dict(row)
+
+    def chat_messages(self, session_id: str) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text("SELECT * FROM chat_message WHERE session_id = :session_id ORDER BY id"),
+                {"session_id": session_id},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def replace_tokens(self, material_id: int, tokens: list[dict[str, Any]]) -> None:
+        """Atomically replace P2 token timestamps without changing source text."""
+        with self.engine.begin() as connection:
+            segment_rows = (
+                connection.execute(
+                    text("SELECT id, idx FROM segment WHERE material_id = :material_id"),
+                    {"material_id": material_id},
+                )
+                .mappings()
+                .all()
+            )
+            segment_ids = {int(row["idx"]): int(row["id"]) for row in segment_rows}
+            connection.execute(
+                text(
+                    """
+                    DELETE FROM token
+                    WHERE segment_id IN (SELECT id FROM segment WHERE material_id = :material_id)
+                    """
+                ),
+                {"material_id": material_id},
+            )
+            for token in tokens:
+                segment_id = segment_ids.get(int(token["segment_idx"]))
+                if segment_id is None:
+                    continue
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO token (segment_id, idx, surface, start_ms, end_ms)
+                        VALUES (:segment_id, :idx, :surface, :start_ms, :end_ms)
+                        """
+                    ),
+                    {"segment_id": segment_id, **token},
+                )
 
     def get_job(self, job_id: int) -> dict[str, Any] | None:
         with self.engine.connect() as connection:
@@ -205,7 +319,7 @@ class Repository:
             ).all()
         return len(rows)
 
-    def enqueue_job(self, *, kind: str, material_id: int, payload: dict[str, Any]) -> int:
+    def enqueue_job(self, *, kind: str, material_id: int | None, payload: dict[str, Any]) -> int:
         with self.engine.begin() as connection:
             job_id = connection.execute(
                 text(
@@ -222,6 +336,37 @@ class Repository:
                 },
             ).scalar_one()
         return int(job_id)
+
+    def get_segment(self, segment_id: int) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT * FROM segment WHERE id = :segment_id"), {"segment_id": segment_id}
+            ).mappings().first()
+        return dict(row) if row else None
+
+    def create_shadowing_attempt(self, segment_id: int, audio_path: str) -> int:
+        with self.engine.begin() as connection:
+            attempt_id = connection.execute(
+                text("INSERT INTO shadowing_attempt (segment_id, audio_path) VALUES (:segment_id, :audio_path) RETURNING id"),
+                {"segment_id": segment_id, "audio_path": audio_path},
+            ).scalar_one()
+        return int(attempt_id)
+
+    def complete_shadowing_attempt(self, attempt_id: int, transcript: str, diff: list[dict[str, Any]], score: float) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("""UPDATE shadowing_attempt SET asr_text = :transcript,
+                    diff_json = CAST(:diff AS JSONB), score = :score WHERE id = :attempt_id"""),
+                {"attempt_id": attempt_id, "transcript": transcript, "diff": json.dumps(diff, ensure_ascii=False),
+                 "score": score},
+            )
+
+    def get_shadowing_attempt(self, attempt_id: int) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT * FROM shadowing_attempt WHERE id = :attempt_id"), {"attempt_id": attempt_id}
+            ).mappings().first()
+        return dict(row) if row else None
 
     def update_material_title(self, material_id: int, title: str) -> None:
         with self.engine.begin() as connection:

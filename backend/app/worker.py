@@ -11,12 +11,17 @@ from bs4 import BeautifulSoup
 from mutagen import File as MutagenFile
 from trafilatura.metadata import extract_metadata
 
+from .alignment import align_words_to_source
+from .asr import ASRService
 from .config import Settings, get_settings
 from .db import make_engine
 from .repository import Job, Repository
+from .shadowing import score_transcript
 from .storage import ObjectStorage
 from .text import estimated_segments
 from .tts import TTSService
+from .video import VideoProcessor
+from .vision import VisionService
 
 
 class Worker:
@@ -24,7 +29,10 @@ class Worker:
         self.repository = repository
         self.settings = settings
         self.tts = TTSService(settings)
+        self.asr = ASRService(settings)
         self.storage = ObjectStorage(settings)
+        self.video = VideoProcessor()
+        self.vision = VisionService(settings)
 
     def run_one(self) -> bool:
         exhausted = self.repository.fail_exhausted_pending_jobs(max_attempts=self.settings.worker_max_attempts)
@@ -34,17 +42,29 @@ class Worker:
         if job is None:
             return False
         try:
-            if job.material_id is None:
+            if job.material_id is None and job.kind != "shadowing":
                 raise RuntimeError("P1 worker job 缺少 material_id。")
-            self.repository.mark_material_processing(job.material_id)
+            if job.material_id is not None:
+                self.repository.mark_material_processing(job.material_id)
             if job.kind == "fetch":
                 self._fetch(job)
             elif job.kind == "tts":
                 self._synthesize(job)
+            elif job.kind == "asr":
+                self._align_asr(job)
+            elif job.kind == "shadowing":
+                self._score_shadowing(job)
+            elif job.kind == "transcode":
+                self._transcode_video(job)
+            elif job.kind == "vision":
+                self._extract_photo(job)
             else:
                 raise RuntimeError(f"P1 不支持的任务类型: {job.kind}")
         except Exception as error:  # The error must be persisted for the ingest UI and diagnostics.
-            self.repository.mark_job_failed(job.id, job.material_id, str(error))
+            # P2 ASR improves P1's estimated sentence timing. If recognition
+            # fails, retain the already playable sentence-level material and
+            # only record the diagnostic on its own job.
+            self.repository.mark_job_failed(job.id, None if job.kind == "asr" else job.material_id, str(error))
             print(f"job={job.id} failed: {error}", flush=True)
         else:
             self.repository.mark_job_done(job.id)
@@ -84,6 +104,74 @@ class Worker:
             duration_ms=duration_ms,
             segments=estimated_segments(source_text, duration_ms),
         )
+        self.repository.enqueue_job(
+            kind="asr",
+            material_id=job.material_id,
+            payload={"text": source_text, "audio_url": self.storage.public_url(oss_key)},
+        )
+
+    def _align_asr(self, job: Job) -> None:
+        source_text = str(job.payload.get("text", "")).strip()
+        audio_url = str(job.payload.get("audio_url", "")).strip()
+        if not source_text or not audio_url:
+            raise RuntimeError("asr 任务缺少原文或音频 URL。")
+        assert job.material_id is not None
+        alignment = align_words_to_source(source_text, self.asr.transcribe_words(audio_url))
+        if alignment.coverage < 0.6:
+            print(
+                f"job={job.id} ASR 对齐覆盖率 {alignment.coverage:.0%}，保留 P1 句级估算时间轴。",
+                flush=True,
+            )
+            return
+        self.repository.replace_tokens(
+            job.material_id,
+            [
+                {
+                    "segment_idx": token.segment_idx,
+                    "idx": token.idx,
+                    "surface": token.surface,
+                    "start_ms": token.start_ms,
+                    "end_ms": token.end_ms,
+                }
+                for token in alignment.tokens
+            ],
+        )
+
+    def _score_shadowing(self, job: Job) -> None:
+        attempt_id = int(job.payload.get("attempt_id", 0))
+        segment_id = int(job.payload.get("segment_id", 0))
+        audio_path = Path(str(job.payload.get("audio_path", "")))
+        segment = self.repository.get_segment(segment_id)
+        if not attempt_id or segment is None or not audio_path.exists():
+            raise RuntimeError("shadowing 任务缺少录音或原句。")
+        oss_key = f"shadowing/{attempt_id}/{audio_path.name}"
+        self.storage.upload_audio(audio_path, oss_key)
+        words = self.asr.transcribe_words(self.storage.public_url(oss_key))
+        transcript = "".join(word.text for word in words)
+        score, diff = score_transcript(str(segment["text_ja"]), transcript)
+        self.repository.complete_shadowing_attempt(attempt_id, transcript, diff, score)
+
+    def _transcode_video(self, job: Job) -> None:
+        source = Path(str(job.payload.get("source_path", "")))
+        if not source.exists() or job.material_id is None:
+            raise RuntimeError("transcode 任务缺少本地视频文件。")
+        output_dir = self.settings.data_dir / "video" / f"material-{job.material_id}"
+        delivery = output_dir / "delivery-720p.mp4"
+        audio = output_dir / "audio.m4a"
+        self.video.transcode_delivery(source, delivery)
+        self.video.extract_audio(source, audio)
+        self.repository.enqueue_job(
+            kind="upload_video",
+            material_id=job.material_id,
+            payload={"delivery_path": str(delivery), "audio_path": str(audio)},
+        )
+
+    def _extract_photo(self, job: Job) -> None:
+        image_path = Path(str(job.payload.get("image_path", "")))
+        if job.material_id is None or not image_path.exists():
+            raise RuntimeError("vision 任务缺少照片文件。")
+        text = self.vision.extract_japanese(image_path)
+        self.repository.enqueue_job(kind="tts", material_id=job.material_id, payload={"text": text})
 
 
 def extract_article(url: str) -> tuple[str | None, str]:
