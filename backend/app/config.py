@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = 2.0
     worker_stale_running_seconds: int = 900
     worker_max_attempts: int = 3
+    max_video_upload_bytes: int = 2_000_000_000
+    min_free_disk_bytes: int = 5_000_000_000
     data_dir: Path = ROOT_DIR / "backend" / "data"
 
     @property

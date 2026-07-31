@@ -56,7 +56,7 @@ if [[ -f "$RUN_DIR/api.pid" ]] && kill -0 "$(cat "$RUN_DIR/api.pid")" 2>/dev/nul
 fi
 
 cd "$ROOT_DIR/backend"
-nohup "$VENV_PYTHON" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 >"$RUN_DIR/api.log" 2>&1 &
+nohup "$VENV_PYTHON" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 >"$RUN_DIR/api.log" 2>&1 &
 echo $! >"$RUN_DIR/api.pid"
 nohup "$VENV_PYTHON" -m app.worker >"$RUN_DIR/worker.log" 2>&1 &
 echo $! >"$RUN_DIR/worker.pid"

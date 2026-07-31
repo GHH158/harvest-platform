@@ -32,6 +32,20 @@ struct APIClient {
         try await post("chat", body: ["session_id": sessionID, "message": message])
     }
 
+    func companion(materialID: Int) async throws -> [ConversationMessage] {
+        try await get("companion/\(materialID)")
+    }
+
+    func sendCompanion(materialID: Int, segmentID: Int, question: String) async throws -> ChatReply {
+        var request = URLRequest(url: baseURL.appending(path: "companion"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "material_id": materialID, "segment_id": segmentID, "question": question,
+        ])
+        return try await send(request)
+    }
+
     func uploadShadowing(segmentID: Int, audioURL: URL) async throws -> ShadowingSubmission {
         let boundary = "Harvest-\(UUID().uuidString)"
         var request = URLRequest(url: baseURL.appending(path: "shadowing"))
@@ -50,7 +64,9 @@ struct APIClient {
         try await get("shadowing/\(id)")
     }
 
-    func uploadPhoto(_ photoURL: URL) async throws -> ShadowingSubmission {
+    func job(id: Int) async throws -> JobStatus { try await get("jobs/\(id)") }
+
+    func uploadPhoto(_ photoURL: URL) async throws -> MaterialSubmission {
         try await uploadFile(path: "photos", field: "photo", fileURL: photoURL)
     }
 

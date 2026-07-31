@@ -81,3 +81,73 @@ def test_recovery_attempt_limit_and_repeated_completion_are_safe() -> None:
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM material WHERE id = :material_id"), {"material_id": material_id})
         engine.dispose()
+
+
+@pytest.mark.integration
+def test_enhancement_and_shadowing_exhaustion_preserve_consumer_state() -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    material_id, tts_job_id = repository.create_material_with_job(
+        title="state machine integration test",
+        source_type="paste",
+        source_ref=None,
+        job_kind="tts",
+        payload={"text": "雨です。"},
+    )
+    segments = [{"idx": 0, "text_ja": "雨です。", "start_ms": 0, "end_ms": 1_000}]
+    shadowing_job_id: int | None = None
+
+    try:
+        repository.complete_reading(
+            material_id=material_id,
+            local_path="/tmp/state-machine.mp3",
+            oss_key="materials/test/state-machine.mp3",
+            bytes_count=100,
+            duration_ms=1_000,
+            segments=segments,
+        )
+        asr_job_id = repository.enqueue_job(
+            kind="asr",
+            material_id=material_id,
+            payload={"text": "雨です。", "audio_url": "https://example.com/reading.mp3"},
+        )
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE job SET status = 'pending', attempts = 3 WHERE id = :job_id"),
+                {"job_id": asr_job_id},
+            )
+        assert repository.fail_exhausted_pending_jobs(max_attempts=3) == 1
+        assert repository.get_job(asr_job_id)["status"] == "failed"
+        assert repository.get_material(material_id)["status"] == "ready"
+
+        segment_id = repository.get_segments(material_id)[0]["id"]
+        attempt_id = repository.create_shadowing_attempt(segment_id, "/tmp/shadowing.m4a")
+        shadowing_job_id = repository.enqueue_job(
+            kind="shadowing",
+            material_id=None,
+            payload={"attempt_id": attempt_id, "segment_id": segment_id, "audio_path": "/tmp/shadowing.m4a"},
+        )
+        repository.attach_shadowing_job(attempt_id, shadowing_job_id)
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE job SET status = 'pending', attempts = 3 WHERE id = :job_id"),
+                {"job_id": shadowing_job_id},
+            )
+        assert repository.fail_exhausted_pending_jobs(max_attempts=3) == 1
+        attempt = repository.get_shadowing_attempt(attempt_id)
+        assert attempt is not None
+        assert attempt["status"] == "failed"
+        assert attempt["job_id"] == shadowing_job_id
+        assert repository.get_material(material_id)["status"] == "ready"
+    finally:
+        with engine.begin() as connection:
+            if shadowing_job_id is not None:
+                connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": shadowing_job_id})
+            connection.execute(text("DELETE FROM material WHERE id = :material_id"), {"material_id": material_id})
+            connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": tts_job_id})
+        engine.dispose()

@@ -427,7 +427,7 @@ CREATE TABLE media_asset (
 -- 任务队列
 CREATE TABLE job (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    kind          TEXT NOT NULL,        -- fetch|transcode|tts|asr|translate|upload
+    kind          TEXT NOT NULL,        -- fetch|tts|asr|vision|transcode|upload_video|asr_video|translate_video|shadowing
     material_id   BIGINT REFERENCES material(id) ON DELETE CASCADE,
     status        TEXT NOT NULL,        -- pending|running|done|failed
     payload       JSONB,
@@ -468,6 +468,9 @@ CREATE TABLE shadowing_attempt (
     asr_text      TEXT,
     diff_json     JSONB,                -- 逐词比对结果
     score         REAL,                 -- 命中率
+    job_id        BIGINT REFERENCES job(id) ON DELETE SET NULL,
+    status        TEXT NOT NULL DEFAULT 'pending', -- pending|processing|ready|failed
+    error_message TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -491,6 +494,8 @@ CREATE TABLE voice_profile (
 - **枚举字段一律用 TEXT,不加 CHECK 约束** —— 新增类型时不用改表结构
 - **`media_asset.purpose` 区分归档与分发**:原始高码率文件留在 Mac(`archive`),转码后的小文件上传 OSS(`delivery`)
 - **`companion_message` 与 `chat_message` 完全分离**,不共享上下文。陪读是"这句什么意思",聊天是"聊聊今天吃了什么",混在一起会四不像
+- **`material.status` 只表达用户是否能消费材料**,不表达所有后台增强任务是否都成功:`ready` 表示主媒体与句级时间轴已可用;P2 ASR 这类增强任务失败或低覆盖率时,只把对应 `job` 记为 `failed` / `done`,不得把材料从 `ready` 降级
+- **异步子流程必须有自己的状态与错误字段**:`job` 表达后台任务状态;`shadowing_attempt` 表达一次跟读提交的状态。客户端不得通过“结果字段是否为空”猜测任务是否结束
 
 ---
 
@@ -502,10 +507,10 @@ CREATE TABLE voice_profile (
 ① 用户在 Mac 网页粘贴文本 / 输入链接
 ② Worker:抓取正文(如为链接)
 ③ Worker:调用 Qwen-Audio-3.0-TTS-Plus(指定克隆音色)→ 音频
-④ Worker:音频存本地 + 上传 OSS
-⑤ Worker:调用 Fun-ASR(日语,开词语级时间戳)→ 词级时间戳
-⑥ Worker:对齐 ASR 结果与原文,写入 segment / token
-⑦ material.status = ready
+④ Worker:音频存本地 + 上传 OSS,写入句级估算时间轴
+⑤ material.status = ready,此时 iPhone 已可播放
+⑥ Worker:另起增强型 ASR job(日语,开词语级时间戳)→ 词级时间戳
+⑦ Worker:对齐 ASR 结果与原文,成功则写入 token;失败或低覆盖率则保留句级估算时间轴和 `ready`
 ⑧ iPhone 拉取 → 播放音频(OSS)+ 逐字高亮
 ```
 
@@ -549,6 +554,24 @@ iPhone:用户点击某个词 / 某一句,或直接提问
 ```
 
 **上下文范围要克制**:传整篇文章会浪费 token 且效果未必更好。默认传当前句 + 前后各 2 句。
+
+### 5.5 Job 与可消费状态规则
+
+`job.status` 只描述单个任务;`material.status` 描述整份材料能否被用户打开。每个 job 的前置、成功、失败和下一阶段固定如下:
+
+| Job | 执行时材料状态 | 成功 | 失败 | 下一阶段 |
+|---|---|---|---|---|
+| `fetch` | `processing` | 保持 `processing` | 材料 `failed` | `tts` |
+| `tts` | `processing` | 阅读材料 `ready` | 材料 `failed` | 增强型 `asr` |
+| `asr` | **保持 `ready`** | 写入 token;低覆盖率也以 job `done` 收敛 | 只把 job 记为 `failed`,材料仍 `ready` | 无 |
+| `vision` | `processing` | 保持 `processing` | 材料 `failed` | `tts` |
+| `transcode` | `processing` | 保持 `processing` | 材料 `failed` | `upload_video` |
+| `upload_video` | `processing` | 保存归档/分发资产,保持 `processing` | 材料 `failed` | `asr_video` |
+| `asr_video` | `processing` | 写入日文字幕,保持 `processing` | 材料 `failed` | `translate_video` |
+| `translate_video` | `processing` | 写入中文字幕,材料 `ready` | 材料 `failed` | 无 |
+| `shadowing` | **不改变材料状态**;attempt `processing` | attempt `ready` | attempt `failed` | 无 |
+
+Worker 意外中断时可把未耗尽重试次数的 job 重新排队;重试耗尽后按上表失败规则收敛。增强型 `asr` 和 `shadowing` 的失败不能影响已可消费材料。每条跨阶段流水线必须有自动化状态机测试。
 
 ---
 
@@ -721,6 +744,8 @@ iPhone:用户点击某个词 / 某一句,或直接提问
 
 **不做开机自启、不做定时备份。** Mac 重启后手动跑一次 `start.sh`(会顺带把 Postgres 一起唤醒)。
 
+FastAPI 只监听 `127.0.0.1:8000`,由 Tailscale Serve 把控制面暴露到私有 Tailnet;不得监听 `0.0.0.0` 让局域网设备绕过 Tailscale。视频上传采用流式落盘,默认最大 2 GB,并始终为本机保留至少 5 GB 可用空间;阈值可用 `MAX_VIDEO_UPLOAD_BYTES` / `MIN_FREE_DISK_BYTES` 调整。
+
 ---
 
 ## 8. 风险与遗留问题
@@ -759,3 +784,4 @@ iPhone:用户点击某个词 / 某一句,或直接提问
 | 2026-07-30 | 确定项目名为 **Harvest**。新增 §1.5 视觉与交互风格,把"Claude 风格"翻译为具体的色彩/排版/布局判断,要求 P1 起就按此风格实施,不留到后期补 |
 | 2026-07-30 | 修正 §6.2 P1 后端首条笔误:「SQLite 建表」改为「PostgreSQL 建表」,与 §3.5 / §4.2 / §7.4 及此前数据库选型变更一致 |
 | 2026-07-30 | §7.2 增补与 §2.5 的关系:云依赖阶段分「闸 A 代码与本地骨架 / 闸 B 云链路实调」,避免为验收提前消耗免费额度窗口 |
+| 2026-07-31 | 修订 §4.2、§4.3、§5.1,新增 §5.5:明确 `material.status` 是用户可消费状态,增强型 ASR 不得降低 `ready`;补齐跟读异步状态字段、各 job 的前置/成功/失败/下一阶段规则,并在 §7.4 固化 Tailscale 绑定与视频上传限制 |

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -12,9 +13,10 @@ from mutagen import File as MutagenFile
 from trafilatura.metadata import extract_metadata
 
 from .alignment import align_words_to_source
-from .asr import ASRService
+from .asr import ASRService, RecognizedWord
 from .config import Settings, get_settings
 from .db import make_engine
+from .llm import LLMService
 from .repository import Job, Repository
 from .shadowing import score_transcript
 from .storage import ObjectStorage
@@ -22,6 +24,8 @@ from .text import estimated_segments
 from .tts import TTSService
 from .video import VideoProcessor
 from .vision import VisionService
+
+ENHANCEMENT_JOB_KINDS = {"asr"}
 
 
 class Worker:
@@ -33,6 +37,7 @@ class Worker:
         self.storage = ObjectStorage(settings)
         self.video = VideoProcessor()
         self.vision = VisionService(settings)
+        self.llm = LLMService(settings)
 
     def run_one(self) -> bool:
         exhausted = self.repository.fail_exhausted_pending_jobs(max_attempts=self.settings.worker_max_attempts)
@@ -44,7 +49,7 @@ class Worker:
         try:
             if job.material_id is None and job.kind != "shadowing":
                 raise RuntimeError("P1 worker job 缺少 material_id。")
-            if job.material_id is not None:
+            if job.material_id is not None and job.kind not in ENHANCEMENT_JOB_KINDS:
                 self.repository.mark_material_processing(job.material_id)
             if job.kind == "fetch":
                 self._fetch(job)
@@ -58,13 +63,21 @@ class Worker:
                 self._transcode_video(job)
             elif job.kind == "vision":
                 self._extract_photo(job)
+            elif job.kind == "upload_video":
+                self._upload_video(job)
+            elif job.kind == "asr_video":
+                self._transcribe_video(job)
+            elif job.kind == "translate_video":
+                self._translate_video(job)
             else:
-                raise RuntimeError(f"P1 不支持的任务类型: {job.kind}")
+                raise RuntimeError(f"不支持的任务类型: {job.kind}")
         except Exception as error:  # The error must be persisted for the ingest UI and diagnostics.
             # P2 ASR improves P1's estimated sentence timing. If recognition
             # fails, retain the already playable sentence-level material and
             # only record the diagnostic on its own job.
             self.repository.mark_job_failed(job.id, None if job.kind == "asr" else job.material_id, str(error))
+            if job.kind == "shadowing":
+                self.repository.fail_shadowing_attempt(int(job.payload.get("attempt_id", 0)), str(error))
             print(f"job={job.id} failed: {error}", flush=True)
         else:
             self.repository.mark_job_done(job.id)
@@ -163,7 +176,7 @@ class Worker:
         self.repository.enqueue_job(
             kind="upload_video",
             material_id=job.material_id,
-            payload={"delivery_path": str(delivery), "audio_path": str(audio)},
+            payload={"source_path": str(source), "delivery_path": str(delivery), "audio_path": str(audio)},
         )
 
     def _extract_photo(self, job: Job) -> None:
@@ -172,6 +185,88 @@ class Worker:
             raise RuntimeError("vision 任务缺少照片文件。")
         text = self.vision.extract_japanese(image_path)
         self.repository.enqueue_job(kind="tts", material_id=job.material_id, payload={"text": text})
+
+    def _upload_video(self, job: Job) -> None:
+        assert job.material_id is not None
+        delivery = Path(str(job.payload.get("delivery_path", "")))
+        audio = Path(str(job.payload.get("audio_path", "")))
+        source = Path(str(job.payload.get("source_path", "")))
+        if not source.exists() or not delivery.exists() or not audio.exists():
+            raise RuntimeError("upload_video 任务缺少转码文件。")
+        video_key = f"materials/{job.material_id}/video-720p.mp4"
+        audio_key = f"materials/{job.material_id}/video-audio.m4a"
+        self.storage.upload_audio(delivery, video_key)
+        self.storage.upload_audio(audio, audio_key)
+        self.repository.store_video_assets(
+            material_id=job.material_id,
+            source_path=str(source),
+            video_path=str(delivery),
+            audio_path=str(audio),
+            video_key=video_key,
+            audio_key=audio_key,
+        )
+        self.repository.enqueue_job(
+            kind="asr_video",
+            material_id=job.material_id,
+            payload={"audio_url": self.storage.public_url(audio_key)},
+        )
+
+    def _transcribe_video(self, job: Job) -> None:
+        assert job.material_id is not None
+        audio_url = str(job.payload.get("audio_url", ""))
+        if not audio_url:
+            raise RuntimeError("asr_video 任务缺少音频 URL。")
+        words = self.asr.transcribe_words(audio_url)
+        segments: list[dict[str, int | str]] = []
+        current: list[RecognizedWord] = []
+        for word in words:
+            current.append(word)
+            if any(mark in word.text for mark in "。！？!?"):
+                segments.append(
+                    {
+                        "idx": len(segments),
+                        "text_ja": "".join(item.text for item in current),
+                        "start_ms": current[0].start_ms,
+                        "end_ms": current[-1].end_ms,
+                    }
+                )
+                current = []
+        if current:
+            segments.append(
+                {
+                    "idx": len(segments),
+                    "text_ja": "".join(item.text for item in current),
+                    "start_ms": current[0].start_ms,
+                    "end_ms": current[-1].end_ms,
+                }
+            )
+        if not segments:
+            raise RuntimeError("视频 ASR 未返回字幕。")
+        self.repository.replace_video_segments(job.material_id, segments)
+        self.repository.enqueue_job(
+            kind="translate_video",
+            material_id=job.material_id,
+            payload={"sentences": [item["text_ja"] for item in segments]},
+        )
+
+    def _translate_video(self, job: Job) -> None:
+        assert job.material_id is not None
+        sentences = [str(item) for item in job.payload.get("sentences", [])]
+        if not sentences:
+            raise RuntimeError("translate_video 任务缺少字幕。")
+        answer = self.llm.reply(
+            [
+                {
+                    "role": "system",
+                    "content": "把日语字幕逐条翻译为简洁中文，只返回 JSON 字符串数组，数量和顺序不变。",
+                },
+                {"role": "user", "content": json.dumps(sentences, ensure_ascii=False)},
+            ]
+        )
+        translations = json.loads(answer)
+        if not isinstance(translations, list) or len(translations) != len(sentences):
+            raise RuntimeError("字幕翻译返回数量不匹配。")
+        self.repository.complete_video_translation(job.material_id, [str(item) for item in translations])
 
 
 def extract_article(url: str) -> tuple[str | None, str]:

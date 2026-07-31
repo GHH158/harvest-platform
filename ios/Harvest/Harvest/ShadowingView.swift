@@ -53,6 +53,16 @@ struct ShadowingView: View {
     }
     @MainActor private func upload(_ url: URL) async {
         guard let endpoint = configuration.endpoint else { return }; isUploading = true; defer { isUploading = false }
-        do { let submission = try await APIClient(baseURL: endpoint).uploadShadowing(segmentID: segment.id, audioURL: url); attempt = try await APIClient(baseURL: endpoint).shadowing(id: submission.attemptID) } catch { errorMessage = error.localizedDescription }
+        do {
+            let client = APIClient(baseURL: endpoint)
+            let submission = try await client.uploadShadowing(segmentID: segment.id, audioURL: url)
+            while true {
+                let job = try await client.job(id: submission.jobID)
+                attempt = try await client.shadowing(id: submission.attemptID)
+                if job.status == "done" || job.status == "failed" { break }
+                try await Task.sleep(for: .seconds(2))
+            }
+            errorMessage = attempt?.errorMessage
+        } catch { errorMessage = error.localizedDescription }
     }
 }

@@ -18,6 +18,7 @@
     <label>聊天兼容接口<input name="DASHSCOPE_CHAT_BASE_URL" value="{{ values.DASHSCOPE_CHAT_BASE_URL }}"></label>
     <label>聊天模型<input name="DASHSCOPE_CHAT_MODEL" value="{{ values.DASHSCOPE_CHAT_MODEL }}"></label>
     <label>语音聊天模型<input name="DASHSCOPE_OMNI_MODEL" value="{{ values.DASHSCOPE_OMNI_MODEL }}"></label>
+    <label>视觉模型<input name="DASHSCOPE_VL_MODEL" value="{{ values.DASHSCOPE_VL_MODEL }}"></label>
     <h2>DeepSeek（百炼额度耗尽后的备用）</h2>
     <label>DeepSeek API Key（已配置：{{ "是" if status.DEEPSEEK_API_KEY else "否" }}）<input type="password" name="DEEPSEEK_API_KEY" placeholder="留空则保持现有值"></label>
     <label>DeepSeek 服务地址<input name="DEEPSEEK_BASE_URL" value="{{ values.DEEPSEEK_BASE_URL }}"></label>
@@ -27,6 +28,9 @@
     <label>Access Key ID（已配置：{{ "是" if status.OSS_ACCESS_KEY_ID else "否" }}）<input type="password" name="OSS_ACCESS_KEY_ID" placeholder="留空则保持现有值"></label>
     <label>Access Key Secret（已配置：{{ "是" if status.OSS_ACCESS_KEY_SECRET else "否" }}）<input type="password" name="OSS_ACCESS_KEY_SECRET" placeholder="留空则保持现有值"></label>
     <label>公网访问前缀<input name="OSS_PUBLIC_BASE_URL" value="{{ values.OSS_PUBLIC_BASE_URL }}"></label>
+    <h2>本地视频保护</h2>
+    <label>单个视频最大字节数<input type="number" min="1" name="MAX_VIDEO_UPLOAD_BYTES" value="{{ values.MAX_VIDEO_UPLOAD_BYTES }}"></label>
+    <label>磁盘保留字节数<input type="number" min="0" name="MIN_FREE_DISK_BYTES" value="{{ values.MIN_FREE_DISK_BYTES }}"></label>
     <button type="submit">保存本机设置</button>
   </form>
 </main></body></html>

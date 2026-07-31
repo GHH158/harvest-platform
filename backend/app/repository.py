@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Engine, text
@@ -303,20 +304,32 @@ class Repository:
             rows = connection.execute(
                 text(
                     """
-                    WITH exhausted AS (
-                        UPDATE job
-                        SET status = 'failed', error_message = :message
-                        WHERE status = 'pending' AND attempts >= :max_attempts
-                        RETURNING material_id
-                    )
-                    UPDATE material
+                    UPDATE job
                     SET status = 'failed', error_message = :message
-                    WHERE id IN (SELECT material_id FROM exhausted WHERE material_id IS NOT NULL)
-                    RETURNING id
+                    WHERE status = 'pending' AND attempts >= :max_attempts
+                    RETURNING material_id, kind, payload
                     """
                 ),
                 {"max_attempts": max_attempts, "message": message},
-            ).all()
+            ).mappings().all()
+            for row in rows:
+                material_id = row["material_id"]
+                if material_id is not None and row["kind"] != "asr":
+                    connection.execute(
+                        text("UPDATE material SET status = 'failed', error_message = :message WHERE id = :material_id"),
+                        {"material_id": material_id, "message": message},
+                    )
+                if row["kind"] == "shadowing":
+                    attempt_id = int((row["payload"] or {}).get("attempt_id", 0))
+                    if attempt_id:
+                        connection.execute(
+                            text(
+                                """UPDATE shadowing_attempt
+                                SET status = 'failed', error_message = :message
+                                WHERE id = :attempt_id"""
+                            ),
+                            {"attempt_id": attempt_id, "message": message},
+                        )
         return len(rows)
 
     def enqueue_job(self, *, kind: str, material_id: int | None, payload: dict[str, Any]) -> int:
@@ -356,7 +369,8 @@ class Repository:
         with self.engine.begin() as connection:
             connection.execute(
                 text("""UPDATE shadowing_attempt SET asr_text = :transcript,
-                    diff_json = CAST(:diff AS JSONB), score = :score WHERE id = :attempt_id"""),
+                    diff_json = CAST(:diff AS JSONB), score = :score, status = 'ready', error_message = NULL
+                    WHERE id = :attempt_id"""),
                 {"attempt_id": attempt_id, "transcript": transcript, "diff": json.dumps(diff, ensure_ascii=False),
                  "score": score},
             )
@@ -367,6 +381,27 @@ class Repository:
                 text("SELECT * FROM shadowing_attempt WHERE id = :attempt_id"), {"attempt_id": attempt_id}
             ).mappings().first()
         return dict(row) if row else None
+
+    def attach_shadowing_job(self, attempt_id: int, job_id: int) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE shadowing_attempt SET job_id = :job_id, status = 'processing' WHERE id = :attempt_id"),
+                {"attempt_id": attempt_id, "job_id": job_id},
+            )
+
+    def update_shadowing_audio_path(self, attempt_id: int, audio_path: str) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE shadowing_attempt SET audio_path = :audio_path WHERE id = :attempt_id"),
+                {"attempt_id": attempt_id, "audio_path": audio_path},
+            )
+
+    def fail_shadowing_attempt(self, attempt_id: int, message: str) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE shadowing_attempt SET status = 'failed', error_message = :message WHERE id = :attempt_id"),
+                {"attempt_id": attempt_id, "message": message},
+            )
 
     def update_material_title(self, material_id: int, title: str) -> None:
         with self.engine.begin() as connection:
@@ -466,6 +501,66 @@ class Repository:
                     UPDATE material SET status = 'ready', duration_ms = :duration_ms, error_message = NULL
                     WHERE id = :material_id
                     """
+                ),
+                {"material_id": material_id, "duration_ms": duration_ms},
+            )
+
+    def store_video_assets(
+        self, *, material_id: int, source_path: str, video_path: str, audio_path: str, video_key: str, audio_key: str
+    ) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM media_asset WHERE material_id = :material_id"),
+                {"material_id": material_id},
+            )
+            connection.execute(
+                text("""INSERT INTO media_asset (material_id, kind, purpose, local_path, bytes)
+                VALUES (:material_id, 'video', 'archive', :local_path, :bytes)"""),
+                {"material_id": material_id, "local_path": source_path, "bytes": Path(source_path).stat().st_size},
+            )
+            for kind, local_path, oss_key in (
+                ("video", video_path, video_key),
+                ("audio", audio_path, audio_key),
+            ):
+                connection.execute(
+                    text("""INSERT INTO media_asset (material_id, kind, purpose, local_path, oss_key, bytes)
+                    VALUES (:material_id, :kind, 'delivery', :local_path, :oss_key, :bytes)"""),
+                    {
+                        "material_id": material_id,
+                        "kind": kind,
+                        "local_path": local_path,
+                        "oss_key": oss_key,
+                        "bytes": Path(local_path).stat().st_size,
+                    },
+                )
+
+    def replace_video_segments(self, material_id: int, segments: list[dict[str, Any]]) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM segment WHERE material_id = :material_id"),
+                {"material_id": material_id},
+            )
+            for segment in segments:
+                connection.execute(
+                    text("""INSERT INTO segment (material_id, idx, text_ja, start_ms, end_ms)
+                    VALUES (:material_id, :idx, :text_ja, :start_ms, :end_ms)"""),
+                    {"material_id": material_id, **segment},
+                )
+
+    def complete_video_translation(self, material_id: int, translations: list[str]) -> None:
+        with self.engine.begin() as connection:
+            for idx, translation in enumerate(translations):
+                connection.execute(
+                    text("UPDATE segment SET text_zh = :text_zh WHERE material_id = :material_id AND idx = :idx"),
+                    {"material_id": material_id, "idx": idx, "text_zh": translation},
+                )
+            duration_ms = connection.execute(
+                text("SELECT max(end_ms) FROM segment WHERE material_id = :material_id"), {"material_id": material_id}
+            ).scalar_one_or_none()
+            connection.execute(
+                text(
+                    """UPDATE material SET status = 'ready', duration_ms = :duration_ms, error_message = NULL
+                    WHERE id = :material_id"""
                 ),
                 {"material_id": material_id, "duration_ms": duration_ms},
             )

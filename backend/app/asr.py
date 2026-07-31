@@ -81,7 +81,7 @@ def parse_words(payload: dict[str, Any]) -> list[RecognizedWord]:
     for transcript in payload.get("transcripts", []):
         for sentence in transcript.get("sentences", []):
             for word in sentence.get("words", []):
-                value = str(word.get("text", "")).strip()
+                value = f"{str(word.get('text', '')).strip()}{str(word.get('punctuation', '')).strip()}"
                 if not value:
                     continue
                 start_ms = int(word.get("begin_time", 0))

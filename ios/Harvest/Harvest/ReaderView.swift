@@ -12,7 +12,20 @@ struct ReaderView: View {
     @State private var isLoading = true
     @State private var downloadError: String?
     @State private var isDownloading = false
+    private let startsOffline: Bool
     private let statusRefresh = Timer.publish(every: 4, on: .main, in: .common).autoconnect()
+
+    init(materialID: Int) {
+        self.materialID = materialID
+        startsOffline = false
+    }
+
+    init(offlineEntry: OfflineEntry) {
+        materialID = offlineEntry.id
+        startsOffline = true
+        _material = State(initialValue: offlineEntry.material)
+        _isLoading = State(initialValue: false)
+    }
 
     var body: some View {
         Group {
@@ -32,7 +45,7 @@ struct ReaderView: View {
             }
         }
         .background(DesignTokens.canvas.ignoresSafeArea())
-        .task { await load() }
+        .task { if !startsOffline { await load() } }
         .onReceive(statusRefresh) { _ in
             guard let material, material.status != "ready", material.status != "failed" else { return }
             Task { await load(showingProgress: false) }
@@ -84,9 +97,12 @@ struct ReaderView: View {
                         Spacer()
                     }
                     if let current = currentSegment(in: material) {
-                        NavigationLink("跟读这一句") { ShadowingView(segment: current) }
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(DesignTokens.accent)
+                        HStack(spacing: 18) {
+                            NavigationLink("问这一句") { CompanionView(materialID: material.id, segment: current) }
+                            NavigationLink("跟读这一句") { ShadowingView(segment: current) }
+                        }
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(DesignTokens.accent)
                     }
                     if let downloadError {
                         Text(downloadError)

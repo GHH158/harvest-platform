@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import shutil
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import text
+from sqlalchemy import Engine
 
 from .config import ROOT_DIR, get_settings
 from .db import apply_schema, make_engine
@@ -67,10 +69,24 @@ def serialise_material(material: dict) -> dict:
     return material
 
 
+_engine: Engine | None = None
+_repository: Repository | None = None
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    apply_schema(make_engine())
-    yield
+    global _engine, _repository
+    engine = make_engine()
+    try:
+        apply_schema(engine)
+        _engine = engine
+        _repository = Repository(engine)
+        yield
+    finally:
+        engine.dispose()
+        if _engine is engine:
+            _engine = None
+            _repository = None
 
 
 app = FastAPI(title="Harvest", version="0.1.0", lifespan=lifespan)
@@ -79,15 +95,18 @@ templates = Jinja2Templates(directory=ROOT_DIR / "backend" / "app" / "templates"
 
 
 def repository() -> Repository:
-    return Repository(make_engine())
+    if _repository is None:
+        raise RuntimeError("应用数据库尚未初始化。")
+    return _repository
 
 
 _SETTINGS_KEYS = (
     "DATABASE_URL", "DASHSCOPE_API_KEY", "DASHSCOPE_BASE_URL", "DASHSCOPE_TTS_MODEL",
     "DASHSCOPE_TTS_VOICE", "DASHSCOPE_ASR_MODEL", "DASHSCOPE_CHAT_BASE_URL",
-    "DASHSCOPE_CHAT_MODEL", "DASHSCOPE_OMNI_MODEL", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
+    "DASHSCOPE_CHAT_MODEL", "DASHSCOPE_OMNI_MODEL", "DASHSCOPE_VL_MODEL",
+    "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
     "DEEPSEEK_MODEL", "OSS_ENDPOINT", "OSS_BUCKET", "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET",
-    "OSS_PUBLIC_BASE_URL", "TAILSCALE_HOSTNAME",
+    "OSS_PUBLIC_BASE_URL", "TAILSCALE_HOSTNAME", "MAX_VIDEO_UPLOAD_BYTES", "MIN_FREE_DISK_BYTES",
 )
 _SECRET_KEYS = {"DATABASE_URL", "DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY", "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET"}
 
@@ -156,11 +175,18 @@ async def save_settings(request: Request) -> RedirectResponse:
 async def post_video(title: Annotated[str | None, Form()] = None, video: UploadFile = File()) -> dict[str, int | str]:
     if not video.filename:
         raise HTTPException(status_code=422, detail="请选择一个视频文件。")
-    suffix = Path(video.filename).suffix or ".mp4"
-    video_dir = get_settings().data_dir / "video" / "uploads"
+    if not (video.content_type or "").startswith("video/"):
+        raise HTTPException(status_code=415, detail="只接受视频文件。")
+    suffix = Path(video.filename).suffix.lower() or ".mp4"
+    if suffix not in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}:
+        raise HTTPException(status_code=415, detail="暂不支持这种视频格式。")
+    settings = get_settings()
+    video_dir = settings.data_dir / "video" / "uploads"
     video_dir.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(video_dir).free < settings.min_free_disk_bytes:
+        raise HTTPException(status_code=507, detail="本机磁盘空间不足，暂不能接收视频。")
     destination = video_dir / f"upload-{int(time.time() * 1000)}{suffix}"
-    destination.write_bytes(await video.read())
+    await save_upload_stream(video, destination, settings.max_video_upload_bytes, settings.min_free_disk_bytes)
     material_id, job_id = repository().create_material_with_job(
         kind="video", title=(title or "").strip() or Path(video.filename).stem,
         source_type="file", source_ref=video.filename, job_kind="transcode", payload={"source_path": str(destination)},
@@ -250,10 +276,12 @@ def post_companion(payload: CompanionRequest) -> dict:
         raise HTTPException(status_code=404, detail="该材料中不存在这句话。")
     user = repo.add_companion_message(payload.material_id, payload.segment_id, "user", payload.question.strip())
     context_text = "\n".join(f"{item['idx'] + 1}. {item['text_ja']}" for item in context) or "（未指定句子）"
-    messages = [
+    messages: list[dict[str, str]] = [
         {"role": "system", "content": "你是克制、耐心的日语陪读老师。用中文解释，必要时给简短日语例句。"},
-        {"role": "user", "content": f"阅读上下文：\n{context_text}\n\n问题：{payload.question.strip()}"},
     ]
+    history = repo.companion_messages(payload.material_id)[-12:-1]
+    messages.extend({"role": item["role"], "content": item["content"]} for item in history)
+    messages.append({"role": "user", "content": f"阅读上下文：\n{context_text}\n\n问题：{payload.question.strip()}"})
     try:
         answer = LLMService(get_settings()).reply(messages)
     except Exception as error:
@@ -294,16 +322,30 @@ async def post_shadowing(segment_id: int = Form(), audio: UploadFile = File()) -
     attempt_id = repo.create_shadowing_attempt(segment_id, str(placeholder))
     destination = shadow_dir / f"attempt-{attempt_id}{suffix}"
     destination.write_bytes(await audio.read())
-    with repository().engine.begin() as connection:
-        connection.execute(
-            text("UPDATE shadowing_attempt SET audio_path = :path WHERE id = :id"),
-            {"path": str(destination), "id": attempt_id},
-        )
+    repo.update_shadowing_audio_path(attempt_id, str(destination))
     job_id = repo.enqueue_job(
         kind="shadowing", material_id=None,
         payload={"attempt_id": attempt_id, "segment_id": segment_id, "audio_path": str(destination)},
     )
+    repo.attach_shadowing_job(attempt_id, job_id)
     return {"attempt_id": attempt_id, "job_id": job_id, "status": "pending"}
+
+
+async def save_upload_stream(upload: UploadFile, destination: Path, max_bytes: int, min_free_bytes: int) -> None:
+    """Copy an upload incrementally while preserving a minimum free-space reserve."""
+    written = 0
+    try:
+        with destination.open("wb") as output:
+            while chunk := await upload.read(1024 * 1024):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(status_code=413, detail="视频超过允许的大小。")
+                if shutil.disk_usage(destination.parent).free - len(chunk) < min_free_bytes:
+                    raise HTTPException(status_code=507, detail="本机磁盘空间不足，上传已停止。")
+                await asyncio.to_thread(output.write, chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 @app.get("/shadowing/{attempt_id}")

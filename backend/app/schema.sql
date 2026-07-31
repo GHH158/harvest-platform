@@ -95,8 +95,14 @@ CREATE TABLE IF NOT EXISTS shadowing_attempt (
     asr_text      TEXT,
     diff_json     JSONB,
     score         REAL,
+    job_id        BIGINT REFERENCES job(id) ON DELETE SET NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE shadowing_attempt ADD COLUMN IF NOT EXISTS job_id BIGINT REFERENCES job(id) ON DELETE SET NULL;
+ALTER TABLE shadowing_attempt ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE shadowing_attempt ADD COLUMN IF NOT EXISTS error_message TEXT;
 
 CREATE TABLE IF NOT EXISTS voice_profile (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

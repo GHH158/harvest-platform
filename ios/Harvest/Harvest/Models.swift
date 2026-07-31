@@ -86,11 +86,27 @@ struct ShadowingAttempt: Codable {
     let asrText: String?
     let diff: [ShadowingUnit]?
     let score: Double?
+    let jobID: Int?
+    let status: String
+    let errorMessage: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, score
+        case id, score, status
         case asrText = "asr_text"
         case diff = "diff_json"
+        case jobID = "job_id"
+        case errorMessage = "error_message"
+    }
+}
+
+struct JobStatus: Codable {
+    let id: Int
+    let status: String
+    let errorMessage: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, status
+        case errorMessage = "error_message"
     }
 }
 
@@ -101,6 +117,18 @@ struct ShadowingSubmission: Codable {
     enum CodingKeys: String, CodingKey {
         case attemptID = "attempt_id"
         case jobID = "job_id"
+    }
+}
+
+struct MaterialSubmission: Codable {
+    let materialID: Int
+    let jobID: Int
+    let status: String
+
+    enum CodingKeys: String, CodingKey {
+        case materialID = "material_id"
+        case jobID = "job_id"
+        case status
     }
 }
 
