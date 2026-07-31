@@ -263,7 +263,7 @@ def test_video_pipeline_reaches_translation_completion(tmp_path: Path) -> None:
         {"idx": 0, "text_ja": "これは。", "start_ms": 0, "end_ms": 1_200}
     ]
     assert repository.video_translations == ["这是。"]
-    assert worker.storage.deleted_key.endswith("/temporary/asr-audio.m4a")  # type: ignore[attr-defined]
+    assert worker.storage.deleted_key == "temporary/materials/7/asr-audio.m4a"  # type: ignore[attr-defined]
 
 
 def test_shadowing_failure_sets_attempt_failure(tmp_path: Path) -> None:

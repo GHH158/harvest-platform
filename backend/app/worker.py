@@ -206,7 +206,7 @@ class Worker:
         audio_prefix = f"materials/{job.material_id}/hls/audio"
         video_playlist_key = f"{video_prefix}/index.m3u8"
         audio_playlist_key = f"{audio_prefix}/index.m3u8"
-        temporary_audio_key = f"materials/{job.material_id}/temporary/asr-audio.m4a"
+        temporary_audio_key = f"temporary/materials/{job.material_id}/asr-audio.m4a"
         self.storage.upload_tree(video_directory, video_prefix)
         self.storage.upload_tree(audio_directory, audio_prefix)
         self.storage.upload_file(asr_audio, temporary_audio_key)

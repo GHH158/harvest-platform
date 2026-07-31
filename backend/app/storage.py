@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import oss2
+from oss2.models import BucketLifecycle, LifecycleExpiration, LifecycleRule
 
 from .config import Settings
 
@@ -22,7 +23,6 @@ class ObjectStorage:
             "OSS_BUCKET": self.settings.oss_bucket,
             "OSS_ACCESS_KEY_ID": self.settings.oss_access_key_id,
             "OSS_ACCESS_KEY_SECRET": self.settings.oss_access_key_secret,
-            "OSS_PUBLIC_BASE_URL": self.settings.oss_public_base_url,
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
@@ -65,6 +65,36 @@ class ObjectStorage:
 
     def delete(self, oss_key: str) -> None:
         self._bucket().delete_object(oss_key)
+
+    def configure_lifecycle(self) -> list[dict[str, int | str]]:
+        """Merge Harvest cleanup rules without replacing unrelated bucket rules."""
+        bucket = self._bucket()
+        try:
+            existing_rules = list(bucket.get_bucket_lifecycle().rules)
+        except oss2.exceptions.NoSuchLifecycle:
+            existing_rules = []
+
+        harvest_rules = [
+            LifecycleRule(
+                "harvest-temporary-asr",
+                "temporary/",
+                expiration=LifecycleExpiration(days=self.settings.oss_temporary_retention_days),
+            ),
+            LifecycleRule(
+                "harvest-shadowing-recordings",
+                "shadowing/",
+                expiration=LifecycleExpiration(days=self.settings.oss_shadowing_retention_days),
+            ),
+        ]
+        harvest_ids = {rule.id for rule in harvest_rules}
+        merged_rules = [rule for rule in existing_rules if rule.id not in harvest_ids] + harvest_rules
+        result = bucket.put_bucket_lifecycle(BucketLifecycle(merged_rules))
+        if result.status != 200:
+            raise RuntimeError(f"OSS 生命周期规则保存失败，HTTP {result.status}")
+        return [
+            {"id": rule.id, "prefix": rule.prefix, "days": int(rule.expiration.days)}
+            for rule in harvest_rules
+        ]
 
     def public_url(self, oss_key: str) -> str:
         assert self.settings.oss_public_base_url

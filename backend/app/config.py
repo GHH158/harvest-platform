@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -37,6 +38,8 @@ class Settings(BaseSettings):
     oss_access_key_id: str | None = None
     oss_access_key_secret: str | None = None
     oss_public_base_url: str | None = None
+    oss_temporary_retention_days: int = Field(default=1, ge=1)
+    oss_shadowing_retention_days: int = Field(default=7, ge=1)
     tailscale_hostname: str | None = None
     worker_poll_seconds: float = 2.0
     worker_stale_running_seconds: int = 900

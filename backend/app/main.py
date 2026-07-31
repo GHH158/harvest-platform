@@ -20,6 +20,7 @@ from .config import ROOT_DIR, get_settings
 from .db import apply_schema, make_engine
 from .llm import LLMService
 from .repository import Repository
+from .storage import ObjectStorage
 
 
 class MaterialCreate(BaseModel):
@@ -106,7 +107,8 @@ _SETTINGS_KEYS = (
     "DASHSCOPE_CHAT_MODEL", "DASHSCOPE_OMNI_MODEL", "DASHSCOPE_VL_MODEL",
     "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
     "DEEPSEEK_MODEL", "OSS_ENDPOINT", "OSS_BUCKET", "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET",
-    "OSS_PUBLIC_BASE_URL", "TAILSCALE_HOSTNAME", "MAX_VIDEO_UPLOAD_BYTES", "MIN_FREE_DISK_BYTES",
+    "OSS_PUBLIC_BASE_URL", "OSS_TEMPORARY_RETENTION_DAYS", "OSS_SHADOWING_RETENTION_DAYS",
+    "TAILSCALE_HOSTNAME", "MAX_VIDEO_UPLOAD_BYTES", "MIN_FREE_DISK_BYTES",
 )
 _SECRET_KEYS = {"DATABASE_URL", "DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY", "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET"}
 
@@ -158,10 +160,14 @@ def health() -> dict[str, str]:
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, saved: int | None = None) -> HTMLResponse:
+    return templates.TemplateResponse(request, "settings.html", settings_context(saved=saved))
+
+
+def settings_context(**messages: object) -> dict[str, object]:
     settings = get_settings()
-    status = {key: bool(getattr(settings, key.lower(), None)) for key in _SECRET_KEYS}
+    secret_status = {key: bool(getattr(settings, key.lower(), None)) for key in _SECRET_KEYS}
     values = {key: getattr(settings, key.lower(), "") for key in _SETTINGS_KEYS if key not in _SECRET_KEYS}
-    return templates.TemplateResponse(request, "settings.html", {"saved": saved, "status": status, "values": values})
+    return {"status": secret_status, "values": values, **messages}
 
 
 @app.post("/settings", response_class=HTMLResponse)
@@ -169,6 +175,24 @@ async def save_settings(request: Request) -> RedirectResponse:
     form = await request.form()
     _update_env({key: str(form.get(key, "")) for key in _SETTINGS_KEYS})
     return RedirectResponse(url="/settings?saved=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.post("/settings/oss-lifecycle", response_class=HTMLResponse)
+def apply_oss_lifecycle(request: Request) -> HTMLResponse:
+    try:
+        rules = ObjectStorage(get_settings()).configure_lifecycle()
+    except Exception as error:
+        return templates.TemplateResponse(
+            request,
+            "settings.html",
+            settings_context(lifecycle_error=str(error)),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        settings_context(lifecycle_rules=rules),
+    )
 
 
 @app.post("/videos", status_code=status.HTTP_202_ACCEPTED)

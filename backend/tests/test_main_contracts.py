@@ -11,6 +11,7 @@ from app import main
 from app.config import Settings
 from fastapi import HTTPException, UploadFile
 from starlette.datastructures import Headers
+from starlette.requests import Request
 
 
 class SubmissionRepository:
@@ -98,6 +99,23 @@ def test_lifespan_creates_one_shared_engine_and_disposes_it(monkeypatch: pytest.
     assert engine.dispose_calls == 1
     with pytest.raises(RuntimeError, match="尚未初始化"):
         main.repository()
+
+
+def test_settings_page_applies_oss_lifecycle_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RecordingStorage:
+        def __init__(self, settings: Settings) -> None:
+            pass
+
+        def configure_lifecycle(self) -> list[dict[str, int | str]]:
+            return [{"id": "harvest-temporary-asr", "prefix": "temporary/", "days": 1}]
+
+    monkeypatch.setattr(main, "ObjectStorage", RecordingStorage)
+    request = Request({"type": "http", "method": "POST", "path": "/settings/oss-lifecycle", "headers": []})
+
+    response = main.apply_oss_lifecycle(request)
+
+    assert response.status_code == 200
+    assert "temporary/" in response.body.decode()
 
 
 class CompanionRepository:

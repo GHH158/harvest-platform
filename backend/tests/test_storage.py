@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from app.config import Settings
 from app.storage import ObjectStorage
+from oss2.models import LifecycleExpiration, LifecycleRule
 
 
 class RecordingBucket:
@@ -31,3 +32,42 @@ def test_hls_tree_upload_uses_apple_media_types(monkeypatch, tmp_path: Path) -> 
         "application/vnd.apple.mpegurl",
         "video/mp2t",
     ]
+
+
+class LifecycleRecordingBucket:
+    def __init__(self) -> None:
+        self.original_rule = LifecycleRule(
+            "owner-archive-rule",
+            "archive/",
+            expiration=LifecycleExpiration(days=90),
+        )
+        self.saved = None
+
+    def get_bucket_lifecycle(self) -> SimpleNamespace:
+        return SimpleNamespace(rules=[self.original_rule])
+
+    def put_bucket_lifecycle(self, lifecycle) -> SimpleNamespace:
+        self.saved = lifecycle
+        return SimpleNamespace(status=200)
+
+
+def test_lifecycle_rules_preserve_unrelated_rules_and_never_match_delivery(monkeypatch) -> None:
+    bucket = LifecycleRecordingBucket()
+    storage = ObjectStorage(
+        Settings(oss_temporary_retention_days=1, oss_shadowing_retention_days=7)
+    )
+    monkeypatch.setattr(storage, "_bucket", lambda: bucket)
+
+    applied = storage.configure_lifecycle()
+
+    assert applied == [
+        {"id": "harvest-temporary-asr", "prefix": "temporary/", "days": 1},
+        {"id": "harvest-shadowing-recordings", "prefix": "shadowing/", "days": 7},
+    ]
+    assert bucket.saved is not None
+    assert [rule.id for rule in bucket.saved.rules] == [
+        "owner-archive-rule",
+        "harvest-temporary-asr",
+        "harvest-shadowing-recordings",
+    ]
+    assert all(rule.prefix != "materials/" for rule in bucket.saved.rules[1:])
