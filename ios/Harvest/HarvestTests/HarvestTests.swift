@@ -25,6 +25,13 @@ final class StubURLProtocol: URLProtocol {
 }
 
 struct HarvestTests {
+    @Test func voiceTeacherUsesWebSocketThroughTheMacEndpoint() throws {
+        let secure = try #require(voiceTeacherWebSocketURL(baseURL: URL(string: "https://harvest.example.ts.net")!))
+        let local = try #require(voiceTeacherWebSocketURL(baseURL: URL(string: "http://127.0.0.1:8000")!))
+        #expect(secure.absoluteString == "wss://harvest.example.ts.net/voice-teacher/ws")
+        #expect(local.absoluteString == "ws://127.0.0.1:8000/voice-teacher/ws")
+    }
+
     @Test func materialDecodesSentenceTimeline() throws {
         let data = """
         {"id":1,"kind":"reading","title":"雨の日","status":"ready","error_message":null,"duration_ms":1500,"audio_url":"https://example.com/a.mp3","video_url":null,"segments":[{"id":9,"material_id":1,"idx":0,"text_ja":"雨です。","text_zh":null,"start_ms":0,"end_ms":1500}],"tokens":[]}

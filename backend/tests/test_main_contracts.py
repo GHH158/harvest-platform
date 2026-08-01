@@ -23,6 +23,17 @@ class SubmissionRepository:
         return 41, 73
 
 
+class ShadowingRepository:
+    submission: tuple[int, str] | None = None
+
+    def get_segment(self, segment_id: int) -> dict[str, int]:
+        return {"id": segment_id}
+
+    def create_shadowing_submission(self, segment_id: int, audio_path: str) -> tuple[int, int]:
+        self.submission = segment_id, audio_path
+        return 51, 82
+
+
 def upload(filename: str, content_type: str, content: bytes) -> UploadFile:
     return UploadFile(
         file=BytesIO(content),
@@ -70,6 +81,82 @@ def test_video_upload_stops_at_size_limit_and_removes_partial_file(
 
     assert caught.value.status_code == 413
     assert list((tmp_path / "video" / "uploads").iterdir()) == []
+
+
+def test_video_link_creates_download_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = SubmissionRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    result = main.post_video_link(main.VideoLinkCreate(url="https://example.com/watch/1"))
+
+    assert result == {"material_id": 41, "job_id": 73, "status": "pending"}
+    assert repository.created is not None
+    assert repository.created["kind"] == "video"
+    assert repository.created["job_kind"] == "download_video"
+
+
+def test_photo_upload_streams_and_enforces_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: Settings(data_dir=tmp_path, max_photo_upload_bytes=3, min_free_disk_bytes=0),
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(main.post_photo(photo=upload("page.jpg", "image/jpeg", b"1234")))
+
+    assert caught.value.status_code == 413
+    assert list((tmp_path / "photo").iterdir()) == []
+
+
+def test_shadowing_upload_is_saved_before_database_submission(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repository = ShadowingRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: Settings(data_dir=tmp_path, max_audio_upload_bytes=10, min_free_disk_bytes=0),
+    )
+
+    result = asyncio.run(
+        main.post_shadowing(segment_id=9, audio=upload("attempt.m4a", "audio/m4a", b"voice"))
+    )
+
+    assert result == {"attempt_id": 51, "job_id": 82, "status": "pending"}
+    assert repository.submission is not None
+    assert Path(repository.submission[1]).read_bytes() == b"voice"
+
+
+def test_shadowing_oversize_upload_creates_no_submission(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repository = ShadowingRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: Settings(data_dir=tmp_path, max_audio_upload_bytes=3, min_free_disk_bytes=0),
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(
+            main.post_shadowing(segment_id=9, audio=upload("attempt.m4a", "audio/m4a", b"voice"))
+        )
+
+    assert caught.value.status_code == 413
+    assert repository.submission is None
+    assert list((tmp_path / "shadowing").iterdir()) == []
+
+
+def test_settings_can_explicitly_clear_a_secret(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("DASHSCOPE_API_KEY=secret\nDEEPSEEK_MODEL=old\n")
+    monkeypatch.setattr(main, "ROOT_DIR", tmp_path)
+
+    main._update_env({"DEEPSEEK_MODEL": "deepseek-v4-flash"}, {"DASHSCOPE_API_KEY"})
+
+    assert (tmp_path / ".env").read_text() == "DASHSCOPE_API_KEY=\nDEEPSEEK_MODEL=deepseek-v4-flash\n"
 
 
 def test_lifespan_creates_one_shared_engine_and_disposes_it(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2,24 +2,84 @@ import AVKit
 import SwiftUI
 
 @MainActor
+final class PlayerClock: ObservableObject {
+    @Published private(set) var positionMs = 0
+    private weak var player: AVPlayer?
+    private var observer: Any?
+
+    func observe(_ player: AVPlayer) {
+        stop()
+        self.player = player
+        observer = player.addPeriodicTimeObserver(
+            forInterval: CMTime(value: 100, timescale: 1_000),
+            queue: .main
+        ) { [weak self] time in
+            Task { @MainActor in self?.positionMs = max(0, Int(time.seconds * 1_000)) }
+        }
+    }
+
+    func seek(to milliseconds: Int) {
+        player?.seek(to: CMTime(value: CMTimeValue(milliseconds), timescale: 1_000))
+    }
+
+    func stop() {
+        if let observer, let player { player.removeTimeObserver(observer) }
+        observer = nil
+        player = nil
+        positionMs = 0
+    }
+}
+
+@MainActor
 final class SegmentQueuePlayer: ObservableObject {
     let player = AVQueuePlayer()
     @Published private(set) var isPlaying = false
+    @Published private(set) var positionMs = 0
     private var knownURLs: [URL] = []
+    private var durations: [Double] = []
+    private var playedCount = 0
+    private var itemObservers: [NSObjectProtocol] = []
+    private var timeObserver: Any?
 
-    func update(_ urls: [URL]) {
-        guard urls != knownURLs else { return }
-        if urls.starts(with: knownURLs) {
-            for url in urls.dropFirst(knownURLs.count) {
-                player.insert(AVPlayerItem(url: url), after: player.items().last)
-            }
-        } else {
-            player.removeAllItems()
-            for url in urls {
-                player.insert(AVPlayerItem(url: url), after: player.items().last)
-            }
+    init() {
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(value: 100, timescale: 1_000),
+            queue: .main
+        ) { [weak self] time in
+            Task { @MainActor in self?.updatePosition(time) }
         }
-        knownURLs = urls
+    }
+
+    func update(_ urls: [URL], durations newDurations: [Double]? = nil) {
+        let normalized = normalizedDurations(newDurations, count: urls.count)
+        guard urls != knownURLs || normalized != durations else { return }
+        if urls.starts(with: knownURLs), normalized.starts(with: durations) {
+            for (index, url) in urls.enumerated().dropFirst(knownURLs.count) {
+                append(url, duration: normalized[index])
+            }
+            knownURLs = urls
+            durations = normalized
+        } else {
+            knownURLs = urls
+            durations = normalized
+            rebuild(startingAt: 0, offsetMs: 0)
+        }
+        if isPlaying { player.play() }
+    }
+
+    func seek(to milliseconds: Int) {
+        guard !knownURLs.isEmpty else { return }
+        let seconds = max(0, Double(milliseconds) / 1_000)
+        var elapsed = 0.0
+        var target = knownURLs.count - 1
+        for index in knownURLs.indices {
+            if seconds < elapsed + durations[index] {
+                target = index
+                break
+            }
+            elapsed += durations[index]
+        }
+        rebuild(startingAt: target, offsetMs: Int((seconds - elapsed) * 1_000))
         if isPlaying { player.play() }
     }
 
@@ -32,6 +92,49 @@ final class SegmentQueuePlayer: ObservableObject {
         player.pause()
         isPlaying = false
     }
+
+    private func rebuild(startingAt index: Int, offsetMs: Int) {
+        player.removeAllItems()
+        removeItemObservers()
+        playedCount = index
+        for itemIndex in index..<knownURLs.count {
+            append(knownURLs[itemIndex], duration: durations[itemIndex])
+        }
+        if offsetMs > 0 {
+            player.seek(to: CMTime(value: CMTimeValue(offsetMs), timescale: 1_000))
+        }
+    }
+
+    private func append(_ url: URL, duration: Double) {
+        let item = AVPlayerItem(url: url)
+        player.insert(item, after: player.items().last)
+        let observer = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.playedCount = min(self.playedCount + 1, self.knownURLs.count)
+            }
+        }
+        itemObservers.append(observer)
+    }
+
+    private func normalizedDurations(_ values: [Double]?, count: Int) -> [Double] {
+        guard let values, values.count >= count else { return Array(repeating: 6, count: count) }
+        return Array(values.prefix(count)).map { $0 > 0 ? $0 : 6 }
+    }
+
+    private func updatePosition(_ time: CMTime) {
+        let completed = durations.prefix(playedCount).reduce(0, +)
+        positionMs = max(0, Int((completed + time.seconds) * 1_000))
+    }
+
+    private func removeItemObservers() {
+        for observer in itemObservers { NotificationCenter.default.removeObserver(observer) }
+        itemObservers.removeAll()
+    }
 }
 
 struct VideoLearningView: View {
@@ -42,6 +145,8 @@ struct VideoLearningView: View {
     @State private var onlineVideoPlayer = AVPlayer()
     @State private var onlineAudioPlayer = AVPlayer()
     @State private var isOnlineAudioPlaying = false
+    @StateObject private var onlineVideoClock = PlayerClock()
+    @StateObject private var onlineAudioClock = PlayerClock()
     @StateObject private var offlineVideoPlayer = SegmentQueuePlayer()
     @StateObject private var offlineAudioPlayer = SegmentQueuePlayer()
 
@@ -55,7 +160,7 @@ struct VideoLearningView: View {
 
             if mode == "观看" { watchPlayer } else { shadowingPlayer }
             downloadControls
-            subtitles
+            subtitleList
         }
         .padding(DesignTokens.pageInset)
         .background(DesignTokens.canvas.ignoresSafeArea())
@@ -75,6 +180,8 @@ struct VideoLearningView: View {
             onlineAudioPlayer.pause()
             offlineVideoPlayer.pause()
             offlineAudioPlayer.pause()
+            onlineVideoClock.stop()
+            onlineAudioClock.stop()
         }
     }
 
@@ -85,7 +192,7 @@ struct VideoLearningView: View {
                 .frame(height: 240)
                 .task(id: offlineVideoSignature) {
                     onlineVideoPlayer.pause()
-                    offlineVideoPlayer.update(offlineVideoURLs)
+                    offlineVideoPlayer.update(offlineVideoURLs, durations: offlineEntry?.videoSegmentDurations)
                 }
             if let entry = offlineEntry, entry.totalVideoSegments != nil, !entry.isWatchVideoComplete {
                 Text("已下载的连续分片可以观看；播放到尚未下载的位置会停止。")
@@ -97,6 +204,7 @@ struct VideoLearningView: View {
                 .frame(height: 240)
                 .task(id: videoURL) {
                     onlineVideoPlayer.replaceCurrentItem(with: AVPlayerItem(url: videoURL))
+                    onlineVideoClock.observe(onlineVideoPlayer)
                 }
         } else {
             ContentUnavailableView(
@@ -118,7 +226,7 @@ struct VideoLearningView: View {
                 .task(id: offlineAudioSignature) {
                     onlineAudioPlayer.pause()
                     isOnlineAudioPlaying = false
-                    offlineAudioPlayer.update(offlineAudioURLs)
+                    offlineAudioPlayer.update(offlineAudioURLs, durations: offlineEntry?.audioSegmentDurations)
                 }
             } else if let audioURL = material.audioURL {
                 Button(isOnlineAudioPlaying ? "暂停跟读音频" : "播放跟读音频") {
@@ -128,6 +236,7 @@ struct VideoLearningView: View {
                 .buttonStyle(PrimaryButtonStyle())
                 .task(id: audioURL) {
                     onlineAudioPlayer.replaceCurrentItem(with: AVPlayerItem(url: audioURL))
+                    onlineAudioClock.observe(onlineAudioPlayer)
                 }
             } else {
                 Text("跟读音频仍在准备。")
@@ -164,21 +273,60 @@ struct VideoLearningView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var subtitles: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                ForEach(material.segments) { segment in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(segment.textJA)
-                            .font(.system(size: DesignTokens.readingSize))
-                            .foregroundStyle(DesignTokens.ink)
-                        if let translation = segment.textZH {
-                            Text(translation).font(.footnote).foregroundStyle(DesignTokens.muted)
+    private var subtitleList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(material.segments) { segment in
+                        Button { seek(to: segment.startMs) } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(segment.textJA)
+                                    .font(.system(size: DesignTokens.readingSize))
+                                    .foregroundStyle(DesignTokens.ink)
+                                if let translation = segment.textZH {
+                                    Text(translation).font(.footnote).foregroundStyle(DesignTokens.muted)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(
+                                currentSegment?.id == segment.id ? DesignTokens.accentWash : .clear,
+                                in: RoundedRectangle(cornerRadius: 8)
+                            )
                         }
+                        .buttonStyle(.plain)
+                        .id(segment.id)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .onChange(of: currentSegment?.id) { _, identifier in
+                guard let identifier else { return }
+                withAnimation(.easeInOut(duration: 0.28)) { proxy.scrollTo(identifier, anchor: .center) }
+            }
+        }
+    }
+
+    private var playbackPositionMs: Int {
+        if mode == "观看" {
+            return offlineVideoURLs.isEmpty ? onlineVideoClock.positionMs : offlineVideoPlayer.positionMs
+        }
+        return offlineAudioURLs.isEmpty ? onlineAudioClock.positionMs : offlineAudioPlayer.positionMs
+    }
+
+    private var currentSegment: Segment? {
+        material.segments.first { playbackPositionMs >= $0.startMs && playbackPositionMs < $0.endMs }
+    }
+
+    private func seek(to milliseconds: Int) {
+        if mode == "观看" {
+            if offlineVideoURLs.isEmpty { onlineVideoClock.seek(to: milliseconds) }
+            else { offlineVideoPlayer.seek(to: milliseconds) }
+        } else if offlineAudioURLs.isEmpty {
+            onlineAudioClock.seek(to: milliseconds)
+        } else {
+            offlineAudioPlayer.seek(to: milliseconds)
         }
     }
 

@@ -2,9 +2,65 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import imageio_ffmpeg
+import yt_dlp
+
+
+@dataclass(frozen=True)
+class DownloadedVideo:
+    path: Path
+    title: str
+
+
+class VideoDownloader:
+    """Download one user-supplied video URL into the local archive boundary."""
+
+    def __init__(self, *, max_bytes: int, min_free_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self.min_free_bytes = min_free_bytes
+        self.ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+
+    def download(self, url: str, destination_directory: Path) -> DownloadedVideo:
+        destination_directory.mkdir(parents=True, exist_ok=True)
+        if shutil.disk_usage(destination_directory).free < self.min_free_bytes:
+            raise RuntimeError("本机磁盘空间不足，暂不能下载视频。")
+        options: dict[str, Any] = {
+            "format": "bestvideo*+bestaudio/best",
+            "merge_output_format": "mp4",
+            "outtmpl": str(destination_directory / "source.%(ext)s"),
+            "noplaylist": True,
+            "max_downloads": 1,
+            "max_filesize": self.max_bytes,
+            "continuedl": True,
+            "overwrites": False,
+            "quiet": True,
+            "no_warnings": True,
+            "ffmpeg_location": self.ffmpeg,
+        }
+        with yt_dlp.YoutubeDL(options) as downloader:
+            info = downloader.extract_info(url, download=True)
+        if info is None:
+            raise RuntimeError("yt-dlp 没有返回视频信息。")
+        candidates = [
+            path
+            for path in destination_directory.iterdir()
+            if path.is_file() and path.suffix not in {".part", ".ytdl"}
+        ]
+        if not candidates:
+            raise RuntimeError("yt-dlp 没有生成可处理的视频文件。")
+        source = max(candidates, key=lambda item: item.stat().st_mtime_ns)
+        if source.stat().st_size > self.max_bytes:
+            source.unlink(missing_ok=True)
+            raise RuntimeError("下载的视频超过允许的大小。")
+        if shutil.disk_usage(destination_directory).free < self.min_free_bytes:
+            source.unlink(missing_ok=True)
+            raise RuntimeError("下载后本机剩余磁盘空间低于保护阈值，文件已移除。")
+        title = str(info.get("title") or source.stem).strip()
+        return DownloadedVideo(path=source, title=title[:160])
 
 
 class VideoProcessor:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from app.asr import RecognizedWord
 from app.config import Settings
@@ -26,6 +27,8 @@ class PipelineRepository:
         self.reading_completion: dict[str, Any] | None = None
         self.shadowing_result: tuple[int, str, list[dict[str, Any]], float] | None = None
         self.shadowing_failure: tuple[int, str] | None = None
+        self.voice_profile: tuple[str, str] | None = None
+        self.updated_title: tuple[int, str] | None = None
 
     def fail_exhausted_pending_jobs(self, *, max_attempts: int) -> int:
         return 0
@@ -58,6 +61,16 @@ class PipelineRepository:
 
     def complete_reading(self, **values: Any) -> None:
         self.reading_completion = values
+
+    def default_voice_id(self) -> str:
+        return "qwen-audio-3.0-tts-plus-test-voice"
+
+    def create_voice_profile(self, *, name: str, voice_id: str) -> int:
+        self.voice_profile = name, voice_id
+        return 1
+
+    def update_material_title(self, material_id: int, title: str) -> None:
+        self.updated_title = material_id, title
 
     def store_video_assets(self, **values: Any) -> None:
         self.video_assets = values
@@ -183,9 +196,24 @@ class StaticLLM:
 
 
 class FakeTTS:
-    def synthesize(self, *, text: str, destination: Path) -> None:
+    def synthesize(self, *, text: str, destination: Path, voice: str | None = None) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"audio")
+
+
+class FakeVideoDownloader:
+    def __init__(self, source: Path) -> None:
+        self.source = source
+
+    def download(self, url: str, destination_directory: Path) -> Any:
+        from app.video import DownloadedVideo
+
+        return DownloadedVideo(path=self.source, title="下载到的标题")
+
+
+class FakeVoiceEnrollment:
+    def create_japanese_voice(self, *, audio_url: str, prefix: str) -> str:
+        return f"qwen-audio-3.0-tts-plus-{prefix}-voice"
 
 
 class StaticVision:
@@ -264,6 +292,56 @@ def test_video_pipeline_reaches_translation_completion(tmp_path: Path) -> None:
     ]
     assert repository.video_translations == ["这是。"]
     assert worker.storage.deleted_key == "temporary/materials/7/asr-audio.m4a"  # type: ignore[attr-defined]
+
+
+def test_video_link_download_enters_the_same_video_pipeline(tmp_path: Path) -> None:
+    source = tmp_path / "downloaded.mp4"
+    source.write_bytes(b"source")
+    initial = Job(
+        id=1,
+        kind="download_video",
+        material_id=7,
+        payload={"url": "https://example.com/video", "title_provided": False},
+        attempts=1,
+    )
+    repository = PipelineRepository([initial])
+    worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
+    worker.video_downloader = FakeVideoDownloader(source)  # type: ignore[assignment]
+    worker.video = FakeVideoProcessor()  # type: ignore[assignment]
+    worker.storage = FakeStorage()  # type: ignore[assignment]
+    worker.asr = StaticASR([RecognizedWord("これは。", 0, 1_200)])  # type: ignore[assignment]
+    worker.llm = StaticLLM()  # type: ignore[assignment]
+
+    while worker.run_one():
+        pass
+
+    assert [job.kind for job in repository.claimed] == [
+        "download_video", "transcode", "upload_video", "asr_video", "translate_video"
+    ]
+    assert repository.updated_title == (7, "下载到的标题")
+    assert repository.video_translations == ["这是。"]
+
+
+def test_voice_enrollment_uses_temporary_oss_and_creates_default_profile(tmp_path: Path) -> None:
+    sample = tmp_path / "sample.m4a"
+    sample.write_bytes(b"voice")
+    job = Job(
+        id=1,
+        kind="voice_enrollment",
+        material_id=None,
+        payload={"name": "我的声音", "prefix": "mine", "sample_path": str(sample)},
+        attempts=1,
+    )
+    repository = PipelineRepository([job])
+    worker = Worker(repository, Settings())  # type: ignore[arg-type]
+    worker.storage = FakeStorage()  # type: ignore[assignment]
+    worker.voice_enrollment = FakeVoiceEnrollment()  # type: ignore[assignment]
+
+    with patch("app.worker.audio_duration_ms", return_value=10_000):
+        assert worker.run_one() is True
+
+    assert repository.voice_profile == ("我的声音", "qwen-audio-3.0-tts-plus-mine-voice")
+    assert worker.storage.deleted_key.startswith("temporary/voice-profiles/")  # type: ignore[attr-defined]
 
 
 def test_shadowing_failure_sets_attempt_failure(tmp_path: Path) -> None:

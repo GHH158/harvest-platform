@@ -11,16 +11,19 @@ class TTSService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def synthesize(self, *, text: str, destination: Path) -> None:
+    def synthesize(self, *, text: str, destination: Path, voice: str | None = None) -> None:
         """Request a non-streaming Qwen-Audio TTS file and retain it locally."""
         if not self.settings.dashscope_api_key:
             raise RuntimeError("DASHSCOPE_API_KEY 尚未配置；按 PROJECT.md §2.5 注册并配置后再处理任务。")
+        selected_voice = (voice or self.settings.dashscope_tts_voice or "").strip()
+        if not selected_voice:
+            raise RuntimeError("尚未配置支持日语的 TTS 音色；请先在服务设置页创建或选择声音复刻音色。")
         endpoint = f"{self.settings.dashscope_base_url.rstrip('/')}/services/audio/tts/SpeechSynthesizer"
         payload = {
             "model": self.settings.dashscope_tts_model,
             "input": {
                 "text": text,
-                "voice": self.settings.dashscope_tts_voice,
+                "voice": selected_voice,
                 "format": "mp3",
                 "sample_rate": 24000,
                 "language_hints": ["ja"],

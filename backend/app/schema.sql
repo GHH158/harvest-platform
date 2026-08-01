@@ -8,7 +8,7 @@ $$ LANGUAGE plpgsql;
 
 CREATE TABLE IF NOT EXISTS material (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    kind          TEXT NOT NULL,
+    kind          TEXT NOT NULL, -- reading|video
     title         TEXT NOT NULL,
     source_type   TEXT NOT NULL,
     source_ref    TEXT,
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS token (
 CREATE TABLE IF NOT EXISTS media_asset (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     material_id   BIGINT NOT NULL REFERENCES material(id) ON DELETE CASCADE,
-    kind          TEXT NOT NULL,
+    kind          TEXT NOT NULL, -- audio|video
     purpose       TEXT NOT NULL,
     local_path    TEXT,
     oss_key       TEXT,
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS media_asset (
 
 CREATE TABLE IF NOT EXISTS job (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    kind          TEXT NOT NULL,
+    kind          TEXT NOT NULL, -- fetch|tts|asr|vision|download_video|transcode|upload_video|asr_video|translate_video|shadowing|voice_enrollment
     material_id   BIGINT REFERENCES material(id) ON DELETE CASCADE,
     status        TEXT NOT NULL,
     payload       JSONB,

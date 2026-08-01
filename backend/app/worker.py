@@ -22,10 +22,12 @@ from .shadowing import score_transcript
 from .storage import ObjectStorage
 from .text import estimated_segments
 from .tts import TTSService
-from .video import VideoProcessor
+from .video import VideoDownloader, VideoProcessor
 from .vision import VisionService
+from .voice import VoiceEnrollmentService, validate_voice_sample_duration
 
 ENHANCEMENT_JOB_KINDS = {"asr"}
+STANDALONE_JOB_KINDS = {"shadowing", "voice_enrollment"}
 
 
 class Worker:
@@ -36,8 +38,13 @@ class Worker:
         self.asr = ASRService(settings)
         self.storage = ObjectStorage(settings)
         self.video = VideoProcessor()
+        self.video_downloader = VideoDownloader(
+            max_bytes=settings.max_video_upload_bytes,
+            min_free_bytes=settings.min_free_disk_bytes,
+        )
         self.vision = VisionService(settings)
         self.llm = LLMService(settings)
+        self.voice_enrollment = VoiceEnrollmentService(settings)
 
     def run_one(self) -> bool:
         exhausted = self.repository.fail_exhausted_pending_jobs(max_attempts=self.settings.worker_max_attempts)
@@ -47,7 +54,7 @@ class Worker:
         if job is None:
             return False
         try:
-            if job.material_id is None and job.kind != "shadowing":
+            if job.material_id is None and job.kind not in STANDALONE_JOB_KINDS:
                 raise RuntimeError("P1 worker job 缺少 material_id。")
             if job.material_id is not None and job.kind not in ENHANCEMENT_JOB_KINDS:
                 self.repository.mark_material_processing(job.material_id)
@@ -61,6 +68,8 @@ class Worker:
                 self._score_shadowing(job)
             elif job.kind == "transcode":
                 self._transcode_video(job)
+            elif job.kind == "download_video":
+                self._download_video(job)
             elif job.kind == "vision":
                 self._extract_photo(job)
             elif job.kind == "upload_video":
@@ -69,6 +78,8 @@ class Worker:
                 self._transcribe_video(job)
             elif job.kind == "translate_video":
                 self._translate_video(job)
+            elif job.kind == "voice_enrollment":
+                self._enroll_voice(job)
             else:
                 raise RuntimeError(f"不支持的任务类型: {job.kind}")
         except Exception as error:  # The error must be persisted for the ingest UI and diagnostics.
@@ -105,7 +116,11 @@ class Worker:
             raise RuntimeError("tts 任务缺少文本。")
         assert job.material_id is not None
         audio_path = self.settings.local_audio_dir / f"material-{job.material_id}.mp3"
-        self.tts.synthesize(text=source_text, destination=audio_path)
+        self.tts.synthesize(
+            text=source_text,
+            destination=audio_path,
+            voice=self.settings.dashscope_tts_voice or self.repository.default_voice_id(),
+        )
         duration_ms = audio_duration_ms(audio_path)
         oss_key = f"materials/{job.material_id}/reading.mp3"
         self.storage.upload_audio(audio_path, oss_key)
@@ -183,6 +198,20 @@ class Worker:
                 "audio_directory": str(audio_directory),
                 "asr_audio_path": str(asr_audio),
             },
+        )
+
+    def _download_video(self, job: Job) -> None:
+        url = str(job.payload.get("url", "")).strip()
+        if not url or job.material_id is None:
+            raise RuntimeError("download_video 任务缺少视频链接。")
+        destination = self.settings.data_dir / "video" / "downloads" / f"material-{job.material_id}"
+        downloaded = self.video_downloader.download(url, destination)
+        if not bool(job.payload.get("title_provided")):
+            self.repository.update_material_title(job.material_id, downloaded.title)
+        self.repository.enqueue_job(
+            kind="transcode",
+            material_id=job.material_id,
+            payload={"source_path": str(downloaded.path)},
         )
 
     def _extract_photo(self, job: Job) -> None:
@@ -292,6 +321,26 @@ class Worker:
                 self.storage.delete(temporary_audio_key)
             except Exception as error:
                 print(f"job={job.id} 无法删除 ASR 临时音轨: {error}", flush=True)
+
+    def _enroll_voice(self, job: Job) -> None:
+        sample_path = Path(str(job.payload.get("sample_path", "")))
+        name = str(job.payload.get("name", "")).strip()
+        prefix = str(job.payload.get("prefix", "")).strip()
+        if not sample_path.exists() or not name or not prefix:
+            raise RuntimeError("voice_enrollment 任务缺少音色名称、前缀或参考录音。")
+        validate_voice_sample_duration(audio_duration_ms(sample_path))
+        oss_key = f"temporary/voice-profiles/{job.id}/{sample_path.name}"
+        self.storage.upload_audio(sample_path, oss_key)
+        voice_id = self.voice_enrollment.create_japanese_voice(
+            audio_url=self.storage.public_url(oss_key),
+            prefix=prefix,
+        )
+        self.repository.create_voice_profile(name=name, voice_id=voice_id)
+        sample_path.unlink(missing_ok=True)
+        try:
+            self.storage.delete(oss_key)
+        except Exception as error:
+            print(f"job={job.id} 无法删除音色参考录音: {error}", flush=True)
 
 
 def extract_article(url: str) -> tuple[str | None, str]:

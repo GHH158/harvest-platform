@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import shlex
 import shutil
 import time
 from contextlib import asynccontextmanager
@@ -9,7 +11,7 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -19,6 +21,7 @@ from sqlalchemy import Engine
 from .config import ROOT_DIR, get_settings
 from .db import apply_schema, make_engine
 from .llm import LLMService
+from .omni import relay_voice_teacher
 from .repository import Repository
 from .storage import ObjectStorage
 
@@ -44,6 +47,11 @@ class CompanionRequest(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1, max_length=4_000)
+
+
+class VideoLinkCreate(BaseModel):
+    title: str | None = Field(default=None, max_length=160)
+    url: str = Field(min_length=1, max_length=2_000)
 
 
 def title_for_text(value: str) -> str:
@@ -105,26 +113,34 @@ _SETTINGS_KEYS = (
     "DATABASE_URL", "DASHSCOPE_API_KEY", "DASHSCOPE_BASE_URL", "DASHSCOPE_TTS_MODEL",
     "DASHSCOPE_TTS_VOICE", "DASHSCOPE_ASR_MODEL", "DASHSCOPE_CHAT_BASE_URL",
     "DASHSCOPE_CHAT_MODEL", "DASHSCOPE_OMNI_MODEL", "DASHSCOPE_VL_MODEL",
+    "DASHSCOPE_OMNI_WS_URL", "DASHSCOPE_OMNI_VOICE", "DASHSCOPE_OMNI_INSTRUCTIONS",
+    "LLM_PROVIDER", "LLM_FALLBACK_ON_ERROR",
     "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
     "DEEPSEEK_MODEL", "OSS_ENDPOINT", "OSS_BUCKET", "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET",
     "OSS_PUBLIC_BASE_URL", "OSS_TEMPORARY_RETENTION_DAYS", "OSS_SHADOWING_RETENTION_DAYS",
-    "TAILSCALE_HOSTNAME", "MAX_VIDEO_UPLOAD_BYTES", "MIN_FREE_DISK_BYTES",
+    "TAILSCALE_HOSTNAME", "MAX_VIDEO_UPLOAD_BYTES", "MAX_PHOTO_UPLOAD_BYTES",
+    "MAX_AUDIO_UPLOAD_BYTES", "MIN_FREE_DISK_BYTES",
 )
 _SECRET_KEYS = {"DATABASE_URL", "DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY", "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET"}
 
 
-def _update_env(values: dict[str, str]) -> None:
+def _update_env(values: dict[str, str], clear_keys: set[str] | None = None) -> None:
     env_path = ROOT_DIR / ".env"
     lines = env_path.read_text().splitlines() if env_path.exists() else []
+    clear_keys = (clear_keys or set()) & _SECRET_KEYS
     remaining = {key: value for key, value in values.items() if key in _SETTINGS_KEYS and value.strip()}
     updated: list[str] = []
     for line in lines:
         key = line.partition("=")[0]
-        if key in remaining:
-            updated.append(f"{key}={remaining.pop(key)}")
+        if key in clear_keys:
+            updated.append(f"{key}=")
+        elif key in remaining:
+            updated.append(f"{key}={shlex.quote(remaining.pop(key))}")
         else:
             updated.append(line)
-    updated.extend(f"{key}={value}" for key, value in remaining.items())
+    existing_keys = {line.partition("=")[0] for line in lines}
+    updated.extend(f"{key}=" for key in clear_keys - existing_keys)
+    updated.extend(f"{key}={shlex.quote(value)}" for key, value in remaining.items())
     env_path.write_text("\n".join(updated) + "\n")
     os.chmod(env_path, 0o600)
     get_settings.cache_clear()
@@ -159,21 +175,25 @@ def health() -> dict[str, str]:
 
 
 @app.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request, saved: int | None = None) -> HTMLResponse:
-    return templates.TemplateResponse(request, "settings.html", settings_context(saved=saved))
+def settings_page(request: Request, saved: int | None = None, voice_job: int | None = None) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "settings.html", settings_context(saved=saved, voice_job=voice_job)
+    )
 
 
 def settings_context(**messages: object) -> dict[str, object]:
     settings = get_settings()
     secret_status = {key: bool(getattr(settings, key.lower(), None)) for key in _SECRET_KEYS}
     values = {key: getattr(settings, key.lower(), "") for key in _SETTINGS_KEYS if key not in _SECRET_KEYS}
-    return {"status": secret_status, "values": values, **messages}
+    profiles = _repository.voice_profiles() if _repository is not None else []
+    return {"status": secret_status, "values": values, "voice_profiles": profiles, **messages}
 
 
 @app.post("/settings", response_class=HTMLResponse)
 async def save_settings(request: Request) -> RedirectResponse:
     form = await request.form()
-    _update_env({key: str(form.get(key, "")) for key in _SETTINGS_KEYS})
+    clear_keys = {key for key in _SECRET_KEYS if str(form.get(f"CLEAR_{key}", "")).lower() in {"1", "true", "on"}}
+    _update_env({key: str(form.get(key, "")) for key in _SETTINGS_KEYS}, clear_keys)
     return RedirectResponse(url="/settings?saved=1", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -210,7 +230,9 @@ async def post_video(title: Annotated[str | None, Form()] = None, video: UploadF
     if shutil.disk_usage(video_dir).free < settings.min_free_disk_bytes:
         raise HTTPException(status_code=507, detail="本机磁盘空间不足，暂不能接收视频。")
     destination = video_dir / f"upload-{int(time.time() * 1000)}{suffix}"
-    await save_upload_stream(video, destination, settings.max_video_upload_bytes, settings.min_free_disk_bytes)
+    await save_upload_stream(
+        video, destination, settings.max_video_upload_bytes, settings.min_free_disk_bytes, "视频"
+    )
     material_id, job_id = repository().create_material_with_job(
         kind="video", title=(title or "").strip() or Path(video.filename).stem,
         source_type="file", source_ref=video.filename, job_kind="transcode", payload={"source_path": str(destination)},
@@ -218,15 +240,42 @@ async def post_video(title: Annotated[str | None, Form()] = None, video: UploadF
     return {"material_id": material_id, "job_id": job_id, "status": "pending"}
 
 
+def create_video_link(payload: VideoLinkCreate) -> tuple[int, int]:
+    url = payload.url.strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=422, detail="请输入完整的 http 或 https 视频链接。")
+    title_provided = bool((payload.title or "").strip())
+    return repository().create_material_with_job(
+        kind="video",
+        title=(payload.title or "").strip() or parsed.netloc,
+        source_type="url",
+        source_ref=url,
+        job_kind="download_video",
+        payload={"url": url, "title_provided": title_provided},
+    )
+
+
+@app.post("/videos/link", status_code=status.HTTP_202_ACCEPTED)
+def post_video_link(payload: VideoLinkCreate) -> dict[str, int | str]:
+    material_id, job_id = create_video_link(payload)
+    return {"material_id": material_id, "job_id": job_id, "status": "pending"}
+
+
 @app.post("/photos", status_code=status.HTTP_202_ACCEPTED)
 async def post_photo(title: Annotated[str | None, Form()] = None, photo: UploadFile = File()) -> dict[str, int | str]:
     if not photo.filename:
         raise HTTPException(status_code=422, detail="请选择一张照片。")
-    suffix = Path(photo.filename).suffix or ".jpg"
-    photo_dir = get_settings().data_dir / "photo"
+    if (photo.content_type or "") not in {"image/jpeg", "image/png"}:
+        raise HTTPException(status_code=415, detail="只接受 JPEG 或 PNG 照片。")
+    suffix = ".png" if photo.content_type == "image/png" else ".jpg"
+    settings = get_settings()
+    photo_dir = settings.data_dir / "photo"
     photo_dir.mkdir(parents=True, exist_ok=True)
     destination = photo_dir / f"photo-{int(time.time() * 1000)}{suffix}"
-    destination.write_bytes(await photo.read())
+    await save_upload_stream(
+        photo, destination, settings.max_photo_upload_bytes, settings.min_free_disk_bytes, "照片"
+    )
     material_id, job_id = repository().create_material_with_job(
         title=(title or "").strip() or Path(photo.filename).stem, source_type="photo", source_ref=photo.filename,
         job_kind="vision", payload={"image_path": str(destination)},
@@ -237,7 +286,73 @@ async def post_photo(title: Annotated[str | None, Form()] = None, photo: UploadF
 @app.get("/voice-teacher/status")
 def voice_teacher_status() -> dict[str, str | bool]:
     settings = get_settings()
-    return {"configured": bool(settings.dashscope_api_key), "model": settings.dashscope_omni_model}
+    return {
+        "configured": bool(settings.dashscope_api_key and settings.dashscope_omni_ws_url),
+        "model": settings.dashscope_omni_model,
+    }
+
+
+@app.websocket("/voice-teacher/ws")
+async def voice_teacher_socket(websocket: WebSocket) -> None:
+    await relay_voice_teacher(websocket, get_settings())
+
+
+@app.get("/voice-profiles")
+def get_voice_profiles() -> list[dict]:
+    return repository().voice_profiles()
+
+
+@app.post("/voice-profiles", status_code=status.HTTP_202_ACCEPTED)
+async def post_voice_profile(
+    name: Annotated[str, Form()],
+    prefix: Annotated[str, Form()],
+    sample: UploadFile = File(),
+) -> dict[str, int | str]:
+    if not name.strip():
+        raise HTTPException(status_code=422, detail="请填写音色名称。")
+    if re.fullmatch(r"[A-Za-z0-9]{1,10}", prefix.strip()) is None:
+        raise HTTPException(status_code=422, detail="音色前缀只接受 1–10 个英文字母或数字。")
+    if not sample.filename or not (sample.content_type or "").startswith("audio/"):
+        raise HTTPException(status_code=415, detail="请选择 3–30 秒的音频文件。")
+    settings = get_settings()
+    suffix = Path(sample.filename).suffix.lower() or ".m4a"
+    directory = settings.data_dir / "voice-profiles"
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / f"sample-{int(time.time() * 1000)}{suffix}"
+    await save_upload_stream(
+        sample, destination, settings.max_audio_upload_bytes, settings.min_free_disk_bytes, "参考录音"
+    )
+    job_id = repository().enqueue_job(
+        kind="voice_enrollment",
+        material_id=None,
+        payload={"name": name.strip()[:160], "prefix": prefix.strip(), "sample_path": str(destination)},
+    )
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.post("/voice-profiles/{profile_id}/default")
+def choose_voice_profile(profile_id: int) -> dict[str, int | str]:
+    if not repository().set_default_voice_profile(profile_id):
+        raise HTTPException(status_code=404, detail="音色不存在。")
+    return {"profile_id": profile_id, "status": "default"}
+
+
+@app.post("/settings/voice-profile", response_class=HTMLResponse)
+async def settings_voice_profile(
+    name: Annotated[str, Form()],
+    prefix: Annotated[str, Form()],
+    sample: UploadFile = File(),
+) -> RedirectResponse:
+    result = await post_voice_profile(name=name, prefix=prefix, sample=sample)
+    return RedirectResponse(
+        url=f"/settings?voice_job={result['job_id']}", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+@app.post("/settings/voice-profile/{profile_id}/default", response_class=HTMLResponse)
+def settings_choose_voice_profile(profile_id: int) -> RedirectResponse:
+    choose_voice_profile(profile_id)
+    return RedirectResponse(url="/settings", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.post("/materials", status_code=status.HTTP_202_ACCEPTED)
@@ -339,23 +454,33 @@ async def post_shadowing(segment_id: int = Form(), audio: UploadFile = File()) -
     repo = repository()
     if repo.get_segment(segment_id) is None:
         raise HTTPException(status_code=404, detail="原句不存在。")
-    suffix = ".m4a" if not audio.filename else f".{audio.filename.rsplit('.', 1)[-1]}"
-    shadow_dir = get_settings().data_dir / "shadowing"
+    if not audio.filename or not (audio.content_type or "").startswith("audio/"):
+        raise HTTPException(status_code=415, detail="请选择音频格式的跟读录音。")
+    suffix = Path(audio.filename).suffix.lower()
+    if suffix not in {".m4a", ".mp3", ".wav", ".aac", ".caf", ".mp4"}:
+        suffix = ".m4a"
+    settings = get_settings()
+    shadow_dir = settings.data_dir / "shadowing"
     shadow_dir.mkdir(parents=True, exist_ok=True)
-    placeholder = shadow_dir / f"pending-{segment_id}{suffix}"
-    attempt_id = repo.create_shadowing_attempt(segment_id, str(placeholder))
-    destination = shadow_dir / f"attempt-{attempt_id}{suffix}"
-    destination.write_bytes(await audio.read())
-    repo.update_shadowing_audio_path(attempt_id, str(destination))
-    job_id = repo.enqueue_job(
-        kind="shadowing", material_id=None,
-        payload={"attempt_id": attempt_id, "segment_id": segment_id, "audio_path": str(destination)},
+    destination = shadow_dir / f"upload-{segment_id}-{time.time_ns()}{suffix}"
+    await save_upload_stream(
+        audio, destination, settings.max_audio_upload_bytes, settings.min_free_disk_bytes, "跟读录音"
     )
-    repo.attach_shadowing_job(attempt_id, job_id)
+    try:
+        attempt_id, job_id = repo.create_shadowing_submission(segment_id, str(destination))
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
     return {"attempt_id": attempt_id, "job_id": job_id, "status": "pending"}
 
 
-async def save_upload_stream(upload: UploadFile, destination: Path, max_bytes: int, min_free_bytes: int) -> None:
+async def save_upload_stream(
+    upload: UploadFile,
+    destination: Path,
+    max_bytes: int,
+    min_free_bytes: int,
+    kind_label: str = "文件",
+) -> None:
     """Copy an upload incrementally while preserving a minimum free-space reserve."""
     written = 0
     try:
@@ -363,7 +488,7 @@ async def save_upload_stream(upload: UploadFile, destination: Path, max_bytes: i
             while chunk := await upload.read(1024 * 1024):
                 written += len(chunk)
                 if written > max_bytes:
-                    raise HTTPException(status_code=413, detail="视频超过允许的大小。")
+                    raise HTTPException(status_code=413, detail=f"{kind_label}超过允许的大小。")
                 if shutil.disk_usage(destination.parent).free - len(chunk) < min_free_bytes:
                     raise HTTPException(status_code=507, detail="本机磁盘空间不足，上传已停止。")
                 await asyncio.to_thread(output.write, chunk)
@@ -412,4 +537,24 @@ def ingest_form(
         material_id, _ = create_material(MaterialCreate(title=title, text=source_text, url=source_url))
     except ValueError as error:
         return templates.TemplateResponse(request, "ingest.html", {"error": str(error)}, status_code=422)
+    return RedirectResponse(url=f"/ingest-web?created={material_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.post("/ingest-web/video-file", response_class=HTMLResponse)
+async def ingest_video_file(
+    title: Annotated[str | None, Form()] = None,
+    video: UploadFile = File(),
+) -> RedirectResponse:
+    result = await post_video(title=title, video=video)
+    return RedirectResponse(
+        url=f"/ingest-web?created={result['material_id']}", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+@app.post("/ingest-web/video-link", response_class=HTMLResponse)
+def ingest_video_link(
+    title: Annotated[str | None, Form()] = None,
+    video_url: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    material_id, _ = create_video_link(VideoLinkCreate(title=title, url=video_url))
     return RedirectResponse(url=f"/ingest-web?created={material_id}", status_code=status.HTTP_303_SEE_OTHER)

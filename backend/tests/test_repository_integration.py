@@ -126,13 +126,9 @@ def test_enhancement_and_shadowing_exhaustion_preserve_consumer_state() -> None:
         assert repository.get_material(material_id)["status"] == "ready"
 
         segment_id = repository.get_segments(material_id)[0]["id"]
-        attempt_id = repository.create_shadowing_attempt(segment_id, "/tmp/shadowing.m4a")
-        shadowing_job_id = repository.enqueue_job(
-            kind="shadowing",
-            material_id=None,
-            payload={"attempt_id": attempt_id, "segment_id": segment_id, "audio_path": "/tmp/shadowing.m4a"},
+        attempt_id, shadowing_job_id = repository.create_shadowing_submission(
+            segment_id, "/tmp/shadowing.m4a"
         )
-        repository.attach_shadowing_job(attempt_id, shadowing_job_id)
         with engine.begin() as connection:
             connection.execute(
                 text("UPDATE job SET status = 'pending', attempts = 3 WHERE id = :job_id"),
@@ -150,4 +146,30 @@ def test_enhancement_and_shadowing_exhaustion_preserve_consumer_state() -> None:
                 connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": shadowing_job_id})
             connection.execute(text("DELETE FROM material WHERE id = :material_id"), {"material_id": material_id})
             connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": tts_job_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_voice_profile_default_switch_is_persisted() -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    created: list[int] = []
+    try:
+        first = repository.create_voice_profile(name="first", voice_id="voice-first")
+        second = repository.create_voice_profile(name="second", voice_id="voice-second")
+        created.extend([first, second])
+        assert repository.default_voice_id() == "voice-second"
+
+        assert repository.set_default_voice_profile(first) is True
+        assert repository.default_voice_id() == "voice-first"
+        profiles = repository.voice_profiles()
+        assert sum(bool(profile["is_default"]) for profile in profiles if profile["id"] in created) == 1
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM voice_profile WHERE id = ANY(:ids)"), {"ids": created})
         engine.dispose()

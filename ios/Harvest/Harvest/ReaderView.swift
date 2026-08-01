@@ -97,9 +97,36 @@ struct ReaderView: View {
                         Spacer()
                     }
                     if let current = currentSegment(in: material) {
-                        HStack(spacing: 18) {
-                            NavigationLink("问这一句") { CompanionView(materialID: material.id, segment: current) }
-                            NavigationLink("跟读这一句") { ShadowingView(segment: current) }
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(spacing: 18) {
+                                NavigationLink("问这一句") {
+                                    CompanionView(materialID: material.id, segment: current)
+                                }
+                                NavigationLink("跟读这一句") { ShadowingView(segment: current) }
+                            }
+                            if !tokens(for: current, in: material).isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        Text("点字词提问")
+                                            .foregroundStyle(DesignTokens.muted)
+                                        ForEach(tokens(for: current, in: material)) { token in
+                                            NavigationLink(token.surface) {
+                                                CompanionView(
+                                                    materialID: material.id,
+                                                    segment: current,
+                                                    focusText: token.surface
+                                                )
+                                            }
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(
+                                                DesignTokens.surface,
+                                                in: RoundedRectangle(cornerRadius: 9)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(DesignTokens.accent)

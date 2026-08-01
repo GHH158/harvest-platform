@@ -128,9 +128,9 @@ private struct MaterialRow: View {
 
     private var statusLabel: String {
         switch material.status {
-        case "ready": "朗读已准备好"
+        case "ready": material.kind == "video" ? "视频已准备好" : "朗读已准备好"
         case "failed": material.errorMessage ?? "准备时出了点问题"
-        case "processing": "正在准备朗读"
+        case "processing": material.kind == "video" ? "正在准备视频" : "正在准备朗读"
         default: "排队等候中"
         }
     }

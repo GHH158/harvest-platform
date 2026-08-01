@@ -149,14 +149,14 @@ Fun-ASR / Paraformer 提供**句子级 + 词语级时间戳**,并有 `timestamp_
 
 | 项目 | 单价 |
 |---|---|
-| TTS | 约 **2 元/万字符**(2000 字文章 ≈ **0.4 元**) |
+| TTS | 北京原价 **1.4 元/万字符**(2000 字文章 ≈ **0.28 元**) |
 | 音色克隆 | 0.01 元/个,一次性 |
-| ASR | 按语音时长计费,**静音不计费**;**具体单价需开通后在控制台确认** |
+| ASR | Fun-ASR 北京原价 **0.00022 元/秒**(约 0.792 元/小时) |
 | LLM(DeepSeek) | 极低,个人用量每月几元 |
 | OSS 存储 | 0.09–0.12 元/GB/月 |
 | OSS 公网流出 | 闲时 0.25 元/GB,忙时 0.5 元/GB(上传免费) |
 
-**粗略月度估算**:在实施 §3.4 流量控制策略的前提下,预计 **20–40 元/月**。ASR 单价确认后再修正本节。
+**粗略月度估算**:在实施 §3.4 流量控制策略的前提下,典型个人用量预计 **10–20 元/月**;实际由文章字符数、音视频时长和重复播放次数决定。
 
 ### 2.5 免费额度策略
 
@@ -173,7 +173,7 @@ Fun-ASR / Paraformer 提供**句子级 + 词语级时间戳**,并有 `timestamp_
 | 百炼模型推理 | 每模型 100 万 tokens,总计 7000 万+ | 90 天 |
 | 知识库(RAG) | 一次性 720 小时 | **仅 30 天**,多库翻倍扣减 |
 | OSS 存储 | 20 GB | 3 个月 |
-| OSS 外网流出 | 2 GB + 叠加 5 GB/月 | 3 个月 |
+| OSS 外网流出 | 北京地域 2 GB | 3 个月 |
 | OSS 请求 | 20 万次 | 3 个月 |
 
 **开通后第一件事:打开「免费额度用完即停」开关**(仅限北京地域模型、有效期内),避免额度耗尽后静默转按量付费。
@@ -279,6 +279,8 @@ Tailscale  →  小流量控制通道(API 调用、AI 对话、进度同步)
 OSS        →  大流量媒体分发(朗读音频、视频)
 ```
 
+**当前媒体访问策略:**iPhone 和百炼文件识别都直接消费 `OSS_PUBLIC_BASE_URL` 下的对象 URL，因此 `materials/`、`temporary/`、`shadowing/` 的对象必须能被持有 URL 的访问方读取。当前版本不使用短期签名 URL或 CDN；这是为了保证 HLS 相对分片、离线续传和百炼异步回读使用同一套稳定 URL。Bucket 与对象键不得用于存放项目之外的私密文件。若以后要改为私有媒体分发，必须先在本文档设计 HLS 清单重写、分片签名与离线过期策略，不能只把 Bucket 改成私有后期待现有客户端继续工作。
+
 **附带好处:播放不再依赖 Mac 在线。** Mac 只需在处理新内容时开机。
 
 ### 3.4 流量成本控制(设计前提,非优化项)
@@ -322,7 +324,7 @@ OSS        →  大流量媒体分发(朗读音频、视频)
 - `materials/`:正式朗读音频、视频/纯音频 HLS,**不设置自动过期**
 - 后端设置页应用规则前先读取 Bucket 现有生命周期,只替换 ID 为 `harvest-temporary-asr` / `harvest-shadowing-recordings` 的两条规则,不得覆盖用户已有规则。保留天数可用 `OSS_TEMPORARY_RETENTION_DAYS` / `OSS_SHADOWING_RETENTION_DAYS` 调整,下限为 1 天
 
-**实施四条策略后**:每周 2 个 20 分钟视频、每个看 1 遍 + 跟读 5 次,约 **2.3 GB/月**,免费期内基本覆盖,之后约 1–2 元/月。**不做则是 12 GB/月以上,差 5 倍。**
+**实施四条策略后**:每周 2 个 20 分钟视频、每个看 1 遍 + 跟读 5 次,约 **2.3 GB/月**,北京地域的新用户 2 GB/3 个月流量额度只能覆盖早期验证的一部分;之后约 1–2 元/月。**不做则是 12 GB/月以上,差 5 倍。**
 
 ### 3.5 技术栈决策
 
@@ -439,7 +441,7 @@ CREATE TABLE media_asset (
 -- 任务队列
 CREATE TABLE job (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    kind          TEXT NOT NULL,        -- fetch|tts|asr|vision|transcode|upload_video|asr_video|translate_video|shadowing
+    kind          TEXT NOT NULL,        -- fetch|tts|asr|vision|download_video|transcode|upload_video|asr_video|translate_video|shadowing|voice_enrollment
     material_id   BIGINT REFERENCES material(id) ON DELETE CASCADE,
     status        TEXT NOT NULL,        -- pending|running|done|failed
     payload       JSONB,
@@ -577,11 +579,13 @@ iPhone:用户点击某个词 / 某一句,或直接提问
 | `tts` | `processing` | 阅读材料 `ready` | 材料 `failed` | 增强型 `asr` |
 | `asr` | **保持 `ready`** | 写入 token;低覆盖率也以 job `done` 收敛 | 只把 job 记为 `failed`,材料仍 `ready` | 无 |
 | `vision` | `processing` | 保持 `processing` | 材料 `failed` | `tts` |
+| `download_video` | `processing` | 保存本地原视频,保持 `processing` | 材料 `failed` | `transcode` |
 | `transcode` | `processing` | 保持 `processing` | 材料 `failed` | `upload_video` |
 | `upload_video` | `processing` | 保存归档/分发资产,保持 `processing` | 材料 `failed` | `asr_video` |
 | `asr_video` | `processing` | 写入日文字幕,保持 `processing` | 材料 `failed` | `translate_video` |
 | `translate_video` | `processing` | 写入中文字幕,材料 `ready` | 材料 `failed` | 无 |
 | `shadowing` | **不改变材料状态**;attempt `processing` | attempt `ready` | attempt `failed` | 无 |
+| `voice_enrollment` | 无 material;独立 job | 创建 `voice_profile` 并设为默认 | 只把 job 记为 `failed` | 无 |
 
 Worker 意外中断时可把未耗尽重试次数的 job 重新排队;重试耗尽后按上表失败规则收敛。增强型 `asr` 和 `shadowing` 的失败不能影响已可消费材料。每条跨阶段流水线必须有自动化状态机测试。
 
@@ -644,7 +648,7 @@ Worker 意外中断时可把未耗尽重试次数的 job 重新排队;重试耗�
 #### P3 — AI 陪读 + AI 聊天老师
 
 **后端**
-- 百炼 Qwen 文本模型接入；额度耗尽后切换 DeepSeek
+- 百炼 Qwen 文本模型接入；`LLM_PROVIDER=auto` 时 Qwen 调用失败且已配置 DeepSeek Key 则自动切换 DeepSeek；设置页也可强制指定单一供应商
 - `/companion`:带材料上下文,写入 `companion_message`
 - `/chat`:独立会话,写入 `chat_message`
 
@@ -681,8 +685,9 @@ Worker 意外中断时可把未耗尽重试次数的 job 重新排队;重试耗�
 
 #### P6 — 扩展
 
-- Qwen-VL:拍照 → 文字 → 进入阅读流水线
-- Qwen-Omni:语音对话老师
+- Qwen-VL:iPhone 直接调用相机或选择照片 → 文字 → 进入阅读流水线
+- Qwen-Omni:语音对话老师。iPhone 采集 16 kHz/16-bit/单声道 PCM,经 Tailscale WebSocket 发给 Mac;Mac 持有 Key 并中继到百炼 Realtime WebSocket;返回的 24 kHz PCM 与双方转录实时回传 iPhone。iOS 不持有云 Key
+- Realtime 会话属于持续的交互通道,不进入 job 表;录音文件识别、声音复刻、视频下载/转码等可收敛的耗时操作仍必须使用 job
 
 ### 6.3 提前编码与统一云验证
 
@@ -763,13 +768,17 @@ FastAPI 只监听 `127.0.0.1:8000`,由 Tailscale Serve 把控制面暴露到私�
 
 OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网前缀与保留天数,再点击「应用 OSS 生命周期规则」。该操作是显式的一次性 Bucket 配置,不得在每次 `start.sh` 时自动改写云端规则。
 
+后端设置页同时管理文本模型路由、DeepSeek 备用、Omni WebSocket 地址和音色。`LLM_PROVIDER=auto` 为默认值;百炼失败时只有在已填写 `DEEPSEEK_API_KEY` 且 `LLM_FALLBACK_ON_ERROR=true` 时才自动降级。设置页必须提供显式清除密钥的操作,空白密码框仍表示保留原值。worker 在启动时读取配置,保存后需要重启 API/worker。
+
+`qwen-audio-3.0-tts-plus` 的 `longanhuan_v3.6` 系统音色只支持中文/英文,不得作为日语默认音色。未选择日语基础音色或尚未完成声音复刻时,TTS job 必须明确失败。声音复刻从设置页上传本人或已授权的 3–30 秒日语参考录音,经 `voice_enrollment` job 与 `temporary/` OSS 中转创建 `voice_profile`,成功后设为默认。
+
 ---
 
 ## 8. 风险与遗留问题
 
 | 问题 | 状态 | 说明 |
 |---|---|---|
-| **ASR 单价未知** | 待确认 | 影响成本估算,开通后在控制台查 |
+| **ASR 单价** | 已确认价格、待实账 | 2026-08-01 官方北京原价 0.00022 元/秒;开通后仍以控制台实账确认 |
 | **Qwen-Audio-3.0-TTS 过新** | 已知 | 发布仅 10 天;可随时切回 CosyVoice |
 | **TTS 生成慢** | 已知 | 约 16 字符/秒;必须做成后台任务 + 进度提示 |
 | **ASR 与原文对齐可能失败** | 待验证 | P2 的核心难点;失败时退化为句子级,不能崩 |
@@ -777,6 +786,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | **OSS 成为关键依赖** | 已知 | 支持离线下载后,已下载内容不受影响 |
 | **视频链接下载的合规性** | 已知 | 涉及各平台服务条款,个人学习用途自行把握 |
 | **音色克隆的合规性** | 已知 | 仅可克隆本人声音或已获授权的声音 |
+| **公开 OSS 媒体 URL** | 已知 | 当前为 HLS/离线/云回读的设计前提;Bucket 不存放项目外私密文件,私有化需先重做签名与清单策略 |
 
 ---
 
@@ -804,3 +814,4 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-07-31 | 修订 §4.2、§4.3、§5.1,新增 §5.5:明确 `material.status` 是用户可消费状态,增强型 ASR 不得降低 `ready`;补齐跟读异步状态字段、各 job 的前置/成功/失败/下一阶段规则,并在 §7.4 固化 Tailscale 绑定与视频上传限制 |
 | 2026-07-31 | 将 HLS 从 §3.4 的第二版可选优化升级为 P5 正式范围:视频/纯音频 6 秒分片、逐片持久化、断点续传、连续首批分片落盘后即可观看;同步修订 §5.2 和 §6.2 P5 验收范围。OSS 生命周期自动清理仍保留为可选项 |
 | 2026-07-31 | 将 OSS 生命周期自动清理升级为 P5 正式范围:`temporary/` 1 天、`shadowing/` 7 天、`materials/` 永不过期;设置页合并应用 Harvest 两条规则并保留 Bucket 既有规则。`pgvector` 继续只作为未来语义检索预留,不进入当前阶段 |
+| 2026-08-01 | 补齐 P3/P5/P6 无密钥代码范围:文本模型支持 auto/Qwen/DeepSeek 路由与失败降级;新增视频链接 `download_video`、日语声音复刻 `voice_enrollment` 状态机;P6 明确 iPhone→Mac→百炼的 Realtime WebSocket PCM 协议;固定当前 OSS 公网稳定 URL 策略并修正北京 OSS 免费流量与 TTS/ASR 价格记录 |

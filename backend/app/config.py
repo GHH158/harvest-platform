@@ -22,16 +22,25 @@ class Settings(BaseSettings):
     dashscope_api_key: str | None = None
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/api/v1"
     dashscope_tts_model: str = "qwen-audio-3.0-tts-plus"
-    dashscope_tts_voice: str = "longanhuan_v3.6"
+    # System voices currently do not cover Japanese reliably. Keep this empty
+    # until a Japanese-capable cloned/base voice has been selected.
+    dashscope_tts_voice: str | None = None
     dashscope_asr_model: str = "fun-asr"
     dashscope_asr_poll_seconds: float = 2.0
     dashscope_asr_timeout_seconds: int = 900
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-flash"
     dashscope_chat_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_chat_model: str = "qwen-plus"
+    llm_provider: str = "auto"
+    llm_fallback_on_error: bool = True
     dashscope_omni_model: str = "qwen3.5-omni-flash-realtime"
+    dashscope_omni_ws_url: str | None = None
+    dashscope_omni_voice: str = "Ethan"
+    dashscope_omni_instructions: str = (
+        "你是克制、耐心的日语口语老师。优先用自然日语交流；当用户明显没听懂时，再用简短中文解释。"
+    )
     dashscope_vl_model: str = "qwen-vl-plus"
     oss_endpoint: str | None = None
     oss_bucket: str | None = None
@@ -45,6 +54,8 @@ class Settings(BaseSettings):
     worker_stale_running_seconds: int = 900
     worker_max_attempts: int = 3
     max_video_upload_bytes: int = 2_000_000_000
+    max_photo_upload_bytes: int = 20_000_000
+    max_audio_upload_bytes: int = 25_000_000
     min_free_disk_bytes: int = 5_000_000_000
     data_dir: Path = ROOT_DIR / "backend" / "data"
 

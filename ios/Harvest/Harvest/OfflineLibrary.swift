@@ -5,6 +5,8 @@ struct OfflineEntry: Codable, Identifiable {
     let localAudioPath: String?
     let videoSegmentPaths: [String?]?
     let audioSegmentPaths: [String?]?
+    let videoSegmentDurations: [Double]?
+    let audioSegmentDurations: [Double]?
     let totalVideoSegments: Int?
     let totalAudioSegments: Int?
     let downloadedAt: Date
@@ -14,6 +16,8 @@ struct OfflineEntry: Codable, Identifiable {
         localAudioPath: String? = nil,
         videoSegmentPaths: [String?]? = nil,
         audioSegmentPaths: [String?]? = nil,
+        videoSegmentDurations: [Double]? = nil,
+        audioSegmentDurations: [Double]? = nil,
         totalVideoSegments: Int? = nil,
         totalAudioSegments: Int? = nil,
         downloadedAt: Date = .now
@@ -22,6 +26,8 @@ struct OfflineEntry: Codable, Identifiable {
         self.localAudioPath = localAudioPath
         self.videoSegmentPaths = videoSegmentPaths
         self.audioSegmentPaths = audioSegmentPaths
+        self.videoSegmentDurations = videoSegmentDurations
+        self.audioSegmentDurations = audioSegmentDurations
         self.totalVideoSegments = totalVideoSegments
         self.totalAudioSegments = totalAudioSegments
         self.downloadedAt = downloadedAt
@@ -199,7 +205,10 @@ final class OfflineLibrary: ObservableObject {
         let mediaDirectory = root.appending(path: directoryName)
         try fileManager.createDirectory(at: mediaDirectory, withIntermediateDirectories: true)
         var paths = existingPaths(for: mediaPlaylist.segments, in: mediaDirectory)
-        try publishVideoEntry(material, media: media, paths: paths, total: mediaPlaylist.segments.count)
+        let durations = mediaPlaylist.segments.map(\.duration)
+        try publishVideoEntry(
+            material, media: media, paths: paths, durations: durations, total: mediaPlaylist.segments.count
+        )
 
         for index in mediaPlaylist.segments.indices where paths[index] == nil {
             try Task.checkCancellation()
@@ -207,7 +216,7 @@ final class OfflineLibrary: ObservableObject {
             let destination = segmentDestination(index: index, remoteURL: segment.url, directory: mediaDirectory)
             try await download(segment.url, to: destination)
             paths[index] = destination.path()
-            try publishVideoEntry(material, media: media, paths: paths, total: mediaPlaylist.segments.count)
+            try publishVideoEntry(material, media: media, paths: paths, durations: durations, total: mediaPlaylist.segments.count)
         }
     }
 
@@ -246,6 +255,7 @@ final class OfflineLibrary: ObservableObject {
         _ material: MaterialDetail,
         media: VideoOfflineMedia,
         paths: [String?],
+        durations: [Double],
         total: Int
     ) throws {
         let previous = entry(for: material.id)
@@ -254,6 +264,8 @@ final class OfflineLibrary: ObservableObject {
                 material: material,
                 videoSegmentPaths: media == .watch ? paths : previous?.videoSegmentPaths,
                 audioSegmentPaths: media == .shadowing ? paths : previous?.audioSegmentPaths,
+                videoSegmentDurations: media == .watch ? durations : previous?.videoSegmentDurations,
+                audioSegmentDurations: media == .shadowing ? durations : previous?.audioSegmentDurations,
                 totalVideoSegments: media == .watch ? total : previous?.totalVideoSegments,
                 totalAudioSegments: media == .shadowing ? total : previous?.totalAudioSegments
             )

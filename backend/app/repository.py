@@ -198,6 +198,45 @@ class Repository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def voice_profiles(self) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text("SELECT * FROM voice_profile ORDER BY is_default DESC, id DESC")
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def default_voice_id(self) -> str | None:
+        with self.engine.connect() as connection:
+            value = connection.execute(
+                text("SELECT voice_id FROM voice_profile WHERE is_default = true ORDER BY id DESC LIMIT 1")
+            ).scalar_one_or_none()
+        return str(value) if value else None
+
+    def create_voice_profile(self, *, name: str, voice_id: str, provider: str = "alibaba") -> int:
+        with self.engine.begin() as connection:
+            connection.execute(text("UPDATE voice_profile SET is_default = false WHERE is_default = true"))
+            profile_id = connection.execute(
+                text(
+                    """INSERT INTO voice_profile (name, provider, voice_id, is_default)
+                    VALUES (:name, :provider, :voice_id, true) RETURNING id"""
+                ),
+                {"name": name, "provider": provider, "voice_id": voice_id},
+            ).scalar_one()
+        return int(profile_id)
+
+    def set_default_voice_profile(self, profile_id: int) -> bool:
+        with self.engine.begin() as connection:
+            exists = connection.execute(
+                text("SELECT 1 FROM voice_profile WHERE id = :profile_id"), {"profile_id": profile_id}
+            ).scalar_one_or_none()
+            if exists is None:
+                return False
+            connection.execute(text("UPDATE voice_profile SET is_default = false WHERE is_default = true"))
+            connection.execute(
+                text("UPDATE voice_profile SET is_default = true WHERE id = :profile_id"), {"profile_id": profile_id}
+            )
+        return True
+
     def replace_tokens(self, material_id: int, tokens: list[dict[str, Any]]) -> None:
         """Atomically replace P2 token timestamps without changing source text."""
         with self.engine.begin() as connection:
@@ -357,13 +396,36 @@ class Repository:
             ).mappings().first()
         return dict(row) if row else None
 
-    def create_shadowing_attempt(self, segment_id: int, audio_path: str) -> int:
+    def create_shadowing_submission(self, segment_id: int, audio_path: str) -> tuple[int, int]:
+        """Create the attempt and its job atomically after the upload is safely on disk."""
         with self.engine.begin() as connection:
-            attempt_id = connection.execute(
-                text("INSERT INTO shadowing_attempt (segment_id, audio_path) VALUES (:segment_id, :audio_path) RETURNING id"),
-                {"segment_id": segment_id, "audio_path": audio_path},
-            ).scalar_one()
-        return int(attempt_id)
+            attempt_id = int(
+                connection.execute(
+                    text(
+                        """INSERT INTO shadowing_attempt (segment_id, audio_path, status)
+                        VALUES (:segment_id, :audio_path, 'processing') RETURNING id"""
+                    ),
+                    {"segment_id": segment_id, "audio_path": audio_path},
+                ).scalar_one()
+            )
+            payload = json.dumps(
+                {"attempt_id": attempt_id, "segment_id": segment_id, "audio_path": audio_path},
+                ensure_ascii=False,
+            )
+            job_id = int(
+                connection.execute(
+                    text(
+                        """INSERT INTO job (kind, material_id, status, payload)
+                        VALUES ('shadowing', NULL, 'pending', CAST(:payload AS JSONB)) RETURNING id"""
+                    ),
+                    {"payload": payload},
+                ).scalar_one()
+            )
+            connection.execute(
+                text("UPDATE shadowing_attempt SET job_id = :job_id WHERE id = :attempt_id"),
+                {"attempt_id": attempt_id, "job_id": job_id},
+            )
+        return attempt_id, job_id
 
     def complete_shadowing_attempt(self, attempt_id: int, transcript: str, diff: list[dict[str, Any]], score: float) -> None:
         with self.engine.begin() as connection:
@@ -381,20 +443,6 @@ class Repository:
                 text("SELECT * FROM shadowing_attempt WHERE id = :attempt_id"), {"attempt_id": attempt_id}
             ).mappings().first()
         return dict(row) if row else None
-
-    def attach_shadowing_job(self, attempt_id: int, job_id: int) -> None:
-        with self.engine.begin() as connection:
-            connection.execute(
-                text("UPDATE shadowing_attempt SET job_id = :job_id, status = 'processing' WHERE id = :attempt_id"),
-                {"attempt_id": attempt_id, "job_id": job_id},
-            )
-
-    def update_shadowing_audio_path(self, attempt_id: int, audio_path: str) -> None:
-        with self.engine.begin() as connection:
-            connection.execute(
-                text("UPDATE shadowing_attempt SET audio_path = :audio_path WHERE id = :attempt_id"),
-                {"attempt_id": attempt_id, "audio_path": audio_path},
-            )
 
     def fail_shadowing_attempt(self, attempt_id: int, message: str) -> None:
         with self.engine.begin() as connection:

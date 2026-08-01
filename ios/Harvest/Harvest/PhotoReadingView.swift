@@ -1,23 +1,107 @@
 import PhotosUI
 import SwiftUI
+import UIKit
 
 struct PhotoReadingView: View {
     @EnvironmentObject private var configuration: AppConfiguration
     @State private var selection: PhotosPickerItem?
-    @State private var message = "选一张包含日语的照片。"
+    @State private var isShowingCamera = false
+    @State private var isSubmitting = false
+    @State private var message = "拍下或选择一张包含日语的照片。"
 
     var body: some View {
         VStack(spacing: 22) {
-            Text("把眼前的日语，\n留进材料库。") .font(.system(size: 32, design: .serif)).foregroundStyle(DesignTokens.ink)
-            PhotosPicker("选择照片", selection: $selection, matching: .images).buttonStyle(PrimaryButtonStyle())
+            Text("把眼前的日语，\n留进材料库。")
+                .font(.system(size: 32, design: .serif))
+                .foregroundStyle(DesignTokens.ink)
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                Button("打开相机") { isShowingCamera = true }
+                    .buttonStyle(PrimaryButtonStyle())
+            }
+            PhotosPicker("从照片中选择", selection: $selection, matching: .images)
+                .buttonStyle(SecondaryButtonStyle())
+            if isSubmitting { ProgressView().tint(DesignTokens.accent) }
             Text(message).font(.footnote).foregroundStyle(DesignTokens.muted)
             Spacer()
-        }.padding(DesignTokens.pageInset).background(DesignTokens.canvas.ignoresSafeArea()).navigationTitle("拍照阅读")
-        .onChange(of: selection) { _, item in Task { await submit(item) } }
+        }
+        .padding(DesignTokens.pageInset)
+        .background(DesignTokens.canvas.ignoresSafeArea())
+        .navigationTitle("拍照阅读")
+        .sheet(isPresented: $isShowingCamera) {
+            CameraPicker { image in
+                isShowingCamera = false
+                Task { await submit(image.jpegData(compressionQuality: 0.9)) }
+            }
+            .ignoresSafeArea()
+        }
+        .onChange(of: selection) { _, item in
+            Task {
+                guard let data = try? await item?.loadTransferable(type: Data.self),
+                      let image = UIImage(data: data) else { return }
+                await submit(image.jpegData(compressionQuality: 0.9))
+            }
+        }
     }
-    @MainActor private func submit(_ item: PhotosPickerItem?) async {
-        guard let item, let data = try? await item.loadTransferable(type: Data.self), let endpoint = configuration.endpoint else { return }
+
+    @MainActor
+    private func submit(_ data: Data?) async {
+        guard let data, let endpoint = configuration.endpoint else { return }
+        isSubmitting = true
+        defer { isSubmitting = false }
         let url = FileManager.default.temporaryDirectory.appending(path: "photo-\(UUID().uuidString).jpg")
-        do { try data.write(to: url); _ = try await APIClient(baseURL: endpoint).uploadPhoto(url); message = "已交给后台识别日语。" } catch { message = error.localizedDescription }
+        defer { try? FileManager.default.removeItem(at: url) }
+        do {
+            try data.write(to: url, options: .atomic)
+            _ = try await APIClient(baseURL: endpoint).uploadPhoto(url)
+            message = "已交给后台识别。完成后会出现在材料列表。"
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+}
+
+private struct CameraPicker: UIViewControllerRepresentable {
+    let onCapture: (UIImage) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onCapture: onCapture) }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let controller = UIImagePickerController()
+        controller.sourceType = .camera
+        controller.cameraCaptureMode = .photo
+        controller.delegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let onCapture: (UIImage) -> Void
+        init(onCapture: @escaping (UIImage) -> Void) { self.onCapture = onCapture }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            if let image = info[.originalImage] as? UIImage { onCapture(image) }
+            picker.dismiss(animated: true)
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            picker.dismiss(animated: true)
+        }
+    }
+}
+
+private struct SecondaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.body.weight(.semibold))
+            .foregroundStyle(DesignTokens.ink)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 15)
+            .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 13))
+            .overlay(RoundedRectangle(cornerRadius: 13).stroke(DesignTokens.separator))
+            .opacity(configuration.isPressed ? 0.72 : 1)
     }
 }

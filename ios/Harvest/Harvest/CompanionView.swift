@@ -4,10 +4,20 @@ struct CompanionView: View {
     @EnvironmentObject private var configuration: AppConfiguration
     let materialID: Int
     let segment: Segment
+    let focusText: String?
     @State private var messages: [ConversationMessage] = []
     @State private var question = ""
     @State private var errorMessage: String?
     @State private var isSending = false
+
+    init(materialID: Int, segment: Segment, focusText: String? = nil) {
+        self.materialID = materialID
+        self.segment = segment
+        self.focusText = focusText
+        if let focusText {
+            _question = State(initialValue: "请解释「\(focusText)」在这句话里的意思和用法。")
+        }
+    }
 
     var body: some View {
         VStack(spacing: 14) {
@@ -15,6 +25,11 @@ struct CompanionView: View {
                 .font(.system(.title3, design: .serif))
                 .foregroundStyle(DesignTokens.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if let focusText {
+                Text("正在问：\(focusText)")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(DesignTokens.accent)
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(messages) { message in

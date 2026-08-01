@@ -26,6 +26,21 @@
         <button type="submit">开始准备朗读</button>
       </form>
       <p class="hint">一次只提交一种来源。链接会在后台提取正文。</p>
+      <section class="ingest-section">
+        <p class="eyebrow">视频跟读</p>
+        <h2>留下一段画面，<br>把对白慢慢听清。</h2>
+        <form method="post" action="/ingest-web/video-file" enctype="multipart/form-data">
+          <label>标题 <span>可选</span><input name="title" maxlength="160" placeholder="例如：ドラマ 第1話"></label>
+          <label>本地视频<input type="file" name="video" accept="video/mp4,video/quicktime,video/x-m4v,video/webm,video/x-matroska" required></label>
+          <button type="submit">上传并准备视频</button>
+        </form>
+        <form method="post" action="/ingest-web/video-link">
+          <label>标题 <span>可选</span><input name="title" maxlength="160"></label>
+          <label>视频链接<input type="url" name="video_url" required placeholder="https://..."></label>
+          <button type="submit">下载并准备视频</button>
+        </form>
+        <p class="hint">一次只处理一个视频，不下载播放列表。请确认链接内容允许个人下载使用。</p>
+      </section>
     </main>
     {% if created_material_id %}
     <script>
@@ -36,8 +51,8 @@
       function describe(material) {
         switch (material.status) {
           case "pending": return "已加入队列，等待开始准备。";
-          case "processing": return "正在生成朗读。完成后会自动提示你。";
-          case "ready": return "朗读已准备好。现在可在 iPhone 打开 Harvest 开始听读。";
+          case "processing": return material.kind === "video" ? "正在下载、转码并生成字幕。" : "正在生成朗读。完成后会自动提示你。";
+          case "ready": return material.kind === "video" ? "视频已准备好。现在可在 iPhone 打开 Harvest。" : "朗读已准备好。现在可在 iPhone 打开 Harvest 开始听读。";
           case "failed": return `准备没有完成：${material.error_message || "请查看后台日志后重试。"}`;
           default: return "正在确认材料状态。";
         }

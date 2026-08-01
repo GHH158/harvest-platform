@@ -11,29 +11,50 @@
     <label>Tailscale 主机名<input name="TAILSCALE_HOSTNAME" value="{{ values.TAILSCALE_HOSTNAME }}"></label>
     <h2>百炼（免费额度优先）</h2>
     <label>百炼 API Key（已配置：{{ "是" if status.DASHSCOPE_API_KEY else "否" }}）<input type="password" name="DASHSCOPE_API_KEY" placeholder="留空则保持现有值"></label>
+    <label class="check"><input type="checkbox" name="CLEAR_DASHSCOPE_API_KEY">清除现有百炼 Key</label>
     <label>TTS 服务地址<input name="DASHSCOPE_BASE_URL" value="{{ values.DASHSCOPE_BASE_URL }}"></label>
     <label>TTS 模型<input name="DASHSCOPE_TTS_MODEL" value="{{ values.DASHSCOPE_TTS_MODEL }}"></label>
-    <label>TTS 音色 ID<input name="DASHSCOPE_TTS_VOICE" value="{{ values.DASHSCOPE_TTS_VOICE }}"></label>
+    <label>TTS 音色 ID<input name="DASHSCOPE_TTS_VOICE" value="{{ values.DASHSCOPE_TTS_VOICE or '' }}" placeholder="建议使用下方创建的日语复刻音色"></label>
     <label>ASR 模型<input name="DASHSCOPE_ASR_MODEL" value="{{ values.DASHSCOPE_ASR_MODEL }}"></label>
     <label>聊天兼容接口<input name="DASHSCOPE_CHAT_BASE_URL" value="{{ values.DASHSCOPE_CHAT_BASE_URL }}"></label>
     <label>聊天模型<input name="DASHSCOPE_CHAT_MODEL" value="{{ values.DASHSCOPE_CHAT_MODEL }}"></label>
+    <label>聊天模型路由<select name="LLM_PROVIDER"><option value="auto"{% if values.LLM_PROVIDER == "auto" %} selected{% endif %}>自动：Qwen 失败后切 DeepSeek</option><option value="dashscope"{% if values.LLM_PROVIDER == "dashscope" %} selected{% endif %}>只用百炼 Qwen</option><option value="deepseek"{% if values.LLM_PROVIDER == "deepseek" %} selected{% endif %}>只用 DeepSeek</option></select></label>
+    <label>自动降级<select name="LLM_FALLBACK_ON_ERROR"><option value="true"{% if values.LLM_FALLBACK_ON_ERROR %} selected{% endif %}>开启</option><option value="false"{% if not values.LLM_FALLBACK_ON_ERROR %} selected{% endif %}>关闭</option></select></label>
     <label>语音聊天模型<input name="DASHSCOPE_OMNI_MODEL" value="{{ values.DASHSCOPE_OMNI_MODEL }}"></label>
+    <label>语音聊天 WebSocket 地址<input name="DASHSCOPE_OMNI_WS_URL" value="{{ values.DASHSCOPE_OMNI_WS_URL or '' }}" placeholder="wss://业务空间ID.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"></label>
+    <label>语音聊天音色<input name="DASHSCOPE_OMNI_VOICE" value="{{ values.DASHSCOPE_OMNI_VOICE }}"></label>
+    <label>语音老师角色<textarea name="DASHSCOPE_OMNI_INSTRUCTIONS" rows="4">{{ values.DASHSCOPE_OMNI_INSTRUCTIONS }}</textarea></label>
     <label>视觉模型<input name="DASHSCOPE_VL_MODEL" value="{{ values.DASHSCOPE_VL_MODEL }}"></label>
     <h2>DeepSeek（百炼额度耗尽后的备用）</h2>
     <label>DeepSeek API Key（已配置：{{ "是" if status.DEEPSEEK_API_KEY else "否" }}）<input type="password" name="DEEPSEEK_API_KEY" placeholder="留空则保持现有值"></label>
+    <label class="check"><input type="checkbox" name="CLEAR_DEEPSEEK_API_KEY">清除现有 DeepSeek Key</label>
     <label>DeepSeek 服务地址<input name="DEEPSEEK_BASE_URL" value="{{ values.DEEPSEEK_BASE_URL }}"></label>
     <label>DeepSeek 模型<input name="DEEPSEEK_MODEL" value="{{ values.DEEPSEEK_MODEL }}"></label>
     <h2>OSS</h2>
     <label>Endpoint<input name="OSS_ENDPOINT" value="{{ values.OSS_ENDPOINT }}"></label><label>Bucket<input name="OSS_BUCKET" value="{{ values.OSS_BUCKET }}"></label>
     <label>Access Key ID（已配置：{{ "是" if status.OSS_ACCESS_KEY_ID else "否" }}）<input type="password" name="OSS_ACCESS_KEY_ID" placeholder="留空则保持现有值"></label>
+    <label class="check"><input type="checkbox" name="CLEAR_OSS_ACCESS_KEY_ID">清除现有 Access Key ID</label>
     <label>Access Key Secret（已配置：{{ "是" if status.OSS_ACCESS_KEY_SECRET else "否" }}）<input type="password" name="OSS_ACCESS_KEY_SECRET" placeholder="留空则保持现有值"></label>
+    <label class="check"><input type="checkbox" name="CLEAR_OSS_ACCESS_KEY_SECRET">清除现有 Access Key Secret</label>
     <label>公网访问前缀<input name="OSS_PUBLIC_BASE_URL" value="{{ values.OSS_PUBLIC_BASE_URL }}"></label>
     <label>ASR 临时音轨保留天数<input type="number" min="1" name="OSS_TEMPORARY_RETENTION_DAYS" value="{{ values.OSS_TEMPORARY_RETENTION_DAYS }}"></label>
     <label>跟读原始录音保留天数<input type="number" min="1" name="OSS_SHADOWING_RETENTION_DAYS" value="{{ values.OSS_SHADOWING_RETENTION_DAYS }}"></label>
     <h2>本地视频保护</h2>
     <label>单个视频最大字节数<input type="number" min="1" name="MAX_VIDEO_UPLOAD_BYTES" value="{{ values.MAX_VIDEO_UPLOAD_BYTES }}"></label>
+    <label>单张照片最大字节数<input type="number" min="1" name="MAX_PHOTO_UPLOAD_BYTES" value="{{ values.MAX_PHOTO_UPLOAD_BYTES }}"></label>
+    <label>录音最大字节数<input type="number" min="1" name="MAX_AUDIO_UPLOAD_BYTES" value="{{ values.MAX_AUDIO_UPLOAD_BYTES }}"></label>
     <label>磁盘保留字节数<input type="number" min="0" name="MIN_FREE_DISK_BYTES" value="{{ values.MIN_FREE_DISK_BYTES }}"></label>
     <button type="submit">保存本机设置</button>
+  </form>
+  <form method="post" action="/settings/voice-profile" enctype="multipart/form-data" class="ingest-card settings-card">
+    <h2>日语声音复刻</h2>
+    <p>上传本人或已获授权的 3–30 秒日语录音。任务会先经 OSS 临时中转，成功后自动成为阅读默认音色。</p>
+    {% if voice_job %}<p class="notice" id="voice-job" data-job-id="{{ voice_job }}">音色任务 #{{ voice_job }} 已加入队列，正在等待后台处理。</p>{% endif %}
+    <label>音色名称<input name="name" maxlength="160" placeholder="例如：我的日语朗读"></label>
+    <label>音色前缀 <span>最多 10 个英文字母或数字</span><input name="prefix" maxlength="10" pattern="[A-Za-z0-9]+" placeholder="myvoice"></label>
+    <label>参考录音<input type="file" name="sample" accept="audio/*" required></label>
+    <button type="submit">创建日语复刻音色</button>
+    {% if voice_profiles %}<div class="profile-list"><h3>已有音色</h3>{% for profile in voice_profiles %}<div class="profile-row"><span>{{ profile.name }}{% if profile.is_default %} · 当前默认{% endif %}</span>{% if not profile.is_default %}<button type="submit" formnovalidate formaction="/settings/voice-profile/{{ profile.id }}/default">设为默认</button>{% endif %}</div>{% endfor %}</div>{% endif %}
   </form>
   <form method="post" action="/settings/oss-lifecycle" class="ingest-card settings-card">
     <h2>OSS 自动清理</h2>
@@ -44,4 +65,6 @@
     {% if lifecycle_error %}<p class="notice">未能应用：{{ lifecycle_error }}</p>{% endif %}
     <button type="submit">应用 OSS 生命周期规则</button>
   </form>
-</main></body></html>
+</main>
+{% if voice_job %}<script>const voiceNotice=document.querySelector("#voice-job");async function pollVoice(){try{const response=await fetch(`/jobs/${voiceNotice.dataset.jobId}`,{cache:"no-store"});const job=await response.json();if(job.status==="done"){voiceNotice.textContent="音色已经创建并设为默认。刷新页面可查看。";return}if(job.status==="failed"){voiceNotice.textContent=`音色没有创建成功：${job.error_message||"请查看后台日志。"}`;return}}catch(_){}window.setTimeout(pollVoice,2000)}pollVoice()</script>{% endif %}
+</body></html>
