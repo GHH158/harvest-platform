@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+from app import main
+from app.chat import (
+    CHAT_SYSTEM_PROMPT,
+    ChatOutputError,
+    build_correction_guidance,
+    chat_messages,
+    generate_chat_turn,
+    parse_chat_turn,
+    topic_for,
+)
+from fastapi import HTTPException
+
+
+def model_json(*, correction: dict[str, Any] | None = None) -> str:
+    return json.dumps(
+        {
+            "correction": correction
+            or {
+                "needed": False,
+                "corrected_text": None,
+                "summary_zh": None,
+                "items": [],
+            },
+            "reply_ja": "それはいいですね。",
+            "follow_up_ja": "どんなところが一番よかったですか？",
+        },
+        ensure_ascii=False,
+    )
+
+
+def correction_json(*, category: str = "grammar", item_count: int = 1) -> str:
+    items = [
+        {
+            "original": f"映画を見ます{i}",
+            "replacement": f"映画を見ました{i}",
+            "reason_zh": "已经发生的事情使用过去时。",
+            "category": category,
+        }
+        for i in range(item_count)
+    ]
+    return model_json(
+        correction={
+            "needed": True,
+            "corrected_text": "昨日、映画を見ました。",
+            "summary_zh": "把动词改为过去时。",
+            "items": items,
+        }
+    )
+
+
+class SequenceLLM:
+    def __init__(self, *responses: str) -> None:
+        self.responses = list(responses)
+        self.calls: list[list[dict[str, str]]] = []
+
+    def reply(self, messages: list[dict[str, str]]) -> str:
+        self.calls.append(messages)
+        return self.responses.pop(0)
+
+
+def test_topics_accept_featured_or_custom_but_not_both() -> None:
+    assert topic_for("daily-happy", None) == ("最近、ちょっと嬉しかったこと", "daily-happy")
+    assert topic_for(None, "  最近的工作  ") == ("最近的工作", None)
+    with pytest.raises(ValueError, match="二选一"):
+        topic_for(None, "  ")
+    with pytest.raises(ValueError, match="二选一"):
+        topic_for("daily-happy", "周末")
+    with pytest.raises(ValueError, match="不存在"):
+        topic_for("missing", None)
+
+
+def test_valid_turns_decode_correction_and_no_correction() -> None:
+    natural = parse_chat_turn(model_json())
+    corrected = parse_chat_turn(correction_json())
+
+    assert natural.correction.needed is False
+    assert natural.correction.items == []
+    assert corrected.correction.corrected_text == "昨日、映画を見ました。"
+    assert corrected.correction.items[0].category == "grammar"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        correction_json(category="meaning"),
+        correction_json(item_count=4),
+        model_json(
+            correction={
+                "needed": True,
+                "corrected_text": None,
+                "summary_zh": "缺少修正版。",
+                "items": [],
+            }
+        ),
+        "not json",
+    ],
+)
+def test_invalid_model_contract_is_rejected(raw: str) -> None:
+    with pytest.raises(ChatOutputError):
+        parse_chat_turn(raw)
+
+
+def test_invalid_output_gets_exactly_one_repair_attempt() -> None:
+    llm = SequenceLLM("not json", model_json())
+
+    turn = generate_chat_turn(llm, [{"role": "user", "content": "昨日映画を見る"}])
+
+    assert turn.reply_ja == "それはいいですね。"
+    assert len(llm.calls) == 2
+    assert "Repair the supplied model output" in llm.calls[1][0]["content"]
+    assert llm.calls[1][1]["content"] == "not json"
+
+
+def test_two_invalid_outputs_return_explicit_error() -> None:
+    llm = SequenceLLM("not json", "still not json")
+
+    with pytest.raises(ChatOutputError, match="连续两次"):
+        generate_chat_turn(llm, [])
+
+    assert len(llm.calls) == 2
+
+
+def test_context_only_contains_recent_twenty_messages_and_chinese_rule() -> None:
+    history = [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": f"message-{index}"}
+        for index in range(25)
+    ]
+
+    messages = chat_messages(
+        topic="週末",
+        history=history,
+        guidance="- grammar",
+        user_message="我想说周末去了公园",
+    )
+
+    assert len(messages) == 22
+    assert messages[1]["content"] == "message-5"
+    assert messages[-2]["content"] == "message-24"
+    assert messages[-1]["content"] == "我想说周末去了公园"
+    assert "writes mainly in Chinese" in CHAT_SYSTEM_PROMPT
+    assert "- grammar" in messages[0]["content"]
+
+
+def test_recent_guidance_ranks_three_categories_and_caps_length() -> None:
+    rows: list[dict[str, str]] = []
+    for category, count in (("grammar", 4), ("naturalness", 3), ("register", 2), ("orthography", 1)):
+        rows.extend(
+            {
+                "category": category,
+                "original_fragment": f"{category}-old",
+                "replacement": f"{category}-new",
+                "reason_zh": "很长的原因" * 100,
+            }
+            for _ in range(count)
+        )
+
+    guidance = build_correction_guidance(rows, max_characters=600)
+
+    assert len(guidance) <= 600
+    assert "grammar（近期 4 次）" in guidance
+    assert "naturalness（近期 3 次）" in guidance
+    assert "register（近期 2 次）" in guidance
+    assert "orthography" not in guidance
+
+
+class ChatRepository:
+    def __init__(self) -> None:
+        self.completed = False
+        self.created: dict[str, Any] | None = None
+        self.session = {"id": "session-1", "topic": "週末"}
+
+    def recent_correction_guidance(self) -> str:
+        return "- grammar"
+
+    def create_chat_session(self, **values: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        self.created = values
+        session = {"id": values["session_id"], "topic": values["topic"], "starter_id": values["starter_id"]}
+        return session, {"id": 1, "role": "assistant", "content": values["assistant_content"]}
+
+    def get_chat_session(self, session_id: str) -> dict[str, str] | None:
+        return self.session if session_id == self.session["id"] else None
+
+    def chat_messages(self, session_id: str) -> list[dict[str, str]]:
+        return []
+
+    def complete_chat_turn(self, **values: Any):
+        self.completed = True
+        return (
+            {"id": 2, "role": "user", "content": values["user_content"]},
+            values["correction"],
+            {"id": 3, "role": "assistant", "content": values["assistant_content"]},
+        )
+
+
+def test_session_creation_returns_ai_opener(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = ChatRepository()
+    opener = parse_chat_turn(model_json())
+    captured: dict[str, Any] = {}
+
+    def turn(**values: Any):
+        captured.update(values)
+        return opener
+
+    monkeypatch.setattr(main, "repository", lambda: repository)
+    monkeypatch.setattr(main, "_chat_turn", turn)
+
+    result = main.create_chat_session(main.ChatSessionCreate(starter_id="daily-weekend"))
+
+    assert result["session"]["topic"] == "今週末の予定"
+    assert result["assistant"]["content"].endswith("どんなところが一番よかったですか？")
+    assert captured == {"topic": "今週末の予定", "history": [], "guidance": "- grammar", "user_message": None}
+
+
+def test_model_contract_failure_writes_no_partial_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = ChatRepository()
+
+    class BrokenLLM:
+        def __init__(self, settings: Any) -> None:
+            pass
+
+        def reply(self, messages: list[dict[str, str]]) -> str:
+            return "not json"
+
+    monkeypatch.setattr(main, "repository", lambda: repository)
+    monkeypatch.setattr(main, "LLMService", BrokenLLM)
+
+    with pytest.raises(HTTPException) as caught:
+        main.post_chat_message("session-1", main.ChatMessageCreate(message="昨日映画を見る"))
+
+    assert caught.value.status_code == 502
+    assert "连续两次" in caught.value.detail
+    assert repository.completed is False
+
+
+def test_legacy_chat_failure_does_not_create_a_partial_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = ChatRepository()
+
+    class BrokenLLM:
+        def __init__(self, settings: Any) -> None:
+            pass
+
+        def reply(self, messages: list[dict[str, str]]) -> str:
+            return "not json"
+
+    monkeypatch.setattr(main, "repository", lambda: repository)
+    monkeypatch.setattr(main, "LLMService", BrokenLLM)
+
+    with pytest.raises(HTTPException) as caught:
+        main.post_chat(main.ChatRequest(session_id="legacy-new", message="こんにちは"))
+
+    assert caught.value.status_code == 502
+    assert repository.completed is False

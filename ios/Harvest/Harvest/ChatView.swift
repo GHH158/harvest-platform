@@ -1,56 +1,704 @@
 import SwiftUI
 
+struct ChatTopicDeck {
+    private var remaining: [ChatTopic] = []
+    private var previousBatchIDs: Set<String> = []
+    private var universeIDs: Set<String> = []
+
+    mutating func nextBatch(from topics: [ChatTopic]) -> [ChatTopic] {
+        let currentIDs = Set(topics.map(\.id))
+        if currentIDs != universeIDs {
+            remaining = []
+            previousBatchIDs = []
+            universeIDs = currentIDs
+        }
+        if remaining.isEmpty {
+            let shuffled = topics.shuffled()
+            let notRecentlyShown = shuffled.filter { !previousBatchIDs.contains($0.id) }
+            let recentlyShown = shuffled.filter { previousBatchIDs.contains($0.id) }
+            remaining = notRecentlyShown + recentlyShown
+        }
+        let count = min(4, remaining.count)
+        let batch = Array(remaining.prefix(count))
+        remaining.removeFirst(count)
+        previousBatchIDs = Set(batch.map(\.id))
+        return batch
+    }
+}
+
+enum ChatTranscriptRow: Identifiable, Hashable {
+    case message(ConversationMessage)
+    case correction(ChatCorrection)
+
+    var id: String {
+        switch self {
+        case .message(let message): "message-\(message.id)"
+        case .correction(let correction): "correction-\(correction.id)"
+        }
+    }
+}
+
+func chatTranscriptRows(
+    messages: [ConversationMessage],
+    corrections: [ChatCorrection]
+) -> [ChatTranscriptRow] {
+    let byMessageID = Dictionary(uniqueKeysWithValues: corrections.map { ($0.userMessageID, $0) })
+    return messages.flatMap { message in
+        var rows: [ChatTranscriptRow] = [.message(message)]
+        if message.role == "user", let correction = byMessageID[message.id] {
+            rows.append(.correction(correction))
+        }
+        return rows
+    }
+}
+
+@MainActor
+final class ChatStore: ObservableObject {
+    @Published private(set) var topics: [ChatTopic] = []
+    @Published private(set) var displayedTopics: [ChatTopic] = []
+    @Published private(set) var activeSession: ChatSession?
+    @Published private(set) var messages: [ConversationMessage] = []
+    @Published private(set) var corrections: [ChatCorrection] = []
+    @Published var draft = ""
+    @Published var errorMessage: String?
+    @Published private(set) var isLoading = false
+    @Published private(set) var isSending = false
+    private var topicDeck = ChatTopicDeck()
+
+    var transcriptRows: [ChatTranscriptRow] {
+        chatTranscriptRows(messages: messages, corrections: corrections)
+    }
+
+    func loadTopics(using client: APIClient) async {
+        guard topics.isEmpty else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            topics = try await client.chatTopics()
+            displayedTopics = topicDeck.nextBatch(from: topics)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func showNextTopics() {
+        displayedTopics = topicDeck.nextBatch(from: topics)
+    }
+
+    func start(topic: ChatTopic, using client: APIClient) async {
+        await createSession(starterID: topic.id, customTopic: nil, using: client)
+    }
+
+    func startCustomTopic(using client: APIClient) async {
+        let topic = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !topic.isEmpty else { return }
+        await createSession(starterID: nil, customTopic: topic, using: client)
+    }
+
+    func openSession(id: String, using client: APIClient) async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let detail = try await client.chatSession(id: id)
+            activeSession = detail.session
+            messages = detail.messages
+            corrections = detail.corrections
+            draft = ""
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func send(using client: APIClient) async {
+        guard let activeSession else { return }
+        let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return }
+        isSending = true
+        defer { isSending = false }
+        do {
+            let turn = try await client.sendChatMessage(sessionID: activeSession.id, message: message)
+            messages.append(turn.user)
+            if let correction = turn.correction { corrections.append(correction) }
+            messages.append(turn.assistant)
+            draft = ""
+            errorMessage = nil
+        } catch {
+            // Keep the draft so a failed cloud request never makes the learner retype it.
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func beginNewTopic() {
+        activeSession = nil
+        messages = []
+        corrections = []
+        draft = ""
+        errorMessage = nil
+        if displayedTopics.isEmpty { showNextTopics() }
+    }
+
+    func removeCorrection(id: Int) {
+        corrections.removeAll { $0.id == id }
+    }
+
+    private func createSession(
+        starterID: String?,
+        customTopic: String?,
+        using client: APIClient
+    ) async {
+        isSending = true
+        defer { isSending = false }
+        do {
+            let creation = try await client.createChatSession(starterID: starterID, topic: customTopic)
+            activeSession = creation.session
+            messages = [creation.assistant]
+            corrections = []
+            draft = ""
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
 struct ChatView: View {
     @EnvironmentObject private var configuration: AppConfiguration
-    @State private var messages: [ConversationMessage] = []
-    @State private var draft = ""
-    @State private var errorMessage: String?
-    @State private var isSending = false
-    private let sessionID = "personal"
+    @StateObject private var store = ChatStore()
+    @State private var showingHistory = false
+    @State private var showingCorrections = false
+
+    private var client: APIClient? {
+        configuration.endpoint.map { APIClient(baseURL: $0) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
+            if store.activeSession == nil {
+                topicHome
+            } else {
+                conversation
+            }
+            if let errorMessage = store.errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(DesignTokens.accent)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, DesignTokens.pageInset)
+                    .padding(.top, 8)
+            }
+            composer
+        }
+        .background(DesignTokens.canvas.ignoresSafeArea())
+        .navigationTitle(store.activeSession?.topic ?? "聊天老师")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { secondaryActions }
+        .task(id: configuration.endpoint) {
+            guard let client else { return }
+            await store.loadTopics(using: client)
+        }
+        .sheet(isPresented: $showingHistory) {
+            NavigationStack {
+                if let client {
+                    ChatHistoryView(
+                        client: client,
+                        onSelect: { sessionID in
+                            Task { await store.openSession(id: sessionID, using: client) }
+                        },
+                        onDelete: { sessionID in
+                            if store.activeSession?.id == sessionID { store.beginNewTopic() }
+                        }
+                    )
+                }
+            }
+        }
+        .sheet(isPresented: $showingCorrections) {
+            NavigationStack {
+                if let client {
+                    CorrectionLibraryView(client: client) { correctionID in
+                        store.removeCorrection(id: correctionID)
+                    }
+                }
+            }
+        }
+    }
+
+    private var topicHome: some View {
+        ScrollView {
+            VStack(spacing: 26) {
+                VStack(spacing: 8) {
+                    Text("今日は何を話しましょう？")
+                        .font(.system(.title2, design: .serif, weight: .semibold))
+                        .foregroundStyle(DesignTokens.ink)
+                    Text("选一个主题，或者直接写下任何想聊的事")
+                        .font(.subheadline)
+                        .foregroundStyle(DesignTokens.muted)
+                }
+                .padding(.top, 54)
+
+                if store.isLoading && store.displayedTopics.isEmpty {
+                    ProgressView("正在准备主题")
+                        .tint(DesignTokens.accent)
+                        .foregroundStyle(DesignTokens.muted)
+                        .frame(maxWidth: .infinity, minHeight: 240)
+                } else {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                        ForEach(store.displayedTopics) { topic in
+                            Button {
+                                guard let client else { return }
+                                Task { await store.start(topic: topic, using: client) }
+                            } label: {
+                                TopicCard(topic: topic)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(store.isSending)
+                        }
+                    }
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { store.showNextTopics() }
+                    } label: {
+                        Label("换一批", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .foregroundStyle(DesignTokens.accent)
+                    .disabled(store.isSending || store.topics.isEmpty)
+                }
+            }
+            .padding(.horizontal, DesignTokens.pageInset)
+            .padding(.bottom, 30)
+        }
+    }
+
+    private var conversation: some View {
+        ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    if messages.isEmpty {
-                        Text("从一句简单的日语开始。")
-                            .font(.system(.title2, design: .serif))
-                            .foregroundStyle(DesignTokens.ink)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, 40)
+                    ForEach(store.transcriptRows) { row in
+                        transcriptRow(row)
                     }
-                    ForEach(messages) { message in
-                        Text(message.content)
-                            .foregroundStyle(message.role == "user" ? Color.white : DesignTokens.ink)
-                            .padding(12)
-                            .background(message.role == "user" ? DesignTokens.accent : DesignTokens.surface, in: RoundedRectangle(cornerRadius: 14))
-                            .frame(maxWidth: .infinity, alignment: message.role == "user" ? .trailing : .leading)
+                    if store.isSending {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small).tint(DesignTokens.accent)
+                            Text("老师正在想…")
+                                .font(.footnote)
+                                .foregroundStyle(DesignTokens.muted)
+                        }
+                        .id("thinking")
                     }
                 }
                 .padding(DesignTokens.pageInset)
             }
-            if let errorMessage { Text(errorMessage).font(.footnote).foregroundStyle(DesignTokens.accent).padding(.horizontal, DesignTokens.pageInset) }
-            HStack(spacing: 10) {
-                TextField("用日语说点什么", text: $draft, axis: .vertical)
-                    .padding(12).background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 12))
-                Button("发送") { Task { await send() } }.disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending).foregroundStyle(DesignTokens.accent)
+            .onChange(of: store.messages.count) {
+                guard let last = store.transcriptRows.last else { return }
+                withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
             }
-            .padding(DesignTokens.pageInset)
+            .onChange(of: store.isSending) {
+                if store.isSending { withAnimation { proxy.scrollTo("thinking", anchor: .bottom) } }
+            }
         }
-        .background(DesignTokens.canvas.ignoresSafeArea())
-        .navigationTitle("聊天老师")
+    }
+
+    @ViewBuilder
+    private func transcriptRow(_ row: ChatTranscriptRow) -> some View {
+        switch row {
+        case .message(let message):
+            MessageBubble(message: message)
+        case .correction(let correction):
+            CorrectionCard(correction: correction, showsTopic: false)
+        }
+    }
+
+    private var composer: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            TextField(
+                store.activeSession == nil ? "输入任意中文或日语主题" : "用日语聊下去",
+                text: $store.draft,
+                axis: .vertical
+            )
+            .lineLimit(1...5)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 15))
+            .overlay {
+                RoundedRectangle(cornerRadius: 15)
+                    .stroke(DesignTokens.separator, lineWidth: 0.5)
+            }
+            .submitLabel(.send)
+            .onSubmit { submit() }
+
+            Button(action: submit) {
+                Image(systemName: "arrow.up")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(DesignTokens.accent, in: Circle())
+            }
+            .disabled(
+                store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || store.isSending
+            )
+            .opacity(store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
+        }
+        .padding(.horizontal, DesignTokens.pageInset)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+    }
+
+    @ToolbarContentBuilder
+    private var secondaryActions: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                if store.activeSession != nil {
+                    Button {
+                        store.beginNewTopic()
+                    } label: {
+                        Label("新主题", systemImage: "plus.bubble")
+                    }
+                }
+                Button { showingHistory = true } label: {
+                    Label("历史", systemImage: "clock")
+                }
+                Button { showingCorrections = true } label: {
+                    Label("纠错库", systemImage: "text.badge.checkmark")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .foregroundStyle(DesignTokens.ink)
+            }
+        }
+    }
+
+    private func submit() {
+        guard let client else { return }
+        Task {
+            if store.activeSession == nil {
+                await store.startCustomTopic(using: client)
+            } else {
+                await store.send(using: client)
+            }
+        }
+    }
+}
+
+private struct TopicCard: View {
+    let topic: ChatTopic
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(topic.category)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(DesignTokens.accent)
+            Text(topic.titleJA)
+                .font(.system(.headline, design: .serif))
+                .foregroundStyle(DesignTokens.ink)
+                .lineLimit(3)
+            Spacer(minLength: 0)
+            Text(topic.hintZH)
+                .font(.caption)
+                .foregroundStyle(DesignTokens.muted)
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, minHeight: 126, alignment: .topLeading)
+        .padding(16)
+        .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: DesignTokens.cardRadius))
+        .overlay {
+            RoundedRectangle(cornerRadius: DesignTokens.cardRadius)
+                .stroke(DesignTokens.separator, lineWidth: 0.5)
+        }
+    }
+}
+
+private struct MessageBubble: View {
+    let message: ConversationMessage
+
+    var body: some View {
+        Text(message.content)
+            .font(.body)
+            .foregroundStyle(message.role == "user" ? Color.white : DesignTokens.ink)
+            .lineSpacing(4)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(
+                message.role == "user" ? DesignTokens.accent : DesignTokens.surface,
+                in: RoundedRectangle(cornerRadius: 16)
+            )
+            .frame(
+                maxWidth: UIScreen.main.bounds.width * 0.82,
+                alignment: message.role == "user" ? .trailing : .leading
+            )
+            .frame(maxWidth: .infinity, alignment: message.role == "user" ? .trailing : .leading)
+    }
+}
+
+private struct CorrectionCard: View {
+    let correction: ChatCorrection
+    let showsTopic: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                Label("表达调整", systemImage: "pencil.and.outline")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(DesignTokens.accent)
+                Spacer()
+                if showsTopic, let topic = correction.topic {
+                    Text(topic)
+                        .font(.caption)
+                        .foregroundStyle(DesignTokens.muted)
+                        .lineLimit(1)
+                }
+            }
+            correctionText(label: "原句", text: correction.originalText, muted: true)
+            correctionText(label: "更自然", text: correction.correctedText, muted: false)
+            Text(correction.summaryZH)
+                .font(.subheadline)
+                .foregroundStyle(DesignTokens.ink)
+            ForEach(correction.items.prefix(3)) { item in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(item.original) → \(item.replacement)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(DesignTokens.ink)
+                    Text("\(item.category.label) · \(item.reasonZH)")
+                        .font(.caption)
+                        .foregroundStyle(DesignTokens.muted)
+                }
+            }
+        }
+        .padding(16)
+        .background(DesignTokens.accentWash, in: RoundedRectangle(cornerRadius: DesignTokens.cardRadius))
+        .overlay {
+            RoundedRectangle(cornerRadius: DesignTokens.cardRadius)
+                .stroke(DesignTokens.accent.opacity(0.22), lineWidth: 0.5)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func correctionText(label: String, text: String, muted: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(DesignTokens.muted)
+            Text(text)
+                .font(.system(.body, design: .serif))
+                .foregroundStyle(muted ? DesignTokens.muted : DesignTokens.ink)
+        }
+    }
+}
+
+private struct ChatHistoryView: View {
+    @Environment(\.dismiss) private var dismiss
+    let client: APIClient
+    let onSelect: (String) -> Void
+    let onDelete: (String) -> Void
+    @State private var sessions: [ChatSession] = []
+    @State private var errorMessage: String?
+    @State private var isLoading = true
+
+    var body: some View {
+        Group {
+            if isLoading && sessions.isEmpty {
+                ProgressView("读取会话历史")
+            } else if sessions.isEmpty {
+                ContentUnavailableView("还没有聊天历史", systemImage: "bubble.left")
+            } else {
+                List {
+                    ForEach(sessions) { session in
+                        Button {
+                            onSelect(session.id)
+                            dismiss()
+                        } label: {
+                            VStack(alignment: .leading, spacing: 7) {
+                                Text(session.topic)
+                                    .font(.system(.headline, design: .serif))
+                                    .foregroundStyle(DesignTokens.ink)
+                                if let preview = session.lastMessagePreview {
+                                    Text(preview)
+                                        .font(.subheadline)
+                                        .foregroundStyle(DesignTokens.muted)
+                                        .lineLimit(2)
+                                }
+                            }
+                            .padding(.vertical, 8)
+                        }
+                        .listRowBackground(DesignTokens.surface)
+                        .swipeActions {
+                            Button(role: .destructive) {
+                                Task { await delete(session) }
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+            }
+        }
+        .background(DesignTokens.canvas)
+        .navigationTitle("聊天历史")
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("完成") { dismiss() }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(DesignTokens.accent)
+                    .padding()
+            }
+        }
         .task { await load() }
     }
 
-    @MainActor private func load() async {
-        guard let endpoint = configuration.endpoint else { return }
-        do { messages = try await APIClient(baseURL: endpoint).chat(sessionID: sessionID) } catch { errorMessage = error.localizedDescription }
+    @MainActor
+    private func load() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            sessions = try await client.chatSessions()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
-    @MainActor private func send() async {
-        guard let endpoint = configuration.endpoint else { return }
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        isSending = true; defer { isSending = false }
-        do { let reply = try await APIClient(baseURL: endpoint).sendChat(sessionID: sessionID, message: text); messages += [reply.user, reply.assistant]; draft = ""; errorMessage = nil } catch { errorMessage = error.localizedDescription }
+    @MainActor
+    private func delete(_ session: ChatSession) async {
+        do {
+            try await client.deleteChatSession(id: session.id)
+            sessions.removeAll { $0.id == session.id }
+            onDelete(session.id)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct CorrectionLibraryView: View {
+    @Environment(\.dismiss) private var dismiss
+    let client: APIClient
+    let onDelete: (Int) -> Void
+    @State private var corrections: [ChatCorrection] = []
+    @State private var sessions: [ChatSession] = []
+    @State private var query = ""
+    @State private var selectedTopic = ""
+    @State private var selectedCategory: ChatCorrectionCategory?
+    @State private var errorMessage: String?
+    @State private var isLoading = true
+
+    private var topics: [String] {
+        Array(Set(sessions.map(\.topic))).sorted()
+    }
+
+    var body: some View {
+        Group {
+            if isLoading && corrections.isEmpty {
+                ProgressView("读取纠错库")
+            } else if corrections.isEmpty {
+                ContentUnavailableView(
+                    query.isEmpty && selectedTopic.isEmpty && selectedCategory == nil ? "还没有纠错记录" : "没有符合筛选的记录",
+                    systemImage: "text.badge.checkmark"
+                )
+            } else {
+                List {
+                    ForEach(corrections) { correction in
+                        CorrectionCard(correction: correction, showsTopic: true)
+                            .listRowInsets(EdgeInsets(top: 7, leading: 18, bottom: 7, trailing: 18))
+                            .listRowBackground(DesignTokens.canvas)
+                            .listRowSeparator(.hidden)
+                            .swipeActions {
+                                Button(role: .destructive) {
+                                    Task { await delete(correction) }
+                                } label: {
+                                    Label("删除纠错", systemImage: "trash")
+                                }
+                            }
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+            }
+        }
+        .background(DesignTokens.canvas)
+        .navigationTitle("纠错库")
+        .searchable(text: $query, prompt: "搜索原句、修正版或说明")
+        .onSubmit(of: .search) { Task { await loadCorrections() } }
+        .onChange(of: selectedTopic) { Task { await loadCorrections() } }
+        .onChange(of: selectedCategory) { Task { await loadCorrections() } }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("完成") { dismiss() }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Section("主题") {
+                        Button("全部主题") { selectedTopic = "" }
+                        ForEach(topics, id: \.self) { topic in
+                            Button(topic) { selectedTopic = topic }
+                        }
+                    }
+                    Section("类别") {
+                        Button("全部类别") { selectedCategory = nil }
+                        ForEach(ChatCorrectionCategory.allCases) { category in
+                            Button(category.label) { selectedCategory = category }
+                        }
+                    }
+                } label: {
+                    Label("筛选", systemImage: "line.3.horizontal.decrease.circle")
+                }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(DesignTokens.accent)
+                    .padding()
+            }
+        }
+        .task {
+            async let loadedSessions = client.chatSessions()
+            async let loadedCorrections = client.chatCorrections()
+            do {
+                sessions = try await loadedSessions
+                corrections = try await loadedCorrections
+                errorMessage = nil
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isLoading = false
+        }
+    }
+
+    @MainActor
+    private func loadCorrections() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            corrections = try await client.chatCorrections(
+                query: query.trimmingCharacters(in: .whitespacesAndNewlines),
+                topic: selectedTopic.isEmpty ? nil : selectedTopic,
+                category: selectedCategory
+            )
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func delete(_ correction: ChatCorrection) async {
+        do {
+            try await client.deleteChatCorrection(id: correction.id)
+            corrections.removeAll { $0.id == correction.id }
+            onDelete(correction.id)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }

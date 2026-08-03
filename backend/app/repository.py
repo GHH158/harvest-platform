@@ -7,6 +7,8 @@ from typing import Any
 
 from sqlalchemy import Engine, text
 
+from .chat import build_correction_guidance
+
 
 @dataclass(frozen=True)
 class Job:
@@ -182,12 +184,92 @@ class Repository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def ensure_chat_session(self, session_id: str, topic: str = "旧版聊天") -> dict[str, Any]:
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    """INSERT INTO chat_session (id, topic)
+                    VALUES (:session_id, :topic)
+                    ON CONFLICT (id) DO UPDATE SET topic = chat_session.topic
+                    RETURNING *"""
+                ),
+                {"session_id": session_id, "topic": topic},
+            ).mappings().one()
+        return dict(row)
+
+    def create_chat_session(
+        self,
+        *,
+        session_id: str,
+        topic: str,
+        starter_id: str | None,
+        assistant_content: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self.engine.begin() as connection:
+            session = connection.execute(
+                text(
+                    """INSERT INTO chat_session (id, topic, starter_id)
+                    VALUES (:session_id, :topic, :starter_id) RETURNING *"""
+                ),
+                {"session_id": session_id, "topic": topic, "starter_id": starter_id},
+            ).mappings().one()
+            assistant = connection.execute(
+                text(
+                    """INSERT INTO chat_message (session_id, role, content)
+                    VALUES (:session_id, 'assistant', :content) RETURNING *"""
+                ),
+                {"session_id": session_id, "content": assistant_content},
+            ).mappings().one()
+        return dict(session), dict(assistant)
+
+    def get_chat_session(self, session_id: str) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT * FROM chat_session WHERE id = :session_id"),
+                {"session_id": session_id},
+            ).mappings().first()
+        return dict(row) if row else None
+
+    def chat_sessions(self) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT s.*, latest.content AS last_message_preview
+                    FROM chat_session s
+                    LEFT JOIN LATERAL (
+                        SELECT content FROM chat_message
+                        WHERE session_id = s.id ORDER BY id DESC LIMIT 1
+                    ) latest ON true
+                    ORDER BY s.updated_at DESC, s.created_at DESC"""
+                )
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def delete_chat_session(self, session_id: str) -> bool:
+        with self.engine.begin() as connection:
+            deleted = connection.execute(
+                text("DELETE FROM chat_session WHERE id = :session_id RETURNING id"),
+                {"session_id": session_id},
+            ).scalar_one_or_none()
+        return deleted is not None
+
     def add_chat_message(self, session_id: str, role: str, content: str) -> dict[str, Any]:
         with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    """INSERT INTO chat_session (id, topic) VALUES (:session_id, '旧版聊天')
+                    ON CONFLICT (id) DO NOTHING"""
+                ),
+                {"session_id": session_id},
+            )
             row = connection.execute(
                 text("INSERT INTO chat_message (session_id, role, content) VALUES (:session_id, :role, :content) RETURNING *"),
                 {"session_id": session_id, "role": role, "content": content},
             ).mappings().one()
+            connection.execute(
+                text("UPDATE chat_session SET topic = topic WHERE id = :session_id"),
+                {"session_id": session_id},
+            )
         return dict(row)
 
     def chat_messages(self, session_id: str) -> list[dict[str, Any]]:
@@ -197,6 +279,186 @@ class Repository:
                 {"session_id": session_id},
             ).mappings().all()
         return [dict(row) for row in rows]
+
+    def chat_session_detail(self, session_id: str) -> dict[str, Any] | None:
+        session = self.get_chat_session(session_id)
+        if session is None:
+            return None
+        return {
+            "session": session,
+            "messages": self.chat_messages(session_id),
+            "corrections": self.chat_corrections(session_id=session_id, limit=1_000),
+        }
+
+    def complete_chat_turn(
+        self,
+        *,
+        session_id: str,
+        user_content: str,
+        assistant_content: str,
+        correction: dict[str, Any] | None,
+        create_session_topic: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any]]:
+        with self.engine.begin() as connection:
+            if create_session_topic is not None:
+                connection.execute(
+                    text(
+                        """INSERT INTO chat_session (id, topic) VALUES (:session_id, :topic)
+                        ON CONFLICT (id) DO NOTHING"""
+                    ),
+                    {"session_id": session_id, "topic": create_session_topic},
+                )
+            user = connection.execute(
+                text(
+                    """INSERT INTO chat_message (session_id, role, content)
+                    VALUES (:session_id, 'user', :content) RETURNING *"""
+                ),
+                {"session_id": session_id, "content": user_content},
+            ).mappings().one()
+            stored_correction: dict[str, Any] | None = None
+            if correction is not None:
+                correction_row = connection.execute(
+                    text(
+                        """INSERT INTO chat_correction
+                        (session_id, user_message_id, original_text, corrected_text, summary_zh)
+                        VALUES (:session_id, :user_message_id, :original_text, :corrected_text, :summary_zh)
+                        RETURNING *"""
+                    ),
+                    {
+                        "session_id": session_id,
+                        "user_message_id": int(user["id"]),
+                        "original_text": user_content,
+                        "corrected_text": correction["corrected_text"],
+                        "summary_zh": correction["summary_zh"],
+                    },
+                ).mappings().one()
+                items: list[dict[str, Any]] = []
+                for index, item in enumerate(correction["items"]):
+                    stored_item = connection.execute(
+                        text(
+                            """INSERT INTO chat_correction_item
+                            (correction_id, idx, original_fragment, replacement, reason_zh, category)
+                            VALUES (:correction_id, :idx, :original, :replacement, :reason_zh, :category)
+                            RETURNING id, correction_id, idx, original_fragment AS original,
+                                replacement, reason_zh, category"""
+                        ),
+                        {"correction_id": int(correction_row["id"]), "idx": index, **item},
+                    ).mappings().one()
+                    items.append(dict(stored_item))
+                stored_correction = dict(correction_row)
+                stored_correction["items"] = items
+            assistant = connection.execute(
+                text(
+                    """INSERT INTO chat_message (session_id, role, content)
+                    VALUES (:session_id, 'assistant', :content) RETURNING *"""
+                ),
+                {"session_id": session_id, "content": assistant_content},
+            ).mappings().one()
+            connection.execute(
+                text("UPDATE chat_session SET topic = topic WHERE id = :session_id"),
+                {"session_id": session_id},
+            )
+        return dict(user), stored_correction, dict(assistant)
+
+    def chat_corrections(
+        self,
+        *,
+        query: str = "",
+        topic: str | None = None,
+        category: str | None = None,
+        cursor: int | None = None,
+        limit: int = 50,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clean_query = query.strip()
+        conditions: list[str] = []
+        parameters: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            conditions.append("c.id < :cursor")
+            parameters["cursor"] = cursor
+        if session_id is not None:
+            conditions.append("c.session_id = :session_id")
+            parameters["session_id"] = session_id
+        if topic is not None:
+            conditions.append("s.topic = :topic")
+            parameters["topic"] = topic
+        if category is not None:
+            conditions.append(
+                """EXISTS (
+                    SELECT 1 FROM chat_correction_item ci
+                    WHERE ci.correction_id = c.id AND ci.category = :category
+                )"""
+            )
+            parameters["category"] = category
+        if clean_query:
+            conditions.append(
+                """(
+                    c.original_text ILIKE :query_pattern
+                    OR c.corrected_text ILIKE :query_pattern
+                    OR c.summary_zh ILIKE :query_pattern
+                    OR s.topic ILIKE :query_pattern
+                    OR EXISTS (
+                        SELECT 1 FROM chat_correction_item qi
+                        WHERE qi.correction_id = c.id
+                          AND (qi.original_fragment ILIKE :query_pattern
+                            OR qi.replacement ILIKE :query_pattern
+                            OR qi.reason_zh ILIKE :query_pattern)
+                    )
+                )"""
+            )
+            parameters["query_pattern"] = f"%{clean_query}%"
+        where_clause = " AND ".join(conditions) if conditions else "true"
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    f"""SELECT c.*, s.topic
+                    FROM chat_correction c
+                    JOIN chat_session s ON s.id = c.session_id
+                    WHERE {where_clause}
+                    ORDER BY c.id DESC LIMIT :limit"""
+                ),
+                parameters,
+            ).mappings().all()
+            result = [dict(row) for row in rows]
+            correction_ids = [int(row["id"]) for row in result]
+            if correction_ids:
+                items = connection.execute(
+                    text(
+                        """SELECT id, correction_id, idx, original_fragment AS original,
+                            replacement, reason_zh, category
+                        FROM chat_correction_item
+                        WHERE correction_id = ANY(:correction_ids)
+                        ORDER BY correction_id, idx"""
+                    ),
+                    {"correction_ids": correction_ids},
+                ).mappings().all()
+                grouped: dict[int, list[dict[str, Any]]] = {}
+                for item in items:
+                    grouped.setdefault(int(item["correction_id"]), []).append(dict(item))
+                for correction_row in result:
+                    correction_row["items"] = grouped.get(int(correction_row["id"]), [])
+        return result
+
+    def delete_chat_correction(self, correction_id: int) -> bool:
+        with self.engine.begin() as connection:
+            deleted = connection.execute(
+                text("DELETE FROM chat_correction WHERE id = :correction_id RETURNING id"),
+                {"correction_id": correction_id},
+            ).scalar_one_or_none()
+        return deleted is not None
+
+    def recent_correction_guidance(self, *, limit: int = 30, max_characters: int = 600) -> str:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT ci.category, ci.original_fragment, ci.replacement, ci.reason_zh
+                    FROM chat_correction_item ci
+                    JOIN chat_correction c ON c.id = ci.correction_id
+                    ORDER BY c.created_at DESC, ci.id DESC LIMIT :limit"""
+                ),
+                {"limit": limit},
+            ).mappings().all()
+        return build_correction_guidance(rows, max_characters=max_characters)
 
     def voice_profiles(self) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:

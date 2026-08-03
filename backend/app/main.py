@@ -6,18 +6,28 @@ import re
 import shlex
 import shutil
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, status
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import Engine
 
+from .chat import (
+    STARTER_TOPICS,
+    ChatOutputError,
+    assistant_content,
+    chat_messages,
+    correction_payload,
+    generate_chat_turn,
+    topic_for,
+)
 from .config import ROOT_DIR, get_settings
 from .db import apply_schema, make_engine
 from .llm import LLMService
@@ -47,6 +57,37 @@ class CompanionRequest(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1, max_length=4_000)
+
+    @field_validator("session_id", "message")
+    @classmethod
+    def legacy_chat_fields_are_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("会话与消息不能为空。")
+        return value
+
+
+class ChatSessionCreate(BaseModel):
+    topic: str | None = Field(default=None, max_length=160)
+    starter_id: str | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def has_topic(self) -> ChatSessionCreate:
+        if bool((self.topic or "").strip()) == bool((self.starter_id or "").strip()):
+            raise ValueError("请选择精选主题或输入自定义主题，二选一。")
+        return self
+
+
+class ChatMessageCreate(BaseModel):
+    message: str = Field(min_length=1, max_length=4_000)
+
+    @field_validator("message")
+    @classmethod
+    def message_is_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("消息不能为空。")
+        return value
 
 
 class VideoLinkCreate(BaseModel):
@@ -429,6 +470,118 @@ def post_companion(payload: CompanionRequest) -> dict:
     return {"user": user, "assistant": assistant}
 
 
+def _chat_turn(*, topic: str, history: list[dict], guidance: str, user_message: str | None):
+    messages = chat_messages(
+        topic=topic,
+        history=history,
+        guidance=guidance,
+        user_message=user_message,
+    )
+    try:
+        return generate_chat_turn(LLMService(get_settings()), messages)
+    except ChatOutputError as error:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+    except Exception as error:
+        raise _llm_error(error) from error
+
+
+@app.get("/chat/topics")
+def get_chat_topics() -> list[dict]:
+    return [topic.model_dump() for topic in STARTER_TOPICS]
+
+
+@app.post("/chat/sessions", status_code=status.HTTP_201_CREATED)
+def create_chat_session(payload: ChatSessionCreate) -> dict:
+    try:
+        topic, starter_id = topic_for(payload.starter_id, payload.topic)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    repo = repository()
+    turn = _chat_turn(
+        topic=topic,
+        history=[],
+        guidance=repo.recent_correction_guidance(),
+        user_message=None,
+    )
+    session, assistant = repo.create_chat_session(
+        session_id=str(uuid.uuid4()),
+        topic=topic,
+        starter_id=starter_id,
+        assistant_content=assistant_content(turn),
+    )
+    return {"session": session, "assistant": assistant}
+
+
+@app.get("/chat/sessions")
+def get_chat_sessions() -> list[dict]:
+    return repository().chat_sessions()
+
+
+@app.get("/chat/sessions/{session_id}")
+def get_chat_session(session_id: str) -> dict:
+    detail = repository().chat_session_detail(session_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="聊天会话不存在。")
+    return detail
+
+
+@app.delete("/chat/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_chat_session(session_id: str) -> Response:
+    if not repository().delete_chat_session(session_id):
+        raise HTTPException(status_code=404, detail="聊天会话不存在。")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/chat/sessions/{session_id}/messages")
+def post_chat_message(session_id: str, payload: ChatMessageCreate) -> dict:
+    repo = repository()
+    session = repo.get_chat_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="聊天会话不存在。")
+    message = payload.message.strip()
+    turn = _chat_turn(
+        topic=str(session["topic"]),
+        history=repo.chat_messages(session_id)[-20:],
+        guidance=repo.recent_correction_guidance(),
+        user_message=message,
+    )
+    user, correction, assistant = repo.complete_chat_turn(
+        session_id=session_id,
+        user_content=message,
+        assistant_content=assistant_content(turn),
+        correction=correction_payload(turn),
+    )
+    return {"user": user, "correction": correction, "assistant": assistant}
+
+
+@app.get("/chat/corrections")
+def get_chat_corrections(
+    query: str = Query(default="", max_length=200),
+    topic: str | None = Query(default=None, max_length=160),
+    category: str | None = Query(default=None, max_length=40),
+    cursor: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> list[dict]:
+    allowed = {"grammar", "word_choice", "naturalness", "register", "orthography"}
+    if category is not None and category not in allowed:
+        raise HTTPException(status_code=422, detail="不支持的纠错类别。")
+    return repository().chat_corrections(
+        query=query,
+        topic=topic,
+        category=category,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
+@app.delete("/chat/corrections/{correction_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_chat_correction(correction_id: int) -> Response:
+    if not repository().delete_chat_correction(correction_id):
+        raise HTTPException(status_code=404, detail="纠错记录不存在。")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# One-release compatibility layer for the already-installed iPhone build.
 @app.get("/chat/{session_id}")
 def get_chat_messages(session_id: str) -> list[dict]:
     return repository().chat_messages(session_id)
@@ -437,16 +590,23 @@ def get_chat_messages(session_id: str) -> list[dict]:
 @app.post("/chat")
 def post_chat(payload: ChatRequest) -> dict:
     repo = repository()
-    user = repo.add_chat_message(payload.session_id, "user", payload.message.strip())
-    history = repo.chat_messages(payload.session_id)[-16:]
-    messages = [{"role": "system", "content": "你是日语聊天老师。以日语自然回应，并在需要时用简短中文帮助理解。"}]
-    messages.extend({"role": item["role"], "content": item["content"]} for item in history)
-    try:
-        answer = LLMService(get_settings()).reply(messages)
-    except Exception as error:
-        raise _llm_error(error) from error
-    assistant = repo.add_chat_message(payload.session_id, "assistant", answer)
-    return {"user": user, "assistant": assistant}
+    session = repo.get_chat_session(payload.session_id)
+    topic = str(session["topic"]) if session is not None else "旧版聊天"
+    message = payload.message.strip()
+    turn = _chat_turn(
+        topic=topic,
+        history=repo.chat_messages(payload.session_id)[-20:],
+        guidance=repo.recent_correction_guidance(),
+        user_message=message,
+    )
+    user, correction, assistant = repo.complete_chat_turn(
+        session_id=payload.session_id,
+        user_content=message,
+        assistant_content=assistant_content(turn),
+        correction=correction_payload(turn),
+        create_session_topic=topic,
+    )
+    return {"user": user, "correction": correction, "assistant": assistant}
 
 
 @app.post("/shadowing", status_code=status.HTTP_202_ACCEPTED)

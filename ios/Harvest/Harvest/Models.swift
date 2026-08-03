@@ -61,18 +61,126 @@ struct Token: Codable, Identifiable, Hashable {
 
 struct ConversationMessage: Codable, Identifiable, Hashable {
     let id: Int
+    let sessionID: String?
     let role: String
     let content: String
     let createdAt: String
 
     enum CodingKeys: String, CodingKey {
         case id, role, content
+        case sessionID = "session_id"
         case createdAt = "created_at"
     }
 }
 
 struct ChatReply: Codable {
     let user: ConversationMessage
+    let assistant: ConversationMessage
+}
+
+struct ChatTopic: Codable, Identifiable, Hashable {
+    let id: String
+    let category: String
+    let titleJA: String
+    let hintZH: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, category
+        case titleJA = "title_ja"
+        case hintZH = "hint_zh"
+    }
+}
+
+struct ChatSession: Codable, Identifiable, Hashable {
+    let id: String
+    let topic: String
+    let starterID: String?
+    let createdAt: String
+    let updatedAt: String
+    let lastMessagePreview: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, topic
+        case starterID = "starter_id"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case lastMessagePreview = "last_message_preview"
+    }
+}
+
+enum ChatCorrectionCategory: String, Codable, CaseIterable, Identifiable {
+    case grammar
+    case wordChoice = "word_choice"
+    case naturalness
+    case register
+    case orthography
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .grammar: "语法"
+        case .wordChoice: "词语选择"
+        case .naturalness: "自然度"
+        case .register: "语体与礼貌"
+        case .orthography: "书写"
+        }
+    }
+}
+
+struct ChatCorrectionItem: Codable, Identifiable, Hashable {
+    let id: Int
+    let correctionID: Int
+    let index: Int
+    let original: String
+    let replacement: String
+    let reasonZH: String
+    let category: ChatCorrectionCategory
+
+    enum CodingKeys: String, CodingKey {
+        case id, original, replacement, category
+        case correctionID = "correction_id"
+        case index = "idx"
+        case reasonZH = "reason_zh"
+    }
+}
+
+struct ChatCorrection: Codable, Identifiable, Hashable {
+    let id: Int
+    let sessionID: String
+    let userMessageID: Int
+    let originalText: String
+    let correctedText: String
+    let summaryZH: String
+    let createdAt: String
+    let topic: String?
+    let items: [ChatCorrectionItem]
+
+    enum CodingKeys: String, CodingKey {
+        case id, topic, items
+        case sessionID = "session_id"
+        case userMessageID = "user_message_id"
+        case originalText = "original_text"
+        case correctedText = "corrected_text"
+        case summaryZH = "summary_zh"
+        case createdAt = "created_at"
+    }
+}
+
+struct ChatSessionCreation: Codable {
+    let session: ChatSession
+    let assistant: ConversationMessage
+}
+
+struct ChatSessionDetail: Codable {
+    let session: ChatSession
+    let messages: [ConversationMessage]
+    let corrections: [ChatCorrection]
+}
+
+struct ChatTurnResponse: Codable {
+    let user: ConversationMessage
+    let correction: ChatCorrection?
     let assistant: ConversationMessage
 }
 

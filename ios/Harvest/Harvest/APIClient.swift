@@ -14,6 +14,7 @@ enum APIClientError: LocalizedError {
 
 struct APIClient {
     let baseURL: URL
+    var session: URLSession = .shared
     private let decoder = JSONDecoder()
 
     func materials() async throws -> [Material] {
@@ -30,6 +31,57 @@ struct APIClient {
 
     func sendChat(sessionID: String, message: String) async throws -> ChatReply {
         try await post("chat", body: ["session_id": sessionID, "message": message])
+    }
+
+    func chatTopics() async throws -> [ChatTopic] {
+        try await get("chat/topics")
+    }
+
+    func createChatSession(starterID: String? = nil, topic: String? = nil) async throws -> ChatSessionCreation {
+        var body: [String: String] = [:]
+        if let starterID { body["starter_id"] = starterID }
+        if let topic { body["topic"] = topic }
+        return try await post("chat/sessions", body: body)
+    }
+
+    func chatSessions() async throws -> [ChatSession] {
+        try await get("chat/sessions")
+    }
+
+    func chatSession(id: String) async throws -> ChatSessionDetail {
+        try await get("chat/sessions/\(id)")
+    }
+
+    func deleteChatSession(id: String) async throws {
+        try await delete("chat/sessions/\(id)")
+    }
+
+    func sendChatMessage(sessionID: String, message: String) async throws -> ChatTurnResponse {
+        try await post("chat/sessions/\(sessionID)/messages", body: ["message": message])
+    }
+
+    func chatCorrections(
+        query: String = "",
+        topic: String? = nil,
+        category: ChatCorrectionCategory? = nil,
+        cursor: Int? = nil
+    ) async throws -> [ChatCorrection] {
+        var components = URLComponents(
+            url: baseURL.appending(path: "chat/corrections"),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [
+            query.isEmpty ? nil : URLQueryItem(name: "query", value: query),
+            topic.map { URLQueryItem(name: "topic", value: $0) },
+            category.map { URLQueryItem(name: "category", value: $0.rawValue) },
+            cursor.map { URLQueryItem(name: "cursor", value: String($0)) },
+        ].compactMap { $0 }
+        guard let url = components.url else { throw APIClientError.badResponse }
+        return try await get(url: url)
+    }
+
+    func deleteChatCorrection(id: Int) async throws {
+        try await delete("chat/corrections/\(id)")
     }
 
     func companion(materialID: Int) async throws -> [ConversationMessage] {
@@ -73,8 +125,11 @@ struct APIClient {
     func voiceTeacherStatus() async throws -> VoiceTeacherStatus { try await get("voice-teacher/status") }
 
     private func get<Response: Decodable>(_ path: String) async throws -> Response {
-        let url = baseURL.appending(path: path)
-        let (data, response) = try await URLSession.shared.data(from: url)
+        try await get(url: baseURL.appending(path: path))
+    }
+
+    private func get<Response: Decodable>(url: URL) async throws -> Response {
+        let (data, response) = try await session.data(from: url)
         guard let http = response as? HTTPURLResponse else { throw APIClientError.badResponse }
         guard (200..<300).contains(http.statusCode) else {
             let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
@@ -96,13 +151,24 @@ struct APIClient {
     }
 
     private func send<Response: Decodable>(_ request: URLRequest) async throws -> Response {
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw APIClientError.badResponse }
         guard (200..<300).contains(http.statusCode) else {
             let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
             throw APIClientError.server(detail ?? "服务暂时不可用（HTTP \(http.statusCode)）。")
         }
         do { return try decoder.decode(Response.self, from: data) } catch { throw APIClientError.badResponse }
+    }
+
+    private func delete(_ path: String) async throws {
+        var request = URLRequest(url: baseURL.appending(path: path))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIClientError.badResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
+            throw APIClientError.server(detail ?? "服务暂时不可用（HTTP \(http.statusCode)）。")
+        }
     }
 
     private func uploadFile<Response: Decodable>(path: String, field: String, fileURL: URL) async throws -> Response {
