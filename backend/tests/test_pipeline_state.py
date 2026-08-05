@@ -26,8 +26,9 @@ class PipelineRepository:
         self.tokens: list[dict[str, Any]] | None = None
         self.video_assets: dict[str, Any] | None = None
         self.video_segments: list[dict[str, Any]] | None = None
-        self.video_translations: list[str] | None = None
+        self.segment_translations: list[str] | None = None
         self.reading_completion: dict[str, Any] | None = None
+        self.reading_segments: list[dict[str, Any]] = []
         self.shadowing_result: tuple[int, str, list[dict[str, Any]], float] | None = None
         self.shadowing_failure: tuple[int, str] | None = None
         self.voice_profile: tuple[str, str] | None = None
@@ -91,11 +92,14 @@ class PipelineRepository:
     def replace_video_segments(self, material_id: int, segments: list[dict[str, Any]]) -> None:
         self.video_segments = segments
 
-    def complete_video_translation(self, material_id: int, translations: list[str]) -> None:
-        self.video_translations = translations
+    def save_segment_translations(self, material_id: int, translations: list[str]) -> None:
+        self.segment_translations = translations
 
     def get_segment(self, segment_id: int) -> dict[str, Any] | None:
         return {"id": segment_id, "text_ja": "雨です。"}
+
+    def get_segments(self, material_id: int) -> list[dict[str, Any]]:
+        return self.reading_segments
 
     def complete_shadowing_attempt(
         self, attempt_id: int, transcript: str, diff: list[dict[str, Any]], score: float
@@ -276,19 +280,22 @@ def test_reading_pipeline_becomes_ready_before_optional_asr(
 ) -> None:
     initial = Job(id=1, kind="tts", material_id=7, payload={"text": "雨です。"}, attempts=1)
     repository = PipelineRepository([initial])
+    repository.reading_segments = [{"idx": 0, "text_ja": "雨です。"}]
     worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
     worker.tts = FakeTTS()  # type: ignore[assignment]
     worker.storage = FakeStorage()  # type: ignore[assignment]
     worker.asr = StaticASR([RecognizedWord("雨です。", 0, 1_000)])  # type: ignore[assignment]
+    worker.llm = StaticLLM()  # type: ignore[assignment]
     monkeypatch.setattr("app.worker.audio_duration_ms", lambda _: 1_000)
 
     while worker.run_one():
         pass
 
-    assert [job.kind for job in repository.claimed] == ["tts", "asr"]
+    assert [job.kind for job in repository.claimed] == ["tts", "asr", "translate_reading"]
     assert repository.processing == [7]
     assert repository.reading_completion is not None
     assert repository.tokens
+    assert repository.segment_translations == ["这是。"]
 
 
 def test_photo_pipeline_enters_reading_pipeline(monkeypatch: Any, tmp_path: Path) -> None:
@@ -296,17 +303,19 @@ def test_photo_pipeline_enters_reading_pipeline(monkeypatch: Any, tmp_path: Path
     photo.write_bytes(b"photo")
     initial = Job(id=1, kind="vision", material_id=7, payload={"image_path": str(photo)}, attempts=1)
     repository = PipelineRepository([initial])
+    repository.reading_segments = [{"idx": 0, "text_ja": "雨です。"}]
     worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
     worker.vision = StaticVision()  # type: ignore[assignment]
     worker.tts = FakeTTS()  # type: ignore[assignment]
     worker.storage = FakeStorage()  # type: ignore[assignment]
     worker.asr = StaticASR([RecognizedWord("雨です。", 0, 1_000)])  # type: ignore[assignment]
+    worker.llm = StaticLLM()  # type: ignore[assignment]
     monkeypatch.setattr("app.worker.audio_duration_ms", lambda _: 1_000)
 
     while worker.run_one():
         pass
 
-    assert [job.kind for job in repository.claimed] == ["vision", "tts", "asr"]
+    assert [job.kind for job in repository.claimed] == ["vision", "tts", "asr", "translate_reading"]
     assert repository.processing == [7, 7]
     assert repository.reading_completion is not None
     assert repository.tokens
@@ -403,7 +412,7 @@ def test_manual_transcription_chain_completes_pipeline(tmp_path: Path) -> None:
     assert repository.tokens is not None
     assert [token["surface"] for token in repository.tokens] == ["これ", "は"]
     assert all(token["reading"] for token in repository.tokens)
-    assert repository.video_translations == ["这是。"]
+    assert repository.segment_translations == ["这是。"]
     assert worker.storage.deleted_key == "temporary/materials/7/asr-audio.m4a"  # type: ignore[attr-defined]
 
 

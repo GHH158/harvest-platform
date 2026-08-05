@@ -7,6 +7,7 @@ final class AudioPlayer: ObservableObject {
     @Published private(set) var positionMs = 0
     @Published private(set) var durationMs = 0
     @Published private(set) var errorMessage: String?
+    @Published private(set) var rate: Float = 1.0
 
     private var player: AVPlayer?
     private var timeObserver: Any?
@@ -74,9 +75,14 @@ final class AudioPlayer: ObservableObject {
             player.pause()
             isPlaying = false
         } else {
-            player.play()
+            player.rate = rate
             isPlaying = true
         }
+    }
+
+    func setRate(_ newRate: Float) {
+        rate = newRate
+        if isPlaying { player?.rate = newRate }
     }
 
     func seek(to milliseconds: Int) {

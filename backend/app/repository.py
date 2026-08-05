@@ -1134,7 +1134,7 @@ class Repository:
                     {"material_id": material_id, **segment},
                 )
 
-    def complete_video_translation(self, material_id: int, translations: list[str]) -> None:
+    def save_segment_translations(self, material_id: int, translations: list[str]) -> None:
         with self.engine.begin() as connection:
             for idx, translation in enumerate(translations):
                 connection.execute(

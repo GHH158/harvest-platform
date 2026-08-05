@@ -80,36 +80,11 @@ struct ReaderView: View {
         ScrollViewReader { scrollProxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    HStack {
-                        if offlineLibrary.localAudioURL(for: material.id) != nil {
-                            Label("已下载", systemImage: "arrow.down.circle.fill")
-                                .font(.footnote)
-                                .foregroundStyle(DesignTokens.muted)
-                        } else {
-                            Button(isDownloading ? "正在下载" : "下载朗读") {
-                                Task { await download(material) }
-                            }
-                            .disabled(isDownloading)
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(DesignTokens.accent)
-                        }
-                        Spacer()
-                    }
                     if let playbackError = player.errorMessage {
                         Text("朗读播放失败：\(playbackError)")
                             .font(.footnote)
                             .foregroundStyle(DesignTokens.accent)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    if let current = currentSegment(in: material) {
-                        HStack(spacing: 18) {
-                            NavigationLink("问这一句") {
-                                CompanionView(materialID: material.id, segment: current)
-                            }
-                            NavigationLink("跟读这一句") { ShadowingView(segment: current) }
-                        }
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(DesignTokens.accent)
                     }
                     if let downloadError {
                         Text(downloadError)
@@ -129,8 +104,8 @@ struct ReaderView: View {
                     }
                 }
                 .padding(.horizontal, DesignTokens.pageInset)
-                .padding(.top, 28)
-                .padding(.bottom, 118)
+                .padding(.top, 20)
+                .padding(.bottom, 150)
             }
             .onChange(of: currentSegment(in: material)?.id) { _, currentID in
                 guard let currentID else { return }
@@ -139,11 +114,43 @@ struct ReaderView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                PlayerBar(player: player, durationMs: material.durationMs ?? player.durationMs)
+                ReadingControlBar(
+                    player: player,
+                    materialID: material.id,
+                    durationMs: material.durationMs ?? player.durationMs,
+                    currentSegment: resolvedCurrentSegment(in: material),
+                    positionLabel: positionLabel(in: material),
+                    onPrevious: { previousSegment(in: material) },
+                    onNext: { nextSegment(in: material) }
+                )
             }
         }
         .task(id: playbackURL(for: material)) {
             if let audioURL = playbackURL(for: material) { await player.prepare(url: audioURL) }
+        }
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                downloadToolbarButton(material)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func downloadToolbarButton(_ material: MaterialDetail) -> some View {
+        if offlineLibrary.localAudioURL(for: material.id) != nil {
+            Image(systemName: "arrow.down.circle.fill")
+                .foregroundStyle(DesignTokens.muted)
+                .accessibilityLabel("已下载")
+        } else if isDownloading {
+            ProgressView().controlSize(.small)
+        } else {
+            Button {
+                Task { await download(material) }
+            } label: {
+                Image(systemName: "arrow.down.circle")
+            }
+            .foregroundStyle(DesignTokens.accent)
+            .accessibilityLabel("下载朗读")
         }
     }
 
@@ -177,6 +184,34 @@ struct ReaderView: View {
     private func isCurrent(_ segment: Segment) -> Bool {
         guard let material else { return false }
         return currentSegment(in: material)?.id == segment.id
+    }
+
+    /// Mirrors the video control bar's "尚未开始播放时选择第一句" rule.
+    private func resolvedCurrentSegment(in material: MaterialDetail) -> Segment? {
+        currentSegment(in: material) ?? material.segments.first
+    }
+
+    private func positionLabel(in material: MaterialDetail) -> String {
+        guard let current = currentSegment(in: material),
+              let index = material.segments.firstIndex(where: { $0.id == current.id })
+        else { return "准备开始" }
+        return "第 \(index + 1) / \(material.segments.count) 句"
+    }
+
+    private func previousSegment(in material: MaterialDetail) {
+        guard let target = resolvedCurrentSegment(in: material),
+              let index = material.segments.firstIndex(where: { $0.id == target.id })
+        else { return }
+        let previousIndex = max(0, index - 1)
+        player.seek(to: material.segments[previousIndex].startMs)
+    }
+
+    private func nextSegment(in material: MaterialDetail) {
+        guard let target = resolvedCurrentSegment(in: material),
+              let index = material.segments.firstIndex(where: { $0.id == target.id })
+        else { return }
+        let nextIndex = min(material.segments.count - 1, index + 1)
+        player.seek(to: material.segments[nextIndex].startMs)
     }
 
     private func tokens(for segment: Segment, in material: MaterialDetail) -> [Token] {
@@ -517,36 +552,126 @@ private struct ReadingFlowLayout: Layout {
     }
 }
 
-private struct PlayerBar: View {
+/// Mirrors VideoLearningView's bottom learning control bar so reading and
+/// video playback share one visual language instead of drifting apart.
+private struct ReadingControlBar: View {
     @ObservedObject var player: AudioPlayer
+    let materialID: Int
     let durationMs: Int
+    let currentSegment: Segment?
+    let positionLabel: String
+    let onPrevious: () -> Void
+    let onNext: () -> Void
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 7) {
             ProgressView(value: progress)
                 .tint(DesignTokens.accent)
-            HStack(spacing: 16) {
+            HStack {
                 Text(time(player.positionMs))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(DesignTokens.muted)
-                Spacer()
-                Button(action: player.toggle) {
-                    Label(player.isPlaying ? "暂停" : "播放", systemImage: player.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.body.weight(.semibold))
-                        .frame(minWidth: 98)
-                }
-                .buttonStyle(PrimaryButtonStyle())
                 Spacer()
                 Text(time(durationMs))
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(DesignTokens.muted)
+
+            HStack(spacing: 12) {
+                Text(positionLabel)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(DesignTokens.muted)
+                Spacer()
+                askButton
+            }
+            HStack(spacing: 18) {
+                shadowButton
+                controlButton("backward.end.fill", label: "上一句", action: onPrevious)
+                Button(action: player.toggle) {
+                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(Color.white)
+                        .frame(width: 48, height: 40)
+                        .background(DesignTokens.accent, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(player.isPlaying ? "暂停" : "播放")
+                controlButton("forward.end.fill", label: "下一句", action: onNext)
+                speedButton
             }
         }
         .padding(.horizontal, DesignTokens.pageInset)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
         .background(DesignTokens.surface)
         .overlay(alignment: .top) { Divider().overlay(DesignTokens.separator) }
+    }
+
+    @ViewBuilder
+    private var askButton: some View {
+        NavigationLink {
+            if let currentSegment { CompanionView(materialID: materialID, segment: currentSegment) }
+        } label: {
+            Label("问这句", systemImage: "questionmark.bubble")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(DesignTokens.accent)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 30)
+                .background(DesignTokens.accentWash, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(currentSegment == nil)
+        .accessibilityLabel("提问当前句子")
+    }
+
+    private var shadowButton: some View {
+        NavigationLink {
+            if let currentSegment { ShadowingView(segment: currentSegment) }
+        } label: {
+            Image(systemName: "waveform")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(DesignTokens.ink)
+                .frame(width: 42, height: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(currentSegment == nil)
+        .accessibilityLabel("跟读这一句")
+    }
+
+    private var speedButton: some View {
+        Button(action: cycleSpeed) {
+            Text(speedLabel)
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundStyle(DesignTokens.ink)
+                .frame(width: 42, height: 40)
+                .overlay(Capsule().stroke(DesignTokens.separator, lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("播放速度 \(speedLabel)")
+    }
+
+    private func controlButton(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(DesignTokens.ink)
+                .frame(width: 42, height: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+
+    private static let speedSteps: [Float] = [0.75, 1.0, 1.25, 1.5]
+
+    private var speedLabel: String {
+        let value = player.rate
+        return value == value.rounded() ? "\(Int(value))×" : String(format: "%.2g×", value)
+    }
+
+    private func cycleSpeed() {
+        let index = Self.speedSteps.firstIndex(of: player.rate) ?? 1
+        player.setRate(Self.speedSteps[(index + 1) % Self.speedSteps.count])
     }
 
     private var progress: Double {

@@ -28,7 +28,7 @@ from .video import VideoDownloader, VideoProcessor
 from .vision import VisionService
 from .voice import VideoVoiceExtractor, VoiceEnrollmentService, validate_voice_sample_duration
 
-ENHANCEMENT_JOB_KINDS = {"asr"}
+ENHANCEMENT_JOB_KINDS = {"asr", "translate_reading"}
 STANDALONE_JOB_KINDS = {"shadowing", "voice_enrollment", "voice_enrollment_video"}
 
 
@@ -72,6 +72,8 @@ class Worker:
                 self._synthesize(job)
             elif job.kind == "asr":
                 self._align_asr(job)
+            elif job.kind == "translate_reading":
+                self._translate_reading(job)
             elif job.kind == "shadowing":
                 self._score_shadowing(job)
             elif job.kind == "transcode":
@@ -93,11 +95,11 @@ class Worker:
             else:
                 raise RuntimeError(f"不支持的任务类型: {job.kind}")
         except Exception as error:  # The error must be persisted for the ingest UI and diagnostics.
-            # P2 ASR improves P1's estimated sentence timing. If recognition
-            # fails, retain the already playable sentence-level material and
-            # only record the diagnostic on its own job.
+            # Enhancement jobs (ASR word timing, reading translation) improve an
+            # already-playable material. If they fail, keep the material ready
+            # and only record the diagnostic on its own job.
             retryable_video_upload = job.kind == "upload_video" and job.material_id is not None
-            failure_material_id = None if job.kind == "asr" or retryable_video_upload else job.material_id
+            failure_material_id = None if job.kind in ENHANCEMENT_JOB_KINDS or retryable_video_upload else job.material_id
             self.repository.mark_job_failed(job.id, failure_material_id, str(error))
             if retryable_video_upload:
                 self.repository.mark_material_downloaded(job.material_id)
@@ -151,6 +153,7 @@ class Worker:
             material_id=job.material_id,
             payload={"text": source_text, "audio_url": self.storage.public_url(oss_key)},
         )
+        self.repository.enqueue_job(kind="translate_reading", material_id=job.material_id, payload={})
 
     def _align_asr(self, job: Job) -> None:
         source_text = str(job.payload.get("text", "")).strip()
@@ -179,6 +182,23 @@ class Worker:
                 for token in alignment.tokens
             ],
         )
+
+    def _translate_reading(self, job: Job) -> None:
+        assert job.material_id is not None
+        segments = self.repository.get_segments(job.material_id)
+        sentences = [str(segment["text_ja"]) for segment in segments]
+        if not sentences:
+            raise RuntimeError("阅读材料缺少分句，无法翻译。")
+        answer = self.llm.reply(
+            [
+                {"role": "system", "content": SUBTITLE_TRANSLATION_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(sentences, ensure_ascii=False)},
+            ]
+        )
+        translations = json.loads(answer)
+        if not isinstance(translations, list) or len(translations) != len(sentences):
+            raise RuntimeError("阅读材料翻译返回数量不匹配。")
+        self.repository.save_segment_translations(job.material_id, [str(item) for item in translations])
 
     def _score_shadowing(self, job: Job) -> None:
         attempt_id = int(job.payload.get("attempt_id", 0))
@@ -361,7 +381,7 @@ class Worker:
         translations = json.loads(answer)
         if not isinstance(translations, list) or len(translations) != len(sentences):
             raise RuntimeError("字幕翻译返回数量不匹配。")
-        self.repository.complete_video_translation(job.material_id, [str(item) for item in translations])
+        self.repository.save_segment_translations(job.material_id, [str(item) for item in translations])
         temporary_audio_key = str(job.payload.get("temporary_audio_key", ""))
         if temporary_audio_key:
             try:

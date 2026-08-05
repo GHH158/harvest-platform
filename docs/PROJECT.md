@@ -582,10 +582,13 @@ CREATE TABLE voice_profile (
 ⑤ material.status = ready,此时 iPhone 已可播放
 ⑥ Worker:另起增强型 ASR job(日语,开词语级时间戳)→ 词级时间戳
 ⑦ Worker:对齐 ASR 结果与原文,再用日语形态分析合并为真正的词(含助词、活用后的词面、可用时的平假名读音和词级时间范围),成功则写入 token;失败或低覆盖率则保留句级估算时间轴和 `ready`
-⑧ iPhone 拉取 → 播放音频(OSS)+ 词级高亮;正文直接按词排版,点击正文中的词进入陪读提问
+⑧ Worker:另起增强型 `translate_reading` job,把已写入的分句整体交给 `qwen3.7-max` 按 §5.8 字幕翻译约定译成中文,写回各句 `text_zh`;失败只影响该 job,不影响 `ready`
+⑨ iPhone 拉取 → 播放音频(OSS)+ 词级高亮;正文直接按词排版,点击正文中的词进入陪读提问;每句日文下方附中文翻译,失败或尚未完成时该句翻译为空,不阻塞阅读
 ```
 
 **⑥ 的注意点**:ASR 转写结果可能与原文有出入(识别错字、断句不同)。**以原文为准,ASR 只贡献时间戳**。需要做一次文本对齐,把 ASR 的时间轴映射到原文的词上;对不齐的部分退化为句子级时间戳,不要因此失败。
+
+**⑧ 与视频字幕翻译共用同一套 §5.8 提示词和输出契约**(整组分句一次性翻译、结合前后句消解指代和省略、返回数量与顺序一致的 JSON 字符串数组),阅读与视频不得各自维护一份翻译逻辑。
 
 阅读页不得把 token 作为逐字按钮复制到正文上方。正文使用日语词边界换行排版:词面本身是点击区域,汉字词有读音时在词面上方显示克制的小号平假名;当前播放词使用柔和底色高亮。点词直接携带该词和当前句进入陪读,句级提问与跟读仍作为次级操作保留。为兼容尚未重新 ASR 的本地材料,iOS 可把旧字符时间锚按系统日语分词临时合并为词,但新写入 PostgreSQL 的 token 必须已经是词而不是单字。
 
@@ -714,8 +717,9 @@ iOS 发出聊天消息后必须立即把本地待发送消息加入对话并清�
 | Job | 执行时材料状态 | 成功 | 失败 | 下一阶段 |
 |---|---|---|---|---|
 | `fetch` | `processing` | 保持 `processing` | 材料 `failed` | `tts` |
-| `tts` | `processing` | 阅读材料 `ready` | 材料 `failed` | 增强型 `asr` |
+| `tts` | `processing` | 阅读材料 `ready` | 材料 `failed` | 增强型 `asr` 与增强型 `translate_reading` |
 | `asr` | **保持 `ready`** | 写入 token;低覆盖率也以 job `done` 收敛 | 只把 job 记为 `failed`,材料仍 `ready` | 无 |
+| `translate_reading` | **保持 `ready`** | 写入各句 `text_zh` | 只把 job 记为 `failed`,材料仍 `ready`,该句译文留空 | 无 |
 | `vision` | `processing` | 保持 `processing` | 材料 `failed` | `tts` |
 | `download_video` | `processing` | 保存本地原视频,保持 `processing` | 材料 `failed` | `transcode` |
 | `transcode` | `processing` | 保存本地 HLS 与临时音轨,材料 `downloaded` | 材料 `failed` | 手动触发 `upload_video`(材料页「开始转录」) |
@@ -726,7 +730,7 @@ iOS 发出聊天消息后必须立即把本地待发送消息加入对话并清�
 | `voice_enrollment` | 无 material;独立 job | 创建 `voice_profile` 并设为默认 | 只把 job 记为 `failed` | 无 |
 | `voice_enrollment_video` | 无 material;独立 job | 本地分离人声,创建 `voice_profile` 并设为默认 | 只把 job 记为 `failed`;保留原视频便于重新选择片段 | 无 |
 
-Worker 意外中断时可把未耗尽重试次数的 job 重新排队;重试耗尽后按上表失败规则收敛。增强型 `asr` 和 `shadowing` 的失败不能影响已可消费材料。每条跨阶段流水线必须有自动化状态机测试。
+Worker 意外中断时可把未耗尽重试次数的 job 重新排队;重试耗尽后按上表失败规则收敛。增强型 `asr`、增强型 `translate_reading` 和 `shadowing` 的失败不能影响已可消费材料。每条跨阶段流水线必须有自动化状态机测试。
 
 ### 5.6 全局日语聊天与个人纠错知识库
 
@@ -1153,3 +1157,4 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-05 | 视频观看控制栏增加「提问本句」:按播放器当前位置选择当前高亮句,未播放时默认第一句;点击先暂停视频,再进入既有陪读并自动携带该句与相邻语境 |
 | 2026-08-05 | 优化陪读与聊天响应:继续使用 `qwen3.7-max`,但日常学习问答关闭默认深度思考;聊天限制 1200 输出 Token并启用 JSON mode,陪读保留 2000 Token 余量;FastAPI 复用百炼 HTTP 连接,iOS 发送后立即显示待发送消息并在失败时恢复草稿 |
 | 2026-08-05 | 修正「提问本句」上下文边界:当前句明确标为唯一目标,前后各 2 句只供消歧,模型不得默认连带解释相邻句 |
+| 2026-08-05 | 阅读材料新增增强型 `translate_reading` job:TTS 完成后与 ASR 一起排入队列,复用 §5.8 字幕翻译提示词把全部分句整体译成中文并写回 `segment.text_zh`;失败只影响该 job,不影响材料 `ready`。iOS 阅读页重排:下载入口移入导航栏,「问这一句」「跟读这一句」与新增的上一句/下一句跳转、倍速切换一起收进底部控制栏,与 §5.2 视频控制栏保持同一视觉语言 |
