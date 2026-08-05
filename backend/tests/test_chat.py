@@ -14,6 +14,7 @@ from app.chat import (
     parse_chat_turn,
     topic_for,
 )
+from app.prompts import INTERACTIVE_TEACHING_CORE_PROMPT
 from fastapi import HTTPException
 
 
@@ -58,9 +59,11 @@ class SequenceLLM:
     def __init__(self, *responses: str) -> None:
         self.responses = list(responses)
         self.calls: list[list[dict[str, str]]] = []
+        self.options: list[dict[str, Any]] = []
 
-    def reply(self, messages: list[dict[str, str]]) -> str:
+    def reply(self, messages: list[dict[str, str]], **options: Any) -> str:
         self.calls.append(messages)
+        self.options.append(options)
         return self.responses.pop(0)
 
 
@@ -73,6 +76,15 @@ def test_topics_accept_featured_or_custom_but_not_both() -> None:
         topic_for("daily-happy", "周末")
     with pytest.raises(ValueError, match="不存在"):
         topic_for("missing", None)
+
+
+def test_chat_uses_shared_teaching_core_without_losing_json_contract() -> None:
+    assert CHAT_SYSTEM_PROMPT.startswith(INTERACTIVE_TEACHING_CORE_PROMPT)
+    assert "不要只给孤立词义" in CHAT_SYSTEM_PROMPT
+    assert "Return exactly one JSON object" in CHAT_SYSTEM_PROMPT
+    assert "Allowed correction categories" in CHAT_SYSTEM_PROMPT
+    assert "why the expression fits this context" in CHAT_SYSTEM_PROMPT
+    assert "Do not add fixed section headings or change the JSON schema" in CHAT_SYSTEM_PROMPT
 
 
 def test_valid_turns_decode_correction_and_no_correction() -> None:
@@ -113,6 +125,10 @@ def test_invalid_output_gets_exactly_one_repair_attempt() -> None:
 
     assert turn.reply_ja == "それはいいですね。"
     assert len(llm.calls) == 2
+    assert llm.options == [
+        {"enable_thinking": False, "json_mode": True, "max_tokens": 1_200},
+        {"enable_thinking": False, "json_mode": True, "max_tokens": 1_200},
+    ]
     assert "Repair the supplied model output" in llm.calls[1][0]["content"]
     assert llm.calls[1][1]["content"] == "not json"
 
@@ -221,14 +237,11 @@ def test_model_contract_failure_writes_no_partial_turn(monkeypatch: pytest.Monke
     repository = ChatRepository()
 
     class BrokenLLM:
-        def __init__(self, settings: Any) -> None:
-            pass
-
-        def reply(self, messages: list[dict[str, str]]) -> str:
+        def reply(self, messages: list[dict[str, str]], **options: Any) -> str:
             return "not json"
 
     monkeypatch.setattr(main, "repository", lambda: repository)
-    monkeypatch.setattr(main, "LLMService", BrokenLLM)
+    monkeypatch.setattr(main, "llm_service", lambda: BrokenLLM())
 
     with pytest.raises(HTTPException) as caught:
         main.post_chat_message("session-1", main.ChatMessageCreate(message="昨日映画を見る"))
@@ -242,14 +255,11 @@ def test_legacy_chat_failure_does_not_create_a_partial_session(monkeypatch: pyte
     repository = ChatRepository()
 
     class BrokenLLM:
-        def __init__(self, settings: Any) -> None:
-            pass
-
-        def reply(self, messages: list[dict[str, str]]) -> str:
+        def reply(self, messages: list[dict[str, str]], **options: Any) -> str:
             return "not json"
 
     monkeypatch.setattr(main, "repository", lambda: repository)
-    monkeypatch.setattr(main, "LLMService", BrokenLLM)
+    monkeypatch.setattr(main, "llm_service", lambda: BrokenLLM())
 
     with pytest.raises(HTTPException) as caught:
         main.post_chat(main.ChatRequest(session_id="legacy-new", message="こんにちは"))

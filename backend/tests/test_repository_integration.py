@@ -1,5 +1,6 @@
 import os
 import uuid
+from typing import Any
 
 import pytest
 from app import main
@@ -51,9 +52,19 @@ def test_recovery_attempt_limit_and_repeated_completion_are_safe() -> None:
         )
         repository.replace_tokens(
             material_id,
-            [{"segment_idx": 0, "idx": 0, "surface": "雨", "start_ms": 0, "end_ms": 500}],
+            [
+                {
+                    "segment_idx": 0,
+                    "idx": 0,
+                    "surface": "雨",
+                    "reading": "あめ",
+                    "start_ms": 0,
+                    "end_ms": 500,
+                }
+            ],
         )
         assert repository.get_tokens(material_id)[0]["surface"] == "雨"
+        assert repository.get_tokens(material_id)[0]["reading"] == "あめ"
         with engine.connect() as connection:
             asset_count = connection.execute(
                 text("SELECT count(*) FROM media_asset WHERE material_id = :material_id"),
@@ -436,7 +447,10 @@ def test_chat_api_end_to_end_with_mock_model(monkeypatch: pytest.MonkeyPatch) ->
         def __init__(self, settings: Settings) -> None:
             pass
 
-        def reply(self, messages: list[dict[str, str]]) -> str:
+        def close(self) -> None:
+            pass
+
+        def reply(self, messages: list[dict[str, str]], **options: Any) -> str:
             return responses.pop(0)
 
     monkeypatch.setattr(main, "make_engine", lambda: engine)
@@ -482,3 +496,141 @@ def test_chat_api_end_to_end_with_mock_model(monkeypatch: pytest.MonkeyPatch) ->
 
     assert responses == []
     engine.dispose()
+
+
+@pytest.mark.integration
+def test_list_jobs_joins_material_title_and_filters() -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    material_id, first_job_id = repository.create_material_with_job(
+        title="排序测试材料",
+        source_type="paste",
+        source_ref=None,
+        job_kind="tts",
+        payload={"text": "雨です。"},
+    )
+    material_id_2, _ = repository.create_material_with_job(
+        title="第二份材料",
+        source_type="url",
+        source_ref="https://example.com",
+        job_kind="fetch",
+        payload={},
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE material SET status = 'ready' WHERE id = :id"), {"id": material_id})
+        second_job_id = repository.enqueue_job(kind="asr", material_id=material_id, payload={})
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE job SET status = 'done' WHERE id = :job_id"), {"job_id": second_job_id}
+            )
+
+        jobs = repository.list_jobs()
+        assert [job["id"] for job in jobs][:1] == [second_job_id]
+        assert all("material_title" in job for job in jobs)
+
+        by_kind = repository.list_jobs(kind="tts")
+        assert [job["id"] for job in by_kind] == [first_job_id]
+        assert repository.count_jobs(kind="tts") == 1
+
+        done = repository.list_jobs(status="done")
+        assert [job["id"] for job in done] == [second_job_id]
+        assert repository.count_jobs(status="done") == 1
+
+        # list_jobs resolves material titles and status filter works
+        titled = repository.list_jobs(status="done", kind="asr")
+        assert titled and titled[0]["material_title"] == "排序测试材料"
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id IN (:a, :b)"), {"a": material_id, "b": material_id_2})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_list_materials_status_filter_and_pagination_keep_no_arg_contract() -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    ids: list[int] = []
+    for index in range(3):
+        material_id, _ = repository.create_material_with_job(
+            title=f"分页材料{index}",
+            source_type="paste",
+            source_ref=None,
+            job_kind="tts",
+            payload={"text": "雨です。"},
+        )
+        ids.append(material_id)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE material SET status = 'ready' WHERE id = :id"), {"id": ids[0]}
+            )
+            connection.execute(
+                text("UPDATE material SET status = 'failed' WHERE id = :id"), {"id": ids[1]}
+            )
+
+        ready = repository.list_materials(status="ready")
+        assert [material["id"] for material in ready] == [ids[0]]
+        assert repository.count_materials(status="ready") == 1
+
+        page = repository.list_materials(limit=2, offset=0)
+        assert len(page) == 2
+        assert repository.count_materials() == 3
+
+        # No-arg behaviour unchanged: everything, newest first (iOS /materials contract)
+        assert len(repository.list_materials()) == 3
+        assert repository.list_materials()[0]["id"] == ids[2]
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = ANY(:ids)"), {"ids": ids})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_video_playback_state_upserts_and_cascades_with_material() -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    material_id, _ = repository.create_material_with_job(
+        title="续播测试视频",
+        source_type="file",
+        source_ref="resume.mp4",
+        job_kind="transcode",
+        payload={},
+        kind="video",
+    )
+    try:
+        initial = repository.get_playback_state(material_id)
+        assert initial is not None
+        assert initial["position_ms"] == 0
+        assert initial["updated_at"] is None
+
+        assert repository.save_playback_state(material_id, 12_345)["position_ms"] == 12_345
+        assert repository.save_playback_state(material_id, 67_890)["position_ms"] == 67_890
+        assert repository.get_playback_state(material_id)["position_ms"] == 67_890
+
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
+            remaining = connection.execute(
+                text("SELECT count(*) FROM material_playback_state WHERE material_id = :id"),
+                {"id": material_id},
+            ).scalar_one()
+        assert remaining == 0
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
+        engine.dispose()

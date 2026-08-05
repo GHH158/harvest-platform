@@ -1,8 +1,9 @@
 // !$*UTF8*$!
 {
 	archiveVersion = 1;
-	classes = {};
-	objectVersion = 77;
+	classes = {
+	};
+	objectVersion = 71;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -25,10 +26,17 @@
 		A00000000000000000000017 /* PhotoReadingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* PhotoReadingView.swift */; };
 		A00000000000000000000018 /* VoiceTeacherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000020 /* VoiceTeacherView.swift */; };
 		A00000000000000000000019 /* CompanionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* CompanionView.swift */; };
+		A0000000000000000000001A /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* Components.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		A30000000000000000000001 /* PBXContainerItemProxy */ = {isa = PBXContainerItemProxy; containerPortal = A40000000000000000000001 /* Project object */; proxyType = 1; remoteGlobalIDString = A50000000000000000000001; remoteInfo = Harvest; };
+		A30000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A40000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A50000000000000000000001;
+			remoteInfo = Harvest;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -51,53 +59,340 @@
 		A10000000000000000000017 /* ShadowingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShadowingView.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* VideoLearningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoLearningView.swift; sourceTree = "<group>"; };
 		A10000000000000000000019 /* PhotoReadingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoReadingView.swift; sourceTree = "<group>"; };
+		A1000000000000000000001A /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		A10000000000000000000020 /* VoiceTeacherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTeacherView.swift; sourceTree = "<group>"; };
 		A10000000000000000000021 /* CompanionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		A60000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-		A60000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A60000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A60000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		A20000000000000000000001 = {isa = PBXGroup; children = (A20000000000000000000002 /* Harvest */, A20000000000000000000003 /* HarvestTests */, A20000000000000000000004 /* Products */); sourceTree = "<group>"; };
-		A20000000000000000000002 /* Harvest */ = {isa = PBXGroup; children = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, A10000000000000000000007, A10000000000000000000008, A10000000000000000000009, A10000000000000000000010, A10000000000000000000014, A10000000000000000000015, A10000000000000000000016, A10000000000000000000017, A10000000000000000000018, A10000000000000000000019, A10000000000000000000020, A10000000000000000000021); path = Harvest; sourceTree = "<group>"; };
-		A20000000000000000000003 /* HarvestTests */ = {isa = PBXGroup; children = (A10000000000000000000011); path = HarvestTests; sourceTree = "<group>"; };
-		A20000000000000000000004 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000012, A10000000000000000000013); name = Products; sourceTree = "<group>"; };
+		A20000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000002 /* Harvest */,
+				A20000000000000000000003 /* HarvestTests */,
+				A20000000000000000000004 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A20000000000000000000002 /* Harvest */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000001 /* HarvestApp.swift */,
+				A10000000000000000000002 /* DesignTokens.swift */,
+				A10000000000000000000003 /* Models.swift */,
+				A10000000000000000000004 /* KeychainStore.swift */,
+				A10000000000000000000005 /* AppConfiguration.swift */,
+				A10000000000000000000006 /* APIClient.swift */,
+				A10000000000000000000007 /* AudioPlayer.swift */,
+				A10000000000000000000008 /* SettingsView.swift */,
+				A10000000000000000000009 /* MaterialListView.swift */,
+				A10000000000000000000010 /* ReaderView.swift */,
+				A10000000000000000000014 /* OfflineLibrary.swift */,
+				A10000000000000000000015 /* DownloadsView.swift */,
+				A10000000000000000000016 /* ChatView.swift */,
+				A10000000000000000000017 /* ShadowingView.swift */,
+				A10000000000000000000018 /* VideoLearningView.swift */,
+				A10000000000000000000019 /* PhotoReadingView.swift */,
+				A10000000000000000000020 /* VoiceTeacherView.swift */,
+				A10000000000000000000021 /* CompanionView.swift */,
+				A1000000000000000000001A /* Components.swift */,
+			);
+			path = Harvest;
+			sourceTree = "<group>";
+		};
+		A20000000000000000000003 /* HarvestTests */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000011 /* HarvestTests.swift */,
+			);
+			path = HarvestTests;
+			sourceTree = "<group>";
+		};
+		A20000000000000000000004 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000012 /* Harvest.app */,
+				A10000000000000000000013 /* HarvestTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A50000000000000000000001 /* Harvest */ = {isa = PBXNativeTarget; buildConfigurationList = A90000000000000000000001 /* Build configuration list for PBXNativeTarget "Harvest" */; buildPhases = (A60000000000000000000003 /* Sources */, A60000000000000000000001 /* Frameworks */); buildRules = (); dependencies = (); name = Harvest; productName = Harvest; productReference = A10000000000000000000012 /* Harvest.app */; productType = "com.apple.product-type.application"; };
-		A50000000000000000000002 /* HarvestTests */ = {isa = PBXNativeTarget; buildConfigurationList = A90000000000000000000002 /* Build configuration list for PBXNativeTarget "HarvestTests" */; buildPhases = (A60000000000000000000004 /* Sources */, A60000000000000000000002 /* Frameworks */); buildRules = (); dependencies = (A80000000000000000000001 /* PBXTargetDependency */); name = HarvestTests; productName = HarvestTests; productReference = A10000000000000000000013 /* HarvestTests.xctest */; productType = "com.apple.product-type.bundle.unit-test"; };
+		A50000000000000000000001 /* Harvest */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A90000000000000000000001 /* Build configuration list for PBXNativeTarget "Harvest" */;
+			buildPhases = (
+				A60000000000000000000003 /* Sources */,
+				A60000000000000000000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Harvest;
+			productName = Harvest;
+			productReference = A10000000000000000000012 /* Harvest.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A50000000000000000000002 /* HarvestTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A90000000000000000000002 /* Build configuration list for PBXNativeTarget "HarvestTests" */;
+			buildPhases = (
+				A60000000000000000000004 /* Sources */,
+				A60000000000000000000002 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A80000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = HarvestTests;
+			productName = HarvestTests;
+			productReference = A10000000000000000000013 /* HarvestTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		A40000000000000000000001 /* Project object */ = {isa = PBXProject; attributes = { BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2600; LastUpgradeCheck = 2600; TargetAttributes = { A50000000000000000000001 = { CreatedOnToolsVersion = 26.0; }; A50000000000000000000002 = { CreatedOnToolsVersion = 26.0; TestTargetID = A50000000000000000000001; }; }; }; buildConfigurationList = A90000000000000000000003 /* Build configuration list for PBXProject "Harvest" */; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base, "zh-Hans"); mainGroup = A20000000000000000000001; productRefGroup = A20000000000000000000004 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (A50000000000000000000001 /* Harvest */, A50000000000000000000002 /* HarvestTests */); };
+		A40000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					A50000000000000000000001 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					A50000000000000000000002 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = A50000000000000000000001;
+					};
+				};
+			};
+			buildConfigurationList = A90000000000000000000003 /* Build configuration list for PBXProject "Harvest" */;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-Hans",
+			);
+			mainGroup = A20000000000000000000001;
+			productRefGroup = A20000000000000000000004 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A50000000000000000000001 /* Harvest */,
+				A50000000000000000000002 /* HarvestTests */,
+			);
+		};
 /* End PBXProject section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000006, A00000000000000000000007, A00000000000000000000008, A00000000000000000000009, A00000000000000000000010, A00000000000000000000012, A00000000000000000000013, A00000000000000000000014, A00000000000000000000015, A00000000000000000000016, A00000000000000000000017, A00000000000000000000018, A00000000000000000000019); runOnlyForDeploymentPostprocessing = 0; };
-		A60000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000011); runOnlyForDeploymentPostprocessing = 0; };
+		A60000000000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000001 /* HarvestApp.swift in Sources */,
+				A00000000000000000000002 /* DesignTokens.swift in Sources */,
+				A00000000000000000000003 /* Models.swift in Sources */,
+				A00000000000000000000004 /* KeychainStore.swift in Sources */,
+				A00000000000000000000005 /* AppConfiguration.swift in Sources */,
+				A00000000000000000000006 /* APIClient.swift in Sources */,
+				A00000000000000000000007 /* AudioPlayer.swift in Sources */,
+				A00000000000000000000008 /* SettingsView.swift in Sources */,
+				A00000000000000000000009 /* MaterialListView.swift in Sources */,
+				A00000000000000000000010 /* ReaderView.swift in Sources */,
+				A00000000000000000000012 /* OfflineLibrary.swift in Sources */,
+				A00000000000000000000013 /* DownloadsView.swift in Sources */,
+				A00000000000000000000014 /* ChatView.swift in Sources */,
+				A00000000000000000000015 /* ShadowingView.swift in Sources */,
+				A00000000000000000000016 /* VideoLearningView.swift in Sources */,
+				A00000000000000000000017 /* PhotoReadingView.swift in Sources */,
+				A00000000000000000000018 /* VoiceTeacherView.swift in Sources */,
+				A00000000000000000000019 /* CompanionView.swift in Sources */,
+				A0000000000000000000001A /* Components.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A60000000000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000011 /* HarvestTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		A80000000000000000000001 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A50000000000000000000001 /* Harvest */; targetProxy = A30000000000000000000001 /* PBXContainerItemProxy */; };
+		A80000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A50000000000000000000001 /* Harvest */;
+			targetProxy = A30000000000000000000001 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		AA00000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_TESTABILITY = YES; GCC_C_LANGUAGE_STANDARD = gnu17; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; name = Debug; };
-		AA00000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; GCC_C_LANGUAGE_STANDARD = gnu17; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; }; name = Release; };
-		AA00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = ""; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = Harvest; INFOPLIST_KEY_NSCameraUsageDescription = "Harvest 需要使用相机拍下包含日语的内容。"; INFOPLIST_KEY_NSMicrophoneUsageDescription = "Harvest 需要使用麦克风进行日语跟读和实时口语练习。"; IPHONEOS_DEPLOYMENT_TARGET = 18.0; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.harvest.reader; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1; }; name = Debug; };
-		AA00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = ""; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = Harvest; INFOPLIST_KEY_NSCameraUsageDescription = "Harvest 需要使用相机拍下包含日语的内容。"; INFOPLIST_KEY_NSMicrophoneUsageDescription = "Harvest 需要使用麦克风进行日语跟读和实时口语练习。"; IPHONEOS_DEPLOYMENT_TARGET = 18.0; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.harvest.reader; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1; }; name = Release; };
-		AA00000000000000000000005 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; PRODUCT_BUNDLE_IDENTIFIER = com.harvest.reader.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 6.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Harvest.app/Harvest"; TEST_TARGET_NAME = Harvest; }; name = Debug; };
-		AA00000000000000000000006 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; PRODUCT_BUNDLE_IDENTIFIER = com.harvest.reader.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 6.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Harvest.app/Harvest"; TEST_TARGET_NAME = Harvest; }; name = Release; };
+		AA00000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AA00000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		AA00000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4Q5J4CMMR3;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Harvest;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Harvest 需要使用相机拍下包含日语的内容。";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Harvest 需要使用麦克风进行日语跟读和实时口语练习。";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.gaohuanhuan.harvest.JapaneseLearning;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		AA00000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4Q5J4CMMR3;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Harvest;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Harvest 需要使用相机拍下包含日语的内容。";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Harvest 需要使用麦克风进行日语跟读和实时口语练习。";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.gaohuanhuan.harvest.JapaneseLearning;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		AA00000000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4Q5J4CMMR3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.gaohuanhuan.harvest.JapaneseLearning.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Harvest.app/Harvest";
+				TEST_TARGET_NAME = Harvest;
+			};
+			name = Debug;
+		};
+		AA00000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4Q5J4CMMR3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.gaohuanhuan.harvest.JapaneseLearning.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Harvest.app/Harvest";
+				TEST_TARGET_NAME = Harvest;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		A90000000000000000000001 /* Build configuration list for PBXNativeTarget "Harvest" */ = {isa = XCConfigurationList; buildConfigurations = (AA00000000000000000000003, AA00000000000000000000004); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		A90000000000000000000002 /* Build configuration list for PBXNativeTarget "HarvestTests" */ = {isa = XCConfigurationList; buildConfigurations = (AA00000000000000000000005, AA00000000000000000000006); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		A90000000000000000000003 /* Build configuration list for PBXProject "Harvest" */ = {isa = XCConfigurationList; buildConfigurations = (AA00000000000000000000001, AA00000000000000000000002); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A90000000000000000000001 /* Build configuration list for PBXNativeTarget "Harvest" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA00000000000000000000003 /* Debug */,
+				AA00000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A90000000000000000000002 /* Build configuration list for PBXNativeTarget "HarvestTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA00000000000000000000005 /* Debug */,
+				AA00000000000000000000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A90000000000000000000003 /* Build configuration list for PBXProject "Harvest" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA00000000000000000000001 /* Debug */,
+				AA00000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 	};
 	rootObject = A40000000000000000000001 /* Project object */;

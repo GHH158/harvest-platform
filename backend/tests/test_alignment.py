@@ -14,6 +14,27 @@ def test_alignment_keeps_original_text_and_donates_matching_times() -> None:
     assert result.tokens[-1].end_ms == 1_400
 
 
+def test_alignment_emits_japanese_words_with_hiragana_readings() -> None:
+    result = align_words_to_source(
+        "今日は少し風が強いです。",
+        [RecognizedWord(text="今日は少し風が強いです", start_ms=0, end_ms=1_400)],
+    )
+
+    assert [token.surface for token in result.tokens] == ["今日", "は", "少し", "風", "が", "強い", "です"]
+    assert result.tokens[0].reading == "きょう"
+    assert result.tokens[5].reading == "つよい"
+    assert result.tokens[0].start_ms == 0
+    assert result.tokens[-1].end_ms == 1_400
+
+
+def test_alignment_keeps_inflected_verbs_as_comprehensible_units() -> None:
+    text = "本を買って読みたいと思います。"
+    result = align_words_to_source(text, [RecognizedWord(text=text, start_ms=0, end_ms=1_500)])
+
+    assert [token.surface for token in result.tokens] == ["本", "を", "買って", "読みたい", "と", "思います"]
+    assert [token.reading for token in result.tokens] == ["ほん", "を", "かって", "よみたい", "と", "おもいます"]
+
+
 def test_alignment_reports_partial_coverage_without_rewriting_source() -> None:
     result = align_words_to_source("雨です。晴れです。", [RecognizedWord(text="雨です", start_ms=0, end_ms=600)])
 

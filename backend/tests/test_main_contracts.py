@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,10 +18,14 @@ from starlette.requests import Request
 class SubmissionRepository:
     def __init__(self) -> None:
         self.created: dict[str, Any] | None = None
+        self.thumbnail: tuple[int, str] | None = None
 
     def create_material_with_job(self, **values: Any) -> tuple[int, int]:
         self.created = values
         return 41, 73
+
+    def store_material_thumbnail(self, material_id: int, local_path: str) -> None:
+        self.thumbnail = material_id, local_path
 
 
 class ShadowingRepository:
@@ -32,6 +37,31 @@ class ShadowingRepository:
     def create_shadowing_submission(self, segment_id: int, audio_path: str) -> tuple[int, int]:
         self.submission = segment_id, audio_path
         return 51, 82
+
+
+class StandaloneJobRepository:
+    def __init__(self) -> None:
+        self.enqueued: dict[str, Any] | None = None
+
+    def enqueue_job(self, **values: Any) -> int:
+        self.enqueued = values
+        return 91
+
+
+class PlaybackRepository:
+    def __init__(self) -> None:
+        self.position_ms = 12_000
+
+    def get_playback_state(self, material_id: int) -> dict[str, Any] | None:
+        if material_id != 7:
+            return None
+        return {"material_id": material_id, "position_ms": self.position_ms, "updated_at": "2026-08-05T00:00:00Z"}
+
+    def save_playback_state(self, material_id: int, position_ms: int) -> dict[str, Any] | None:
+        if material_id != 7:
+            return None
+        self.position_ms = position_ms
+        return {"material_id": material_id, "position_ms": position_ms, "updated_at": "2026-08-05T00:01:00Z"}
 
 
 def upload(filename: str, content_type: str, content: bytes) -> UploadFile:
@@ -52,6 +82,80 @@ def test_photo_submission_uses_material_contract(monkeypatch: pytest.MonkeyPatch
     assert result == {"material_id": 41, "job_id": 73, "status": "pending"}
     assert repository.created is not None
     assert repository.created["job_kind"] == "vision"
+    assert repository.thumbnail is not None
+    assert repository.thumbnail[0] == 41
+    assert Path(repository.thumbnail[1]).read_bytes() == b"photo"
+
+
+def test_material_projection_exposes_stage_progress_and_failure_details(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(main, "get_settings", lambda: Settings(data_dir=tmp_path))
+    processing = main.serialise_material(
+        {
+            "id": 7,
+            "status": "processing",
+            "error_message": None,
+            "audio_oss_key": None,
+            "video_oss_key": None,
+            "thumbnail_local_path": str(tmp_path / "cover.jpg"),
+            "current_job_id": 17,
+            "current_job_kind": "asr_video",
+            "current_job_status": "running",
+            "current_job_error_message": None,
+            "current_job_payload": {},
+            "current_job_updated_at": datetime.now(UTC),
+        }
+    )
+    assert processing["progress_label"] == "正在转录字幕"
+    assert processing["progress_percent"] == 82
+    assert processing["eta_minutes"] == 5
+    assert processing["thumbnail_path"] == "/materials/7/thumbnail"
+
+    failed = main.serialise_material(
+        {
+            "id": 8,
+            "status": "failed",
+            "error_message": "Read timed out while connecting to OSS",
+            "audio_oss_key": None,
+            "video_oss_key": None,
+            "thumbnail_local_path": None,
+            "current_job_id": 18,
+            "current_job_kind": "asr_video",
+            "current_job_status": "failed",
+            "current_job_error_message": "Read timed out while connecting to OSS",
+            "current_job_payload": {},
+            "current_job_updated_at": datetime.now(UTC),
+        }
+    )
+    assert failed["failure_title"] == "转录失败"
+    assert failed["failure_summary"] == "网络连接中断"
+    assert failed["retryable"] is True
+
+
+def test_video_playback_position_can_be_read_and_updated(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = PlaybackRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    assert main.get_material_playback(7)["position_ms"] == 12_000
+    updated = main.put_material_playback(7, main.PlaybackStateUpdate(position_ms=34_500))
+
+    assert updated["position_ms"] == 34_500
+    assert repository.position_ms == 34_500
+
+
+def test_video_playback_position_rejects_missing_or_non_video_material(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "repository", PlaybackRepository)
+
+    with pytest.raises(HTTPException) as caught:
+        main.get_material_playback(99)
+    assert caught.value.status_code == 404
+
+    with pytest.raises(HTTPException) as caught:
+        main.put_material_playback(99, main.PlaybackStateUpdate(position_ms=1_000))
+    assert caught.value.status_code == 404
 
 
 def test_video_upload_rejects_wrong_type_before_writing(
@@ -81,6 +185,89 @@ def test_video_upload_stops_at_size_limit_and_removes_partial_file(
 
     assert caught.value.status_code == 413
     assert list((tmp_path / "video" / "uploads").iterdir()) == []
+
+
+def test_unified_voice_endpoint_dispatches_audio_without_video_preprocessing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repository = StandaloneJobRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: Settings(data_dir=tmp_path, max_audio_upload_bytes=100, min_free_disk_bytes=0),
+    )
+
+    result = asyncio.run(
+        main.post_voice_profile(
+            name="我的录音",
+            prefix="audio",
+            authorized=True,
+            sample=upload("voice.m4a", "audio/m4a", b"voice"),
+        )
+    )
+
+    assert result == {"job_id": 91, "status": "pending", "source_kind": "audio"}
+    assert repository.enqueued is not None
+    assert repository.enqueued["kind"] == "voice_enrollment"
+    assert repository.enqueued["payload"]["name"] == "我的录音"
+    assert Path(repository.enqueued["payload"]["sample_path"]).read_bytes() == b"voice"
+
+
+def test_unified_voice_endpoint_dispatches_video_to_demucs_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repository = StandaloneJobRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: Settings(data_dir=tmp_path, max_video_upload_bytes=100, min_free_disk_bytes=0),
+    )
+
+    result = asyncio.run(
+        main.post_voice_profile(
+            name="我的视频",
+            prefix="video",
+            authorized=True,
+            sample=upload("voice.mov", "video/quicktime", b"video"),
+        )
+    )
+
+    assert result == {
+        "job_id": 91,
+        "status": "pending",
+        "source_kind": "video",
+        "selection_mode": "auto",
+    }
+    assert repository.enqueued is not None
+    assert repository.enqueued["kind"] == "voice_enrollment_video"
+    assert repository.enqueued["material_id"] is None
+    assert repository.enqueued["payload"]["clip_start_seconds"] is None
+    assert Path(repository.enqueued["payload"]["source_path"]).read_bytes() == b"video"
+
+
+def test_video_voice_enrollment_requires_explicit_authorization(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repository = StandaloneJobRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+    monkeypatch.setattr(main, "get_settings", lambda: Settings(data_dir=tmp_path))
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(
+            main.post_voice_profile(
+                name="未授权声音",
+                prefix="mine",
+                authorized=False,
+                sample=upload("voice.mp4", "video/mp4", b"video"),
+            )
+        )
+
+    assert caught.value.status_code == 422
+    assert "授权" in str(caught.value.detail)
+    assert repository.enqueued is None
+    assert not list(tmp_path.rglob("*"))
 
 
 def test_video_link_creates_download_job(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,20 +419,21 @@ class CompanionRepository:
 def test_companion_sends_prior_turns_to_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     repository = CompanionRepository()
     captured: list[dict[str, str]] = []
+    options: list[dict[str, Any]] = []
 
     class RecordingLLM:
-        def __init__(self, settings: Settings) -> None:
-            pass
-
-        def reply(self, messages: list[dict[str, str]]) -> str:
+        def reply(self, messages: list[dict[str, str]], **values: Any) -> str:
             captured.extend(messages)
+            options.append(values)
             return "新的回答"
 
     monkeypatch.setattr(main, "repository", lambda: repository)
-    monkeypatch.setattr(main, "LLMService", RecordingLLM)
+    monkeypatch.setattr(main, "llm_service", lambda: RecordingLLM())
 
-    result = main.post_companion(main.CompanionRequest(material_id=7, segment_id=3, question="现在的问题"))
+    result = main.post_companion(main.CompanionRequest(material_id=7, segment_id=3, question="请解释「流会」的意思"))
 
     assert [item["content"] for item in captured[1:3]] == ["之前的问题", "之前的回答"]
-    assert captured[-1]["content"].endswith("问题：现在的问题")
+    assert "只作语境参考,不是日语词汇的全集" in captured[-1]["content"]
+    assert captured[-1]["content"].endswith("用户问题:\n请解释「流会」的意思")
+    assert options == [{"enable_thinking": False, "max_tokens": 1_200}]
     assert result["assistant"]["content"] == "新的回答"

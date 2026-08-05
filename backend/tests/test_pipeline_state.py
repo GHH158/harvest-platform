@@ -8,6 +8,7 @@ from unittest.mock import patch
 from app.asr import RecognizedWord
 from app.config import Settings
 from app.repository import Job
+from app.voice import ExtractedVoiceSample
 from app.worker import Worker
 
 
@@ -17,9 +18,11 @@ class PipelineRepository:
         self.next_job_id = max((job.id for job in jobs), default=0) + 1
         self.claimed: list[Job] = []
         self.processing: list[int] = []
+        self.downloaded: list[int] = []
         self.done: list[int] = []
         self.failed: list[tuple[int, int | None, str]] = []
         self.enqueued: list[Job] = []
+        self.transcode_payload: dict[str, Any] | None = None
         self.tokens: list[dict[str, Any]] | None = None
         self.video_assets: dict[str, Any] | None = None
         self.video_segments: list[dict[str, Any]] | None = None
@@ -28,6 +31,7 @@ class PipelineRepository:
         self.shadowing_result: tuple[int, str, list[dict[str, Any]], float] | None = None
         self.shadowing_failure: tuple[int, str] | None = None
         self.voice_profile: tuple[str, str] | None = None
+        self.job_payload_updates: tuple[int, dict[str, Any]] | None = None
         self.updated_title: tuple[int, str] | None = None
 
     def fail_exhausted_pending_jobs(self, *, max_attempts: int) -> int:
@@ -42,6 +46,12 @@ class PipelineRepository:
 
     def mark_material_processing(self, material_id: int) -> None:
         self.processing.append(material_id)
+
+    def mark_material_downloaded(self, material_id: int, duration_ms: int | None = None) -> None:
+        self.downloaded.append(material_id)
+
+    def latest_transcode_payload(self, material_id: int) -> dict[str, Any] | None:
+        return self.transcode_payload
 
     def mark_job_done(self, job_id: int) -> None:
         self.done.append(job_id)
@@ -68,6 +78,9 @@ class PipelineRepository:
     def create_voice_profile(self, *, name: str, voice_id: str) -> int:
         self.voice_profile = name, voice_id
         return 1
+
+    def merge_job_payload(self, job_id: int, values: dict[str, Any]) -> None:
+        self.job_payload_updates = job_id, values
 
     def update_material_title(self, material_id: int, title: str) -> None:
         self.updated_title = material_id, title
@@ -152,11 +165,19 @@ def test_failed_asr_only_fails_enhancement_job() -> None:
 
 
 class FakeVideoProcessor:
-    def create_hls(self, source: Path, video_directory: Path, audio_directory: Path) -> None:
+    def create_hls(
+        self,
+        source: Path,
+        video_directory: Path,
+        audio_directory: Path,
+        *,
+        direct_video_copy: bool = False,
+    ) -> str:
         for directory in (video_directory, audio_directory):
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "index.m3u8").write_text("#EXTM3U\nsegment-00000.ts\n")
             (directory / "segment-00000.ts").write_bytes(b"segment")
+        return "copy" if direct_video_copy else "videotoolbox"
 
     def extract_audio(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +187,9 @@ class FakeVideoProcessor:
 class FakeStorage:
     def __init__(self) -> None:
         self.uploads: list[tuple[Path, str]] = []
+
+    def validate_configuration(self) -> None:
+        pass
 
     def upload_audio(self, local_path: Path, oss_key: str) -> str:
         self.uploads.append((local_path, oss_key))
@@ -212,8 +236,34 @@ class FakeVideoDownloader:
 
 
 class FakeVoiceEnrollment:
+    def validate_configuration(self) -> None:
+        pass
+
     def create_japanese_voice(self, *, audio_url: str, prefix: str) -> str:
         return f"qwen-audio-3.0-tts-plus-{prefix}-voice"
+
+
+class FakeVideoVoiceExtractor:
+    def extract(
+        self,
+        *,
+        source: Path,
+        work_directory: Path,
+        start_seconds: float | None,
+        duration_seconds: float,
+    ) -> ExtractedVoiceSample:
+        work_directory.mkdir(parents=True, exist_ok=True)
+        sample = work_directory / "voice-sample.wav"
+        sample.write_bytes(b"voice")
+        return ExtractedVoiceSample(
+            path=sample,
+            mean_volume_db=-18.0,
+            selected_start_seconds=42.0,
+            selected_duration_seconds=20.0,
+            quality_score=88.5,
+            active_ratio=0.72,
+            snr_db=18.0,
+        )
 
 
 class StaticVision:
@@ -262,7 +312,7 @@ def test_photo_pipeline_enters_reading_pipeline(monkeypatch: Any, tmp_path: Path
     assert repository.tokens
 
 
-def test_video_pipeline_reaches_translation_completion(tmp_path: Path) -> None:
+def test_video_pipeline_stops_after_local_transcode(tmp_path: Path) -> None:
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     initial = Job(id=1, kind="transcode", material_id=7, payload={"source_path": str(source)}, attempts=1)
@@ -270,31 +320,20 @@ def test_video_pipeline_reaches_translation_completion(tmp_path: Path) -> None:
     worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
     worker.video = FakeVideoProcessor()  # type: ignore[assignment]
     worker.storage = FakeStorage()  # type: ignore[assignment]
-    worker.asr = StaticASR([RecognizedWord("これは。", 0, 1_200)])  # type: ignore[assignment]
-    worker.llm = StaticLLM()  # type: ignore[assignment]
 
     while worker.run_one():
         pass
 
-    assert [job.kind for job in repository.claimed] == [
-        "transcode",
-        "upload_video",
-        "asr_video",
-        "translate_video",
-    ]
-    assert repository.processing == [7, 7, 7, 7]
+    # Download + transcode only; no OSS upload / ASR / translation until manual trigger.
+    assert [job.kind for job in repository.claimed] == ["transcode"]
+    assert repository.processing == [7]
+    assert repository.downloaded == [7]
     assert repository.failed == []
-    assert repository.video_assets is not None
-    assert repository.video_assets["video_playlist_key"].endswith("/hls/video/index.m3u8")
-    assert repository.video_assets["audio_playlist_key"].endswith("/hls/audio/index.m3u8")
-    assert repository.video_segments == [
-        {"idx": 0, "text_ja": "これは。", "start_ms": 0, "end_ms": 1_200}
-    ]
-    assert repository.video_translations == ["这是。"]
-    assert worker.storage.deleted_key == "temporary/materials/7/asr-audio.m4a"  # type: ignore[attr-defined]
+    assert repository.video_assets is None
+    assert worker.storage.uploads == []  # type: ignore[attr-defined]
 
 
-def test_video_link_download_enters_the_same_video_pipeline(tmp_path: Path) -> None:
+def test_video_link_download_stops_after_local_transcode(tmp_path: Path) -> None:
     source = tmp_path / "downloaded.mp4"
     source.write_bytes(b"source")
     initial = Job(
@@ -309,17 +348,100 @@ def test_video_link_download_enters_the_same_video_pipeline(tmp_path: Path) -> N
     worker.video_downloader = FakeVideoDownloader(source)  # type: ignore[assignment]
     worker.video = FakeVideoProcessor()  # type: ignore[assignment]
     worker.storage = FakeStorage()  # type: ignore[assignment]
+
+    while worker.run_one():
+        pass
+
+    assert [job.kind for job in repository.claimed] == ["download_video", "transcode"]
+    assert repository.updated_title == (7, "下载到的标题")
+    assert repository.downloaded == [7]
+    assert worker.storage.uploads == []  # type: ignore[attr-defined]
+
+
+def test_manual_transcription_chain_completes_pipeline(tmp_path: Path) -> None:
+    # Simulates the manual "开始转录" trigger: an upload_video job is enqueued with
+    # the locally-transcoded HLS paths, then the cloud chain runs to ready.
+    video_dir = tmp_path / "hls-video"
+    audio_dir = tmp_path / "hls-audio"
+    for directory in (video_dir, audio_dir):
+        directory.mkdir()
+    (video_dir / "index.m3u8").write_text("#EXTM3U\n")
+    (audio_dir / "index.m3u8").write_text("#EXTM3U\n")
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    asr_audio = tmp_path / "asr-audio.m4a"
+    asr_audio.write_bytes(b"audio")
+    initial = Job(
+        id=1,
+        kind="upload_video",
+        material_id=7,
+        payload={
+            "source_path": str(source),
+            "video_directory": str(video_dir),
+            "audio_directory": str(audio_dir),
+            "asr_audio_path": str(asr_audio),
+        },
+        attempts=1,
+    )
+    repository = PipelineRepository([initial])
+    worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
+    worker.storage = FakeStorage()  # type: ignore[assignment]
     worker.asr = StaticASR([RecognizedWord("これは。", 0, 1_200)])  # type: ignore[assignment]
     worker.llm = StaticLLM()  # type: ignore[assignment]
 
     while worker.run_one():
         pass
 
-    assert [job.kind for job in repository.claimed] == [
-        "download_video", "transcode", "upload_video", "asr_video", "translate_video"
+    assert [job.kind for job in repository.claimed] == ["upload_video", "asr_video", "translate_video"]
+    assert repository.failed == []
+    assert repository.video_assets is not None
+    assert repository.video_assets["video_playlist_key"].endswith("/hls/video/index.m3u8")
+    assert repository.video_assets["audio_playlist_key"].endswith("/hls/audio/index.m3u8")
+    assert repository.video_segments == [
+        {"idx": 0, "text_ja": "これは。", "start_ms": 0, "end_ms": 1_200}
     ]
-    assert repository.updated_title == (7, "下载到的标题")
+    assert repository.tokens is not None
+    assert [token["surface"] for token in repository.tokens] == ["これ", "は"]
+    assert all(token["reading"] for token in repository.tokens)
     assert repository.video_translations == ["这是。"]
+    assert worker.storage.deleted_key == "temporary/materials/7/asr-audio.m4a"  # type: ignore[attr-defined]
+
+
+def test_video_upload_failure_returns_material_to_downloaded_for_retry(tmp_path: Path) -> None:
+    video_dir = tmp_path / "hls-video"
+    audio_dir = tmp_path / "hls-audio"
+    for directory in (video_dir, audio_dir):
+        directory.mkdir()
+        (directory / "index.m3u8").write_text("#EXTM3U\n")
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    asr_audio = tmp_path / "asr-audio.m4a"
+    asr_audio.write_bytes(b"audio")
+    job = Job(
+        id=1,
+        kind="upload_video",
+        material_id=7,
+        payload={
+            "source_path": str(source),
+            "video_directory": str(video_dir),
+            "audio_directory": str(audio_dir),
+            "asr_audio_path": str(asr_audio),
+        },
+        attempts=1,
+    )
+    repository = PipelineRepository([job])
+    worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
+
+    class FailingStorage(FakeStorage):
+        def upload_tree(self, directory: Path, oss_prefix: str) -> list[str]:
+            raise RuntimeError("OSS timeout")
+
+    worker.storage = FailingStorage()  # type: ignore[assignment]
+
+    assert worker.run_one() is True
+
+    assert repository.failed == [(1, None, "OSS timeout")]
+    assert repository.downloaded == [7]
 
 
 def test_voice_enrollment_uses_temporary_oss_and_creates_default_profile(tmp_path: Path) -> None:
@@ -342,6 +464,41 @@ def test_voice_enrollment_uses_temporary_oss_and_creates_default_profile(tmp_pat
 
     assert repository.voice_profile == ("我的声音", "qwen-audio-3.0-tts-plus-mine-voice")
     assert worker.storage.deleted_key.startswith("temporary/voice-profiles/")  # type: ignore[attr-defined]
+
+
+def test_video_voice_enrollment_selects_sample_and_creates_default_profile(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    job = Job(
+        id=1,
+        kind="voice_enrollment_video",
+        material_id=None,
+        payload={
+            "name": "视频声音",
+            "prefix": "movie",
+            "source_path": str(source),
+            "selection_mode": "auto",
+            "clip_start_seconds": None,
+            "clip_duration_seconds": 20,
+        },
+        attempts=1,
+    )
+    repository = PipelineRepository([job])
+    worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
+    worker.storage = FakeStorage()  # type: ignore[assignment]
+    worker.voice_enrollment = FakeVoiceEnrollment()  # type: ignore[assignment]
+    worker.video_voice_extractor = FakeVideoVoiceExtractor()  # type: ignore[assignment]
+
+    with patch("app.worker.audio_duration_ms", return_value=20_000):
+        assert worker.run_one() is True
+
+    assert repository.failed == []
+    assert repository.done == [1]
+    assert repository.voice_profile == ("视频声音", "qwen-audio-3.0-tts-plus-movie-voice")
+    assert repository.job_payload_updates is not None
+    assert repository.job_payload_updates[1]["selected_start_seconds"] == 42.0
+    assert repository.job_payload_updates[1]["quality_score"] == 88.5
+    assert not source.exists()
 
 
 def test_shadowing_failure_sets_attempt_failure(tmp_path: Path) -> None:

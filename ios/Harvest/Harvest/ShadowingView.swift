@@ -34,18 +34,43 @@ struct ShadowingView: View {
     @State private var isUploading = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Text(segment.textJA).font(.system(size: DesignTokens.readingSize, design: .serif)).foregroundStyle(DesignTokens.ink)
-            Button(recorder.isRecording ? "结束录音" : "开始跟读") { Task { await record() } }
-                .buttonStyle(PrimaryButtonStyle())
-            if isUploading { ProgressView("正在交给后台评分") }
-            if let attempt, let score = attempt.score {
-                Text("识别度 \(Int(score * 100))%") .font(.system(.title2, design: .serif)).foregroundStyle(DesignTokens.ink)
-                if let diff = attempt.diff { Text(diff.filter { !$0.recognized }.map(\.surface).joined()).foregroundStyle(DesignTokens.accent) }
-            } else { Text("评分依赖 ASR；未配置百炼时会保留明确的等待/失败状态。") .font(.footnote).foregroundStyle(DesignTokens.muted) }
-            if let errorMessage { Text(errorMessage).font(.footnote).foregroundStyle(DesignTokens.accent) }
-            Spacer()
-        }.padding(DesignTokens.pageInset).background(DesignTokens.canvas.ignoresSafeArea()).navigationTitle("跟读")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                CardView {
+                    Text(segment.textJA)
+                        .font(.system(size: DesignTokens.readingSize, design: .serif))
+                        .foregroundStyle(DesignTokens.ink)
+                        .lineSpacing(DesignTokens.readingLineSpacing)
+                }
+                Button(recorder.isRecording ? "结束录音" : "开始跟读") { Task { await record() } }
+                    .buttonStyle(PrimaryButtonStyle())
+                if isUploading {
+                    HStack(spacing: 8) {
+                        ProgressView().tint(DesignTokens.accent)
+                        Text("正在交给后台评分").font(.footnote).foregroundStyle(DesignTokens.muted)
+                    }
+                }
+                if let attempt, let score = attempt.score {
+                    Text("识别度 \(Int(score * 100))%")
+                        .font(.system(.title2, design: .serif))
+                        .foregroundStyle(DesignTokens.ink)
+                    if let diff = attempt.diff {
+                        Text(diff.filter { !$0.recognized }.map(\.surface).joined())
+                            .foregroundStyle(DesignTokens.accent)
+                    }
+                } else {
+                    Text("评分依赖 ASR；未配置百炼时会保留明确的等待/失败状态。")
+                        .font(.footnote)
+                        .foregroundStyle(DesignTokens.muted)
+                }
+                if let errorMessage {
+                    Text(errorMessage).font(.footnote).foregroundStyle(DesignTokens.accent)
+                }
+            }
+            .padding(DesignTokens.pageInset)
+        }
+        .background(DesignTokens.canvas.ignoresSafeArea())
+        .navigationTitle("跟读")
     }
 
     @MainActor private func record() async {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -17,6 +18,7 @@ from .asr import ASRService, RecognizedWord
 from .config import Settings, get_settings
 from .db import make_engine
 from .llm import LLMService
+from .prompts import SUBTITLE_TRANSLATION_SYSTEM_PROMPT
 from .repository import Job, Repository
 from .shadowing import score_transcript
 from .storage import ObjectStorage
@@ -24,10 +26,10 @@ from .text import estimated_segments
 from .tts import TTSService
 from .video import VideoDownloader, VideoProcessor
 from .vision import VisionService
-from .voice import VoiceEnrollmentService, validate_voice_sample_duration
+from .voice import VideoVoiceExtractor, VoiceEnrollmentService, validate_voice_sample_duration
 
 ENHANCEMENT_JOB_KINDS = {"asr"}
-STANDALONE_JOB_KINDS = {"shadowing", "voice_enrollment"}
+STANDALONE_JOB_KINDS = {"shadowing", "voice_enrollment", "voice_enrollment_video"}
 
 
 class Worker:
@@ -37,14 +39,20 @@ class Worker:
         self.tts = TTSService(settings)
         self.asr = ASRService(settings)
         self.storage = ObjectStorage(settings)
-        self.video = VideoProcessor()
+        self.video = VideoProcessor(
+            max_threads=settings.video_transcode_max_threads,
+            max_height=settings.video_download_max_height,
+        )
         self.video_downloader = VideoDownloader(
             max_bytes=settings.max_video_upload_bytes,
             min_free_bytes=settings.min_free_disk_bytes,
+            max_height=settings.video_download_max_height,
+            max_fps=settings.video_download_max_fps,
         )
         self.vision = VisionService(settings)
         self.llm = LLMService(settings)
         self.voice_enrollment = VoiceEnrollmentService(settings)
+        self.video_voice_extractor = VideoVoiceExtractor(settings.data_dir)
 
     def run_one(self) -> bool:
         exhausted = self.repository.fail_exhausted_pending_jobs(max_attempts=self.settings.worker_max_attempts)
@@ -80,13 +88,19 @@ class Worker:
                 self._translate_video(job)
             elif job.kind == "voice_enrollment":
                 self._enroll_voice(job)
+            elif job.kind == "voice_enrollment_video":
+                self._enroll_voice_from_video(job)
             else:
                 raise RuntimeError(f"不支持的任务类型: {job.kind}")
         except Exception as error:  # The error must be persisted for the ingest UI and diagnostics.
             # P2 ASR improves P1's estimated sentence timing. If recognition
             # fails, retain the already playable sentence-level material and
             # only record the diagnostic on its own job.
-            self.repository.mark_job_failed(job.id, None if job.kind == "asr" else job.material_id, str(error))
+            retryable_video_upload = job.kind == "upload_video" and job.material_id is not None
+            failure_material_id = None if job.kind == "asr" or retryable_video_upload else job.material_id
+            self.repository.mark_job_failed(job.id, failure_material_id, str(error))
+            if retryable_video_upload:
+                self.repository.mark_material_downloaded(job.material_id)
             if job.kind == "shadowing":
                 self.repository.fail_shadowing_attempt(int(job.payload.get("attempt_id", 0)), str(error))
             print(f"job={job.id} failed: {error}", flush=True)
@@ -158,6 +172,7 @@ class Worker:
                     "segment_idx": token.segment_idx,
                     "idx": token.idx,
                     "surface": token.surface,
+                    "reading": token.reading,
                     "start_ms": token.start_ms,
                     "end_ms": token.end_ms,
                 }
@@ -187,18 +202,29 @@ class Worker:
         video_directory = output_dir / "hls-video"
         audio_directory = output_dir / "hls-audio"
         asr_audio = output_dir / "asr-audio.m4a"
-        self.video.create_hls(source, video_directory, audio_directory)
-        self.video.extract_audio(source, asr_audio)
-        self.repository.enqueue_job(
-            kind="upload_video",
-            material_id=job.material_id,
-            payload={
-                "source_path": str(source),
-                "video_directory": str(video_directory),
-                "audio_directory": str(audio_directory),
-                "asr_audio_path": str(asr_audio),
-            },
+        thumbnail = output_dir / "thumbnail.jpg"
+        try:
+            self.video.create_thumbnail(source, thumbnail)
+            self.repository.store_material_thumbnail(job.material_id, str(thumbnail))
+        except Exception as error:
+            print(f"job={job.id} 无法生成视频缩略图: {error}", flush=True)
+        video_mode = self.video.create_hls(
+            source,
+            video_directory,
+            audio_directory,
+            direct_video_copy=bool(job.payload.get("direct_hls_compatible")),
         )
+        self.video.extract_audio(source, asr_audio)
+        self.repository.merge_job_payload(job.id, {"video_mode": video_mode})
+        # Stop here: the video is downloaded and transcoded locally but NOT uploaded.
+        # Uploading to OSS (and the ASR/translate that follow) generates cloud traffic,
+        # so it must be triggered manually from the materials page. The transcode job's
+        # payload keeps source_path so the trigger can rebuild the upload payload.
+        try:
+            duration_ms = audio_duration_ms(asr_audio)
+        except Exception:
+            duration_ms = None
+        self.repository.mark_material_downloaded(job.material_id, duration_ms=duration_ms)
 
     def _download_video(self, job: Job) -> None:
         url = str(job.payload.get("url", "")).strip()
@@ -211,7 +237,13 @@ class Worker:
         self.repository.enqueue_job(
             kind="transcode",
             material_id=job.material_id,
-            payload={"source_path": str(downloaded.path)},
+            payload={
+                "source_path": str(downloaded.path),
+                "source_height": downloaded.height,
+                "source_fps": downloaded.fps,
+                "source_vcodec": downloaded.vcodec,
+                "direct_hls_compatible": downloaded.direct_hls_compatible,
+            },
         )
 
     def _extract_photo(self, job: Job) -> None:
@@ -288,6 +320,21 @@ class Worker:
         if not segments:
             raise RuntimeError("视频 ASR 未返回字幕。")
         self.repository.replace_video_segments(job.material_id, segments)
+        alignment = align_words_to_source("".join(str(item["text_ja"]) for item in segments), words)
+        self.repository.replace_tokens(
+            job.material_id,
+            [
+                {
+                    "segment_idx": token.segment_idx,
+                    "idx": token.idx,
+                    "surface": token.surface,
+                    "reading": token.reading,
+                    "start_ms": token.start_ms,
+                    "end_ms": token.end_ms,
+                }
+                for token in alignment.tokens
+            ],
+        )
         self.repository.enqueue_job(
             kind="translate_video",
             material_id=job.material_id,
@@ -306,7 +353,7 @@ class Worker:
             [
                 {
                     "role": "system",
-                    "content": "把日语字幕逐条翻译为简洁中文，只返回 JSON 字符串数组，数量和顺序不变。",
+                    "content": SUBTITLE_TRANSLATION_SYSTEM_PROMPT,
                 },
                 {"role": "user", "content": json.dumps(sentences, ensure_ascii=False)},
             ]
@@ -328,6 +375,8 @@ class Worker:
         prefix = str(job.payload.get("prefix", "")).strip()
         if not sample_path.exists() or not name or not prefix:
             raise RuntimeError("voice_enrollment 任务缺少音色名称、前缀或参考录音。")
+        self.voice_enrollment.validate_configuration()
+        self.storage.validate_configuration()
         validate_voice_sample_duration(audio_duration_ms(sample_path))
         oss_key = f"temporary/voice-profiles/{job.id}/{sample_path.name}"
         self.storage.upload_audio(sample_path, oss_key)
@@ -342,9 +391,63 @@ class Worker:
         except Exception as error:
             print(f"job={job.id} 无法删除音色参考录音: {error}", flush=True)
 
+    def _enroll_voice_from_video(self, job: Job) -> None:
+        source_path = Path(str(job.payload.get("source_path", "")))
+        name = str(job.payload.get("name", "")).strip()
+        prefix = str(job.payload.get("prefix", "")).strip()
+        selection_mode = str(job.payload.get("selection_mode", "auto")).strip().lower()
+        if not source_path.exists() or not name or not prefix:
+            raise RuntimeError("voice_enrollment_video 任务缺少音色名称、前缀或原始视频。")
+        if selection_mode not in {"auto", "manual"}:
+            raise RuntimeError("voice_enrollment_video 任务的片段选择方式无效。")
+        self.voice_enrollment.validate_configuration()
+        self.storage.validate_configuration()
+        raw_start = job.payload.get("clip_start_seconds")
+        if selection_mode == "manual" and raw_start is None:
+            raise RuntimeError("voice_enrollment_video 手动模式缺少片段起点。")
+        start_seconds = None if selection_mode == "auto" else float(raw_start)
+        duration_seconds = float(job.payload.get("clip_duration_seconds", 20.0))
+        work_directory = self.settings.data_dir / "voice-profiles" / "processed" / f"job-{job.id}"
+        sample = self.video_voice_extractor.extract(
+            source=source_path,
+            work_directory=work_directory,
+            start_seconds=start_seconds,
+            duration_seconds=duration_seconds,
+        )
+        self.repository.merge_job_payload(
+            job.id,
+            {
+                "selected_start_seconds": sample.selected_start_seconds,
+                "selected_duration_seconds": sample.selected_duration_seconds,
+                "mean_volume_db": sample.mean_volume_db,
+                "quality_score": sample.quality_score,
+                "active_ratio": sample.active_ratio,
+                "snr_db": sample.snr_db,
+            },
+        )
+        validate_voice_sample_duration(audio_duration_ms(sample.path))
+        oss_key = f"temporary/voice-profiles/{job.id}/{sample.path.name}"
+        self.storage.upload_audio(sample.path, oss_key)
+        voice_id = self.voice_enrollment.create_japanese_voice(
+            audio_url=self.storage.public_url(oss_key),
+            prefix=prefix,
+        )
+        self.repository.create_voice_profile(name=name, voice_id=voice_id)
+        source_path.unlink(missing_ok=True)
+        shutil.rmtree(work_directory, ignore_errors=True)
+        try:
+            self.storage.delete(oss_key)
+        except Exception as error:
+            print(f"job={job.id} 无法删除视频音色参考录音: {error}", flush=True)
+
 
 def extract_article(url: str) -> tuple[str | None, str]:
-    with httpx.Client(timeout=30.0, follow_redirects=True, headers={"User-Agent": "Harvest/0.1"}) as client:
+    with httpx.Client(
+        timeout=30.0,
+        follow_redirects=True,
+        headers={"User-Agent": "Harvest/0.1"},
+        trust_env=False,
+    ) as client:
         response = client.get(url)
         response.raise_for_status()
     return extract_article_html(response.text, url)

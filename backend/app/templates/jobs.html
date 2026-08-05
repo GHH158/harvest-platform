@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Harvest · 任务{% endblock %}
+{% block head %}<meta http-equiv="refresh" content="15">{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1 class="title is-4">任务队列</h1>
+  <p class="subtitle is-6">共 {{ total }} 个任务，每 15 秒自动刷新。</p>
+</header>
+
+<form method="get" action="/admin/jobs" class="filter-bar">
+  <div class="field">
+    <label class="label">状态筛选</label>
+    <div class="control">
+      <div class="select is-fullwidth">
+        <select name="status" onchange="this.form.submit()">
+          <option value=""{% if not status_filter %} selected{% endif %}>全部</option>
+          <option value="pending"{% if status_filter == "pending" %} selected{% endif %}>待处理</option>
+          <option value="running"{% if status_filter == "running" %} selected{% endif %}>执行中</option>
+          <option value="done"{% if status_filter == "done" %} selected{% endif %}>完成</option>
+          <option value="failed"{% if status_filter == "failed" %} selected{% endif %}>失败</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <div class="field">
+    <label class="label">任务类型</label>
+    <div class="control">
+      <div class="select is-fullwidth">
+        <select name="kind" onchange="this.form.submit()">
+          <option value=""{% if not kind %} selected{% endif %}>全部</option>
+          {% for job_kind in job_kinds %}
+          <option value="{{ job_kind }}"{% if kind == job_kind %} selected{% endif %}>{{ job_kind }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+  <div class="field">
+    <div class="control">
+      <button type="submit" class="button is-light">筛选</button>
+    </div>
+  </div>
+</form>
+
+<section class="card">
+  <div class="table-wrap">
+    <table class="table is-fullwidth is-hoverable">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>任务类型</th>
+          <th>关联材料</th>
+          <th>状态</th>
+          <th>重试次数</th>
+          <th>创建时间</th>
+          <th>错误信息</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for job in jobs %}
+        <tr>
+          <td class="cell-muted">{{ job.id }}</td>
+          <td class="cell-main">{{ job.kind }}</td>
+          <td class="cell-muted">{{ job.material_title or "—" }}</td>
+          <td><span class="tag {{ job.status | job_status_tag }}">{{ job.status | job_status_label }}</span></td>
+          <td class="cell-muted">{{ job.attempts }}</td>
+          <td class="cell-muted">{{ job.created_at | datetime_local }}</td>
+          <td class="cell-error">{{ job.error_message or "—" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7"><div class="has-text-centered has-text-grey py-5">暂无任务</div></td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if pages > 1 %}
+  <nav class="pagination is-centered mt-4" role="navigation" aria-label="pagination">
+    <a class="pagination-previous {{ 'is-disabled' if page <= 1 else '' }}" href="/admin/jobs?status={{ status_filter or '' }}&kind={{ kind or '' }}&page={{ page - 1 }}">上一页</a>
+    <a class="pagination-next {{ 'is-disabled' if page >= pages else '' }}" href="/admin/jobs?status={{ status_filter or '' }}&kind={{ kind or '' }}&page={{ page + 1 }}">下一页</a>
+    <ul class="pagination-list">
+      <li><span class="has-text-grey">共 {{ total }} 条 · 第 {{ page }}/{{ pages }} 页</span></li>
+    </ul>
+  </nav>
+  {% endif %}
+</section>
+{% endblock %}

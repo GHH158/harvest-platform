@@ -29,7 +29,7 @@ class TTSService:
                 "language_hints": ["ja"],
             },
         }
-        with httpx.Client(timeout=180.0, follow_redirects=True) as client:
+        with httpx.Client(timeout=180.0, follow_redirects=True, trust_env=False) as client:
             response = client.post(
                 endpoint,
                 headers={"Authorization": f"Bearer {self.settings.dashscope_api_key}"},

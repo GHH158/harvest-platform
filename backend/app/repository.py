@@ -66,7 +66,13 @@ class Repository:
                 connection.execute(
                     text(
                         """
-                    SELECT m.*, delivery.oss_key AS audio_oss_key, video_delivery.oss_key AS video_oss_key
+                    SELECT m.*, delivery.oss_key AS audio_oss_key, video_delivery.oss_key AS video_oss_key,
+                           current_job.id AS current_job_id, current_job.kind AS current_job_kind,
+                           current_job.status AS current_job_status,
+                           current_job.error_message AS current_job_error_message,
+                           current_job.payload AS current_job_payload,
+                           current_job.updated_at AS current_job_updated_at,
+                           thumbnail.local_path AS thumbnail_local_path
                     FROM material m
                     LEFT JOIN LATERAL (
                         SELECT oss_key FROM media_asset
@@ -77,6 +83,16 @@ class Repository:
                         SELECT oss_key FROM media_asset WHERE material_id = m.id AND kind = 'video' AND purpose = 'delivery'
                         ORDER BY id DESC LIMIT 1
                     ) video_delivery ON true
+                    LEFT JOIN LATERAL (
+                        SELECT id, kind, status, error_message, payload, updated_at
+                        FROM job WHERE material_id = m.id
+                        ORDER BY id DESC LIMIT 1
+                    ) current_job ON true
+                    LEFT JOIN LATERAL (
+                        SELECT local_path FROM media_asset
+                        WHERE material_id = m.id AND kind = 'image' AND purpose = 'thumbnail'
+                        ORDER BY id DESC LIMIT 1
+                    ) thumbnail ON true
                     WHERE m.id = :material_id
                     """
                     ),
@@ -87,13 +103,77 @@ class Repository:
             )
         return dict(row) if row else None
 
-    def list_materials(self) -> list[dict[str, Any]]:
+    def get_playback_state(self, material_id: int) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    text(
+                        """
+                        SELECT m.id AS material_id,
+                               COALESCE(state.position_ms, 0) AS position_ms,
+                               state.updated_at
+                        FROM material m
+                        LEFT JOIN material_playback_state state ON state.material_id = m.id
+                        WHERE m.id = :material_id AND m.kind = 'video'
+                        """
+                    ),
+                    {"material_id": material_id},
+                )
+                .mappings()
+                .first()
+            )
+        return dict(row) if row else None
+
+    def save_playback_state(self, material_id: int, position_ms: int) -> dict[str, Any] | None:
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO material_playback_state (material_id, position_ms)
+                        SELECT id, :position_ms FROM material
+                        WHERE id = :material_id AND kind = 'video'
+                        ON CONFLICT (material_id) DO UPDATE
+                        SET position_ms = EXCLUDED.position_ms
+                        RETURNING material_id, position_ms, updated_at
+                        """
+                    ),
+                    {"material_id": material_id, "position_ms": position_ms},
+                )
+                .mappings()
+                .first()
+            )
+        return dict(row) if row else None
+
+    def list_materials(
+        self,
+        *,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        conditions: list[str] = []
+        parameters: dict[str, Any] = {"offset": offset}
+        if status:
+            conditions.append("m.status = :status")
+            parameters["status"] = status
+        where_clause = " AND ".join(conditions) if conditions else "true"
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = " LIMIT :limit"
+            parameters["limit"] = limit
         with self.engine.connect() as connection:
             rows = (
                 connection.execute(
                     text(
-                        """
-                    SELECT m.*, delivery.oss_key AS audio_oss_key, video_delivery.oss_key AS video_oss_key
+                        f"""
+                    SELECT m.*, delivery.oss_key AS audio_oss_key, video_delivery.oss_key AS video_oss_key,
+                           current_job.id AS current_job_id, current_job.kind AS current_job_kind,
+                           current_job.status AS current_job_status,
+                           current_job.error_message AS current_job_error_message,
+                           current_job.payload AS current_job_payload,
+                           current_job.updated_at AS current_job_updated_at,
+                           thumbnail.local_path AS thumbnail_local_path
                     FROM material m
                     LEFT JOIN LATERAL (
                         SELECT oss_key FROM media_asset
@@ -104,14 +184,39 @@ class Repository:
                         SELECT oss_key FROM media_asset WHERE material_id = m.id AND kind = 'video' AND purpose = 'delivery'
                         ORDER BY id DESC LIMIT 1
                     ) video_delivery ON true
-                    ORDER BY m.created_at DESC
+                    LEFT JOIN LATERAL (
+                        SELECT id, kind, status, error_message, payload, updated_at
+                        FROM job WHERE material_id = m.id
+                        ORDER BY id DESC LIMIT 1
+                    ) current_job ON true
+                    LEFT JOIN LATERAL (
+                        SELECT local_path FROM media_asset
+                        WHERE material_id = m.id AND kind = 'image' AND purpose = 'thumbnail'
+                        ORDER BY id DESC LIMIT 1
+                    ) thumbnail ON true
+                    WHERE {where_clause}
+                    ORDER BY m.created_at DESC, m.id DESC
+                    {limit_clause} OFFSET :offset
                     """
-                    )
+                    ),
+                    parameters,
                 )
                 .mappings()
                 .all()
             )
         return [dict(row) for row in rows]
+
+    def count_materials(self, *, status: str | None = None) -> int:
+        conditions: list[str] = []
+        parameters: dict[str, Any] = {}
+        if status:
+            conditions.append("status = :status")
+            parameters["status"] = status
+        where_clause = " AND ".join(conditions) if conditions else "true"
+        with self.engine.connect() as connection:
+            return int(
+                connection.execute(text(f"SELECT count(*) FROM material WHERE {where_clause}"), parameters).scalar_one()
+            )
 
     def get_segments(self, material_id: int) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:
@@ -136,7 +241,7 @@ class Repository:
                 connection.execute(
                     text(
                         """
-                    SELECT t.id, t.segment_id, t.idx, t.surface, t.start_ms, t.end_ms
+                    SELECT t.id, t.segment_id, t.idx, t.surface, t.reading, t.start_ms, t.end_ms
                     FROM token t
                     JOIN segment s ON s.id = t.segment_id
                     WHERE s.material_id = :material_id
@@ -527,17 +632,68 @@ class Repository:
                 connection.execute(
                     text(
                         """
-                        INSERT INTO token (segment_id, idx, surface, start_ms, end_ms)
-                        VALUES (:segment_id, :idx, :surface, :start_ms, :end_ms)
+                        INSERT INTO token (segment_id, idx, surface, reading, start_ms, end_ms)
+                        VALUES (:segment_id, :idx, :surface, :reading, :start_ms, :end_ms)
                         """
                     ),
-                    {"segment_id": segment_id, **token},
+                    {"segment_id": segment_id, "reading": token.get("reading"), **token},
                 )
 
     def get_job(self, job_id: int) -> dict[str, Any] | None:
         with self.engine.connect() as connection:
             row = connection.execute(text("SELECT * FROM job WHERE id = :job_id"), {"job_id": job_id}).mappings().first()
         return dict(row) if row else None
+
+    def list_jobs(
+        self,
+        *,
+        status: str | None = None,
+        kind: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        conditions: list[str] = []
+        parameters: dict[str, Any] = {"offset": offset}
+        if status:
+            conditions.append("j.status = :status")
+            parameters["status"] = status
+        if kind:
+            conditions.append("j.kind = :kind")
+            parameters["kind"] = kind
+        where_clause = " AND ".join(conditions) if conditions else "true"
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = " LIMIT :limit"
+            parameters["limit"] = limit
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    f"""SELECT j.id, j.kind, j.material_id, j.status, j.error_message, j.attempts,
+                        j.created_at, j.updated_at, m.title AS material_title
+                    FROM job j
+                    LEFT JOIN material m ON m.id = j.material_id
+                    WHERE {where_clause}
+                    ORDER BY j.created_at DESC, j.id DESC
+                    {limit_clause} OFFSET :offset"""
+                ),
+                parameters,
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def count_jobs(self, *, status: str | None = None, kind: str | None = None) -> int:
+        conditions: list[str] = []
+        parameters: dict[str, Any] = {}
+        if status:
+            conditions.append("status = :status")
+            parameters["status"] = status
+        if kind:
+            conditions.append("kind = :kind")
+            parameters["kind"] = kind
+        where_clause = " AND ".join(conditions) if conditions else "true"
+        with self.engine.connect() as connection:
+            return int(
+                connection.execute(text(f"SELECT count(*) FROM job WHERE {where_clause}"), parameters).scalar_one()
+            )
 
     def claim_next_job(self, *, max_attempts: int) -> Job | None:
         with self.engine.begin() as connection:
@@ -651,6 +807,100 @@ class Repository:
             ).scalar_one()
         return int(job_id)
 
+    def latest_transcode_payload(self, material_id: int) -> dict[str, Any] | None:
+        """Local paths produced by the most recent transcode of a video material."""
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT payload FROM job WHERE kind = 'transcode' AND material_id = :material_id "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"material_id": material_id},
+            ).mappings().first()
+        return dict(row["payload"]) if row and row["payload"] else None
+
+    def merge_job_payload(self, job_id: int, values: dict[str, Any]) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    """UPDATE job
+                    SET payload = COALESCE(payload, '{}'::jsonb) || CAST(:values AS JSONB)
+                    WHERE id = :job_id"""
+                ),
+                {"job_id": job_id, "values": json.dumps(values, ensure_ascii=False)},
+            )
+
+    def store_material_thumbnail(self, material_id: int, local_path: str) -> None:
+        thumbnail = Path(local_path)
+        if not thumbnail.exists():
+            raise FileNotFoundError(local_path)
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM media_asset WHERE material_id = :material_id "
+                    "AND kind = 'image' AND purpose = 'thumbnail'"
+                ),
+                {"material_id": material_id},
+            )
+            connection.execute(
+                text(
+                    """INSERT INTO media_asset (material_id, kind, purpose, local_path, bytes)
+                    VALUES (:material_id, 'image', 'thumbnail', :local_path, :bytes)"""
+                ),
+                {
+                    "material_id": material_id,
+                    "local_path": str(thumbnail),
+                    "bytes": thumbnail.stat().st_size,
+                },
+            )
+
+    def material_thumbnail_path(self, material_id: int) -> str | None:
+        with self.engine.connect() as connection:
+            path = connection.execute(
+                text(
+                    """SELECT local_path FROM media_asset
+                    WHERE material_id = :material_id AND kind = 'image' AND purpose = 'thumbnail'
+                    ORDER BY id DESC LIMIT 1"""
+                ),
+                {"material_id": material_id},
+            ).scalar_one_or_none()
+        return str(path) if path else None
+
+    def retry_failed_material(self, material_id: int) -> int | None:
+        """Requeue the latest failed material job without duplicating the material."""
+        with self.engine.begin() as connection:
+            material_exists = connection.execute(
+                text("SELECT 1 FROM material WHERE id = :material_id"),
+                {"material_id": material_id},
+            ).scalar_one_or_none()
+            if material_exists is None:
+                return None
+            job_id = connection.execute(
+                text(
+                    """SELECT id FROM job
+                    WHERE material_id = :material_id AND status = 'failed'
+                    ORDER BY id DESC LIMIT 1 FOR UPDATE"""
+                ),
+                {"material_id": material_id},
+            ).scalar_one_or_none()
+            if job_id is None:
+                return 0
+            connection.execute(
+                text(
+                    """UPDATE job SET status = 'pending', attempts = 0, error_message = NULL
+                    WHERE id = :job_id"""
+                ),
+                {"job_id": job_id},
+            )
+            connection.execute(
+                text(
+                    """UPDATE material SET status = 'pending', error_message = NULL
+                    WHERE id = :material_id"""
+                ),
+                {"material_id": material_id},
+            )
+        return int(job_id)
+
     def get_segment(self, segment_id: int) -> dict[str, Any] | None:
         with self.engine.connect() as connection:
             row = connection.execute(
@@ -748,6 +998,19 @@ class Repository:
                 {"material_id": material_id},
             )
 
+    def mark_material_downloaded(self, material_id: int, duration_ms: int | None = None) -> None:
+        """Video downloaded + transcoded locally; awaiting a manual transcription trigger."""
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    """UPDATE material
+                    SET status = 'downloaded', error_message = NULL,
+                        duration_ms = COALESCE(:duration_ms, duration_ms)
+                    WHERE id = :material_id"""
+                ),
+                {"material_id": material_id, "duration_ms": duration_ms},
+            )
+
     def complete_reading(
         self,
         *,
@@ -760,7 +1023,10 @@ class Repository:
     ) -> None:
         with self.engine.begin() as connection:
             connection.execute(
-                text("DELETE FROM media_asset WHERE material_id = :material_id"),
+                text(
+                    "DELETE FROM media_asset WHERE material_id = :material_id "
+                    "AND NOT (kind = 'image' AND purpose = 'thumbnail')"
+                ),
                 {"material_id": material_id},
             )
             connection.execute(
@@ -827,7 +1093,10 @@ class Repository:
     ) -> None:
         with self.engine.begin() as connection:
             connection.execute(
-                text("DELETE FROM media_asset WHERE material_id = :material_id"),
+                text(
+                    "DELETE FROM media_asset WHERE material_id = :material_id "
+                    "AND NOT (kind = 'image' AND purpose = 'thumbnail')"
+                ),
                 {"material_id": material_id},
             )
             connection.execute(

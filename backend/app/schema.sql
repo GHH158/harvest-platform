@@ -22,6 +22,15 @@ DROP TRIGGER IF EXISTS trg_material_updated ON material;
 CREATE TRIGGER trg_material_updated BEFORE UPDATE ON material
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+CREATE TABLE IF NOT EXISTS material_playback_state (
+    material_id BIGINT PRIMARY KEY REFERENCES material(id) ON DELETE CASCADE,
+    position_ms INTEGER NOT NULL DEFAULT 0 CHECK (position_ms >= 0),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+DROP TRIGGER IF EXISTS trg_material_playback_state_updated ON material_playback_state;
+CREATE TRIGGER trg_material_playback_state_updated BEFORE UPDATE ON material_playback_state
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 CREATE TABLE IF NOT EXISTS segment (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     material_id   BIGINT NOT NULL REFERENCES material(id) ON DELETE CASCADE,
@@ -38,10 +47,12 @@ CREATE TABLE IF NOT EXISTS token (
     segment_id    BIGINT NOT NULL REFERENCES segment(id) ON DELETE CASCADE,
     idx           INTEGER NOT NULL,
     surface       TEXT NOT NULL,
+    reading       TEXT,
     start_ms      INTEGER NOT NULL,
     end_ms        INTEGER NOT NULL,
     UNIQUE (segment_id, idx)
 );
+ALTER TABLE token ADD COLUMN IF NOT EXISTS reading TEXT;
 
 CREATE TABLE IF NOT EXISTS media_asset (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -57,7 +68,7 @@ CREATE TABLE IF NOT EXISTS media_asset (
 
 CREATE TABLE IF NOT EXISTS job (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    kind          TEXT NOT NULL, -- fetch|tts|asr|vision|download_video|transcode|upload_video|asr_video|translate_video|shadowing|voice_enrollment
+    kind          TEXT NOT NULL, -- fetch|tts|asr|vision|download_video|transcode|upload_video|asr_video|translate_video|shadowing|voice_enrollment|voice_enrollment_video
     material_id   BIGINT REFERENCES material(id) ON DELETE CASCADE,
     status        TEXT NOT NULL,
     payload       JSONB,

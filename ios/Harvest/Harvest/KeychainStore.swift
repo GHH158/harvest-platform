@@ -18,6 +18,15 @@ enum KeychainStore {
         return String(data: data, encoding: .utf8)
     }
 
+    static func deleteEndpoint() {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: endpointAccount
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
     static func save(endpoint: String) throws {
         let data = Data(endpoint.utf8)
         let query: [CFString: Any] = [

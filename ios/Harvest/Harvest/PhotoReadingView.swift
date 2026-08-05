@@ -10,21 +10,37 @@ struct PhotoReadingView: View {
     @State private var message = "拍下或选择一张包含日语的照片。"
 
     var body: some View {
-        VStack(spacing: 22) {
-            Text("把眼前的日语，\n留进材料库。")
-                .font(.system(size: 32, design: .serif))
-                .foregroundStyle(DesignTokens.ink)
-            if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                Button("打开相机") { isShowingCamera = true }
-                    .buttonStyle(PrimaryButtonStyle())
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("把眼前的日语，\n留进材料库。")
+                    .font(.system(size: DesignTokens.heroSize, weight: .regular, design: .serif))
+                    .tracking(-1)
+                    .foregroundStyle(DesignTokens.ink)
+                CardView {
+                    VStack(spacing: 16) {
+                        if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                            Button("打开相机") { isShowingCamera = true }
+                                .buttonStyle(PrimaryButtonStyle())
+                        }
+                        PhotosPicker("从照片中选择", selection: $selection, matching: .images)
+                            .buttonStyle(SecondaryButtonStyle())
+                        if isSubmitting {
+                            HStack(spacing: 8) {
+                                ProgressView().tint(DesignTokens.accent)
+                                Text("正在交给后台识别")
+                                    .font(.footnote)
+                                    .foregroundStyle(DesignTokens.muted)
+                            }
+                        }
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(DesignTokens.muted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
             }
-            PhotosPicker("从照片中选择", selection: $selection, matching: .images)
-                .buttonStyle(SecondaryButtonStyle())
-            if isSubmitting { ProgressView().tint(DesignTokens.accent) }
-            Text(message).font(.footnote).foregroundStyle(DesignTokens.muted)
-            Spacer()
+            .padding(DesignTokens.pageInset)
         }
-        .padding(DesignTokens.pageInset)
         .background(DesignTokens.canvas.ignoresSafeArea())
         .navigationTitle("拍照阅读")
         .sheet(isPresented: $isShowingCamera) {
@@ -90,18 +106,5 @@ private struct CameraPicker: UIViewControllerRepresentable {
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
             picker.dismiss(animated: true)
         }
-    }
-}
-
-private struct SecondaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.body.weight(.semibold))
-            .foregroundStyle(DesignTokens.ink)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 15)
-            .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 13))
-            .overlay(RoundedRectangle(cornerRadius: 13).stroke(DesignTokens.separator))
-            .opacity(configuration.isPressed ? 0.72 : 1)
     }
 }

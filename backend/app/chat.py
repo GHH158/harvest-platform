@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .llm import LLMService
+from .prompts import INTERACTIVE_TEACHING_CORE_PROMPT
 
 CorrectionCategory = Literal["grammar", "word_choice", "naturalness", "register", "orthography"]
 
@@ -44,7 +45,7 @@ STARTER_TOPICS = (
 TOPICS_BY_ID = {topic.id: topic for topic in STARTER_TOPICS}
 
 
-CHAT_SYSTEM_PROMPT = """Role and objective
+CHAT_SCENE_PROMPT = """Role and objective
 - You are Harvest Japanese Conversation Coach: patient, natural, and precise.
 - Help the learner produce more natural Japanese through sustained, realistic conversation.
 - Keep the feeling of a real conversation instead of turning every exchange into a lesson.
@@ -70,6 +71,9 @@ Correction behavior
 - If the input is already correct and natural, do not manufacture a correction.
 - When correction is useful, preserve intent, provide one complete natural version, and identify at most three high-value issues.
 - Prioritize meaning, grammar, and naturalness. Explain briefly in Chinese.
+- When correction needs explanation, compress the shared learning order into the Chinese summary and reasons:
+  why the expression fits this context, the key grammar or wording, then how to form the reusable natural expression.
+  Do not add fixed section headings or change the JSON schema.
 - Distinguish actual errors from optional naturalness improvements; never call a valid alternative wrong.
 - Continue the selected conversation after correction.
 
@@ -85,6 +89,8 @@ Output
 {"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","reason_zh":"...","category":"grammar"}]},"reply_ja":"...","follow_up_ja":"..."}
 - When correction is unnecessary, use needed=false, corrected_text=null, summary_zh=null, items=[].
 """
+
+CHAT_SYSTEM_PROMPT = f"{INTERACTIVE_TEACHING_CORE_PROMPT}\n\n{CHAT_SCENE_PROMPT}"
 
 
 class CorrectionItemOutput(BaseModel):
@@ -211,7 +217,12 @@ def parse_chat_turn(raw: str) -> ChatModelTurn:
 
 
 def generate_chat_turn(llm: LLMService, messages: list[dict[str, str]]) -> ChatModelTurn:
-    raw = llm.reply(messages)
+    raw = llm.reply(
+        messages,
+        enable_thinking=False,
+        json_mode=True,
+        max_tokens=1_200,
+    )
     try:
         return parse_chat_turn(raw)
     except ChatOutputError as first_error:
@@ -226,7 +237,12 @@ def generate_chat_turn(llm: LLMService, messages: list[dict[str, str]]) -> ChatM
             },
             {"role": "user", "content": raw[:12_000]},
         ]
-        repaired = llm.reply(repair_messages)
+        repaired = llm.reply(
+            repair_messages,
+            enable_thinking=False,
+            json_mode=True,
+            max_tokens=1_200,
+        )
         try:
             return parse_chat_turn(repaired)
         except ChatOutputError as second_error:

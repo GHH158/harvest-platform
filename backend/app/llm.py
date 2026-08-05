@@ -8,15 +8,34 @@ from .config import Settings
 
 
 class LLMService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, client: httpx.Client | None = None) -> None:
         self.settings = settings
+        self._owns_client = client is None
+        self.client = client or httpx.Client(timeout=90.0, trust_env=False)
 
-    def reply(self, messages: list[dict[str, str]]) -> str:
+    def close(self) -> None:
+        if self._owns_client:
+            self.client.close()
+
+    def reply(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        enable_thinking: bool | None = None,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+    ) -> str:
         providers = self._provider_order()
         errors: list[str] = []
         for index, provider in enumerate(providers):
             try:
-                return self._reply_with(provider, messages)
+                return self._reply_with(
+                    provider,
+                    messages,
+                    enable_thinking=enable_thinking,
+                    json_mode=json_mode,
+                    max_tokens=max_tokens,
+                )
             except (httpx.HTTPError, RuntimeError) as error:
                 errors.append(f"{provider}: {error}")
                 is_last = index == len(providers) - 1
@@ -42,7 +61,15 @@ class LLMService:
             raise RuntimeError("DASHSCOPE_API_KEY 与 DEEPSEEK_API_KEY 均未配置。")
         return order
 
-    def _reply_with(self, provider: str, messages: list[dict[str, str]]) -> str:
+    def _reply_with(
+        self,
+        provider: str,
+        messages: list[dict[str, str]],
+        *,
+        enable_thinking: bool | None,
+        json_mode: bool,
+        max_tokens: int | None,
+    ) -> str:
         if provider == "dashscope":
             base_url = self.settings.dashscope_chat_base_url
             api_key = self.settings.dashscope_api_key
@@ -52,11 +79,21 @@ class LLMService:
             api_key = self.settings.deepseek_api_key
             model = self.settings.deepseek_model
         assert api_key
-        response = httpx.post(
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.4,
+        }
+        if provider == "dashscope" and enable_thinking is not None:
+            payload["enable_thinking"] = enable_thinking
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        response = self.client.post(
             f"{base_url.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
-            json={"model": model, "messages": messages, "temperature": 0.4},
-            timeout=90.0,
+            json=payload,
         )
         response.raise_for_status()
         payload: dict[str, Any] = response.json()

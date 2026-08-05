@@ -41,7 +41,7 @@ class ASRService:
             "input": {"file_urls": [audio_url]},
             "parameters": {"language_hints": ["ja"], "channel_id": [0]},
         }
-        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        with httpx.Client(timeout=30.0, follow_redirects=True, trust_env=False) as client:
             submitted = client.post(
                 f"{base_url}/services/audio/asr/transcription",
                 headers={**headers, "X-DashScope-Async": "enable"},

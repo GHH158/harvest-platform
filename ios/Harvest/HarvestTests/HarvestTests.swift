@@ -65,6 +65,133 @@ struct HarvestTests {
         StubURLProtocol.requestedBodies = []
     }
 
+    @Test func appUsesCanonicalBundleAndModernLaunchScreen() {
+        #expect(Bundle.main.bundleIdentifier == "com.gaohuanhuan.harvest.JapaneseLearning")
+        #expect(Bundle.main.object(forInfoDictionaryKey: "UILaunchScreen") != nil)
+    }
+
+    @Test func readingTextUsesJapaneseWordsAndMergesLegacyCharacterTiming() throws {
+        let legacyTokens = [
+            Token(id: 1, segmentID: 9, index: 0, surface: "今", reading: nil, startMs: 0, endMs: 100),
+            Token(id: 2, segmentID: 9, index: 1, surface: "日", reading: nil, startMs: 100, endMs: 200),
+            Token(id: 3, segmentID: 9, index: 2, surface: "は", reading: nil, startMs: 200, endMs: 300),
+        ]
+
+        let words = japaneseReadingUnits(text: "今日は。", tokens: legacyTokens).filter(\.isWord)
+
+        #expect(words.map(\.text) == ["今日", "は"])
+        let today = try #require(words.first)
+        #expect(today.startMs == 0)
+        #expect(today.endMs == 200)
+    }
+
+    @Test func readingTextCarriesWordReadingIntoInlineQuestionTarget() throws {
+        let wordToken = Token(
+            id: 1,
+            segmentID: 9,
+            index: 0,
+            surface: "今日",
+            reading: "きょう",
+            startMs: 0,
+            endMs: 200
+        )
+
+        let maybeToday = japaneseReadingUnits(text: "今日。", tokens: [wordToken]).first { $0.isWord }
+        let today = try #require(maybeToday)
+
+        #expect(today.text == "今日")
+        #expect(today.reading == "きょう")
+    }
+
+    @Test func readingTextPrefersServerInflectedWordBoundary() {
+        let verb = Token(
+            id: 1,
+            segmentID: 9,
+            index: 0,
+            surface: "読みたい",
+            reading: "よみたい",
+            startMs: 0,
+            endMs: 500
+        )
+
+        let words = japaneseReadingUnits(text: "読みたい。", tokens: [verb]).filter(\.isWord)
+
+        #expect(words.map(\.text) == ["読みたい"])
+        #expect(words.first?.reading == "よみたい")
+    }
+
+    @Test func readingHighlightPersistsAcrossASRGapsUntilNextWordStarts() {
+        let units = [
+            JapaneseReadingUnit(
+                id: 0,
+                text: "今日",
+                reading: "きょう",
+                isWord: true,
+                startMs: 100,
+                endMs: 220
+            ),
+            JapaneseReadingUnit(
+                id: 1,
+                text: "は",
+                reading: nil,
+                isWord: true,
+                startMs: 500,
+                endMs: 620
+            ),
+        ]
+
+        #expect(activeReadingUnitID(in: units, at: 99) == nil)
+        #expect(activeReadingUnitID(in: units, at: 350) == 0)
+        #expect(activeReadingUnitID(in: units, at: 500) == 1)
+        #expect(activeReadingUnitID(in: units, at: 900) == 1)
+    }
+
+    @Test func companionComposerImmediatelyShowsPendingAndRestoresFailedDraft() {
+        var composer = CompanionComposerState(draft: "  「買って」の用法は？  ")
+
+        let question = composer.beginSending()
+
+        #expect(question == "「買って」の用法は？")
+        #expect(composer.pendingQuestion == "「買って」の用法は？")
+        #expect(composer.draft.isEmpty)
+        #expect(composer.isSending)
+        #expect(!composer.canSend)
+
+        composer.failSending()
+
+        #expect(composer.pendingQuestion == nil)
+        #expect(composer.draft == "「買って」の用法は？")
+        #expect(!composer.isSending)
+        #expect(composer.canSend)
+    }
+
+    @Test func companionMarkdownParsesBlocksAndRemovesRawInlineMarkers() {
+        let blocks = markdownBlocks(from: """
+        # 语法说明
+
+        **重点**：这里使用过去时。
+
+           - 第一项
+           2. 第二项
+           > 请留意语气。
+        ```ja
+        昨日、映画を見ました。
+        ```
+        """).filter { $0 != .spacer }
+
+        #expect(blocks == [
+            .heading(level: 1, text: "语法说明"),
+            .paragraph("**重点**：这里使用过去时。"),
+            .unorderedItem("第一项"),
+            .orderedItem(number: "2", text: "第二项"),
+            .quote("请留意语气。"),
+            .code("昨日、映画を見ました。"),
+        ])
+        #expect(String(inlineMarkdown("**重点**、`例句`与[说明](https://example.com)").characters) == "重点、例句与说明")
+        #expect(containsInlineMarkdownSyntax("「皆さん」表示 **大家**"))
+        #expect(!containsInlineMarkdownSyntax("「皆さん」表示大家"))
+    }
+
     @Test func voiceTeacherUsesWebSocketThroughTheMacEndpoint() throws {
         let secure = try #require(voiceTeacherWebSocketURL(baseURL: URL(string: "https://harvest.example.ts.net")!))
         let local = try #require(voiceTeacherWebSocketURL(baseURL: URL(string: "http://127.0.0.1:8000")!))
@@ -128,6 +255,59 @@ struct HarvestTests {
         #expect(player.player.items().count == 1)
         player.update([first, second])
         #expect(player.player.items().count == 2)
+    }
+
+    @Test func completedPlaybackOnlyRestartsWhenPlayIsPressedFromStoppedState() {
+        #expect(shouldRestartCompletedPlayback(isPlaying: false, hasReachedEnd: true))
+        #expect(!shouldRestartCompletedPlayback(isPlaying: true, hasReachedEnd: true))
+        #expect(!shouldRestartCompletedPlayback(isPlaying: false, hasReachedEnd: false))
+    }
+
+    @Test func currentSentenceQuestionUsesPlaybackPositionAndDefaultsToFirstSentence() throws {
+        let segments = [
+            Segment(id: 1, materialID: 7, index: 0, textJA: "一文目", textZH: nil, startMs: 1_000, endMs: 3_000),
+            Segment(id: 2, materialID: 7, index: 1, textJA: "二文目", textZH: nil, startMs: 3_200, endMs: 5_000),
+        ]
+
+        #expect(segmentForCurrentQuestion(segments: segments, positionMs: 0)?.id == 1)
+        #expect(segmentForCurrentQuestion(segments: segments, positionMs: 2_500)?.id == 1)
+        #expect(segmentForCurrentQuestion(segments: segments, positionMs: 3_200)?.id == 2)
+        #expect(segmentForCurrentQuestion(segments: [], positionMs: 0) == nil)
+    }
+
+    @MainActor @Test func onlinePlayerReturnsToBeginningAfterNaturalCompletion() async throws {
+        let player = OnlineMediaPlayer()
+        player.prepare(url: URL(fileURLWithPath: "/tmp/finished-online-video.mp4"))
+        let item = try #require(player.player.currentItem)
+
+        NotificationCenter.default.post(name: .AVPlayerItemDidPlayToEndTime, object: item)
+        await Task.yield()
+        await Task.yield()
+        #expect(player.hasReachedEnd)
+
+        player.toggle()
+
+        #expect(!player.hasReachedEnd)
+        #expect(player.positionMs == 0)
+        player.pause()
+    }
+
+    @MainActor @Test func segmentedPlayerRebuildsConsumedQueueBeforePlayingAgain() async throws {
+        let player = SegmentQueuePlayer()
+        player.update([URL(fileURLWithPath: "/tmp/finished-segment.ts")], durations: [6])
+        let item = try #require(player.player.items().first)
+
+        NotificationCenter.default.post(name: .AVPlayerItemDidPlayToEndTime, object: item)
+        await Task.yield()
+        await Task.yield()
+        #expect(player.hasReachedEnd)
+
+        player.toggle()
+
+        #expect(!player.hasReachedEnd)
+        #expect(player.player.items().count == 1)
+        #expect(player.positionMs == 0)
+        player.pause()
     }
 
     @Test func offlineEntryOnlyExposesContiguousDownloadedPrefix() throws {
@@ -196,6 +376,105 @@ struct HarvestTests {
         try await library.download(material, videoMedia: .shadowing)
         #expect(library.entry(for: 7)?.isShadowingAudioComplete == true)
         #expect(Set(StubURLProtocol.requestedURLs) == Set([audioPlaylistURL] + audioSegmentURLs))
+    }
+
+    @Test func materialListDecodesProgressFailureAndThumbnailProjection() throws {
+        let materials = try JSONDecoder().decode([Material].self, from: """
+        [{"id":7,"kind":"video","title":"長いタイトル","source_type":"url","source_ref":"https://example.com/video","status":"processing","error_message":null,"duration_ms":125000,"audio_url":null,"created_at":"2026-08-05T00:00:00+08:00","updated_at":"2026-08-05T00:01:00+08:00","thumbnail_path":"/materials/7/thumbnail","job_id":17,"progress_percent":82,"progress_label":"正在转录字幕","eta_minutes":5,"retryable":false,"failure_title":null,"failure_summary":null}]
+        """.data(using: .utf8)!)
+
+        #expect(materials[0].durationMs == 125_000)
+        #expect(materials[0].thumbnailPath == "/materials/7/thumbnail")
+        #expect(materials[0].progressPercent == 82)
+        #expect(materials[0].etaMinutes == 5)
+    }
+
+    @Test func finishedVideoResumePositionRestartsButMiddlePositionIsPreserved() {
+        #expect(normalizedVideoResumePosition(900, durationMs: 100_000) == 0)
+        #expect(normalizedVideoResumePosition(42_000, durationMs: 100_000) == 42_000)
+        #expect(normalizedVideoResumePosition(96_000, durationMs: 100_000) == 0)
+        #expect(normalizedVideoResumePosition(42_000, durationMs: nil) == 42_000)
+    }
+
+    @Test func sentenceLoopRestartsAtTargetBoundaryOnlyWhilePlaying() {
+        let segments = [
+            Segment(id: 1, materialID: 7, index: 0, textJA: "一文目", textZH: nil, startMs: 1_000, endMs: 3_000),
+            Segment(id: 2, materialID: 7, index: 1, textJA: "二文目", textZH: nil, startMs: 3_200, endMs: 5_000),
+        ]
+
+        #expect(sentenceLoopRestartPosition(
+            segments: segments,
+            targetSegmentID: 1,
+            oldPositionMs: 2_950,
+            newPositionMs: 3_010,
+            isPlaying: true
+        ) == 1_000)
+        #expect(sentenceLoopRestartPosition(
+            segments: segments,
+            targetSegmentID: 1,
+            oldPositionMs: 2_950,
+            newPositionMs: 3_010,
+            isPlaying: false
+        ) == nil)
+    }
+
+    @Test func videoPlaybackStoreKeepsIndependentPositionsPerMaterial() throws {
+        let suite = "HarvestTests.Playback.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = VideoPlaybackProgressStore(defaults: defaults)
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+
+        store.save(materialID: 7, positionMs: 12_000, updatedAt: date)
+        store.save(materialID: 8, positionMs: 34_000, updatedAt: date)
+
+        #expect(store.load(materialID: 7) == StoredVideoPlayback(positionMs: 12_000, updatedAt: date))
+        #expect(store.load(materialID: 8)?.positionMs == 34_000)
+    }
+
+    @Test func videoPlaybackAPIReadsAndWritesIntegerMilliseconds() async throws {
+        resetStub()
+        let baseURL = URL(string: "https://harvest.example")!
+        let url = baseURL.appending(path: "materials/7/playback")
+        StubURLProtocol.responses[url] = """
+        {"material_id":7,"position_ms":12000,"updated_at":"2026-08-05T00:00:00Z"}
+        """.data(using: .utf8)!
+        let client = APIClient(baseURL: baseURL, session: stubSession())
+
+        let loaded = try await client.playbackState(materialID: 7)
+        #expect(loaded.positionMs == 12_000)
+
+        StubURLProtocol.responses[url] = """
+        {"material_id":7,"position_ms":34500,"updated_at":"2026-08-05T00:01:00Z"}
+        """.data(using: .utf8)!
+        let saved = try await client.savePlaybackState(materialID: 7, positionMs: 34_500)
+        let body = try #require(StubURLProtocol.requestedBodies.last.flatMap { $0 })
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Int])
+
+        #expect(saved.positionMs == 34_500)
+        #expect(StubURLProtocol.requestedRequests.last?.httpMethod == "PUT")
+        #expect(json["position_ms"] == 34_500)
+    }
+
+    @MainActor @Test func cacheCleanupPreservesManifestReferencedFiles() async throws {
+        let audioURL = URL(string: "https://media.example/reading.mp3")!
+        StubURLProtocol.responses = [audioURL: Data("audio".utf8)]
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let library = OfflineLibrary(downloadSession: stubSession(), rootDirectory: root)
+        let material = try JSONDecoder().decode(MaterialDetail.self, from: """
+        {"id":9,"kind":"reading","title":"文章","status":"ready","error_message":null,"duration_ms":1000,"audio_url":"https://media.example/reading.mp3","video_url":null,"segments":[],"tokens":[]}
+        """.data(using: .utf8)!)
+        try await library.download(material)
+        let referenced = try #require(library.localAudioURL(for: 9))
+        let orphan = root.appending(path: "orphan.tmp")
+        try Data("cache".utf8).write(to: orphan)
+
+        let freed = library.clearCache()
+
+        #expect(FileManager.default.fileExists(atPath: referenced.path()))
+        #expect(!FileManager.default.fileExists(atPath: orphan.path()))
+        #expect(freed > 0)
     }
 
     @Test func chatModelsDecodeTopicsSessionsAndCorrectionTurns() throws {
@@ -292,7 +571,29 @@ struct HarvestTests {
         #expect(store.activeSession?.id == "session-1")
         #expect(store.messages.count == 1)
         #expect(store.draft == "昨日映画を見る")
+        #expect(store.pendingUserMessage == nil)
         #expect(store.errorMessage != nil)
+    }
+
+    @MainActor @Test func successfulSendReplacesPendingMessageWithoutDuplicates() async throws {
+        resetStub()
+        let baseURL = URL(string: "https://harvest.example")!
+        let detailURL = baseURL.appending(path: "chat/sessions/session-1")
+        let messageURL = baseURL.appending(path: "chat/sessions/session-1/messages")
+        StubURLProtocol.responses[detailURL] = sessionDetailData
+        StubURLProtocol.responses[messageURL] = naturalTurnData
+        let client = APIClient(baseURL: baseURL, session: stubSession())
+        let store = ChatStore()
+
+        await store.openSession(id: "session-1", using: client)
+        store.draft = "昨日、映画を見ました。"
+        await store.send(using: client)
+
+        #expect(store.pendingUserMessage == nil)
+        #expect(store.messages.map(\.id) == [1, 4, 5])
+        #expect(store.messages.filter { $0.role == "user" }.count == 1)
+        #expect(store.draft.isEmpty)
+        #expect(store.errorMessage == nil)
     }
 
     @Test func correctionFiltersAndDeletesUseExpectedRequests() async throws {

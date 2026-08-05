@@ -59,14 +59,17 @@ final class ChatStore: ObservableObject {
     @Published private(set) var activeSession: ChatSession?
     @Published private(set) var messages: [ConversationMessage] = []
     @Published private(set) var corrections: [ChatCorrection] = []
+    @Published private(set) var pendingUserMessage: ConversationMessage?
     @Published var draft = ""
     @Published var errorMessage: String?
     @Published private(set) var isLoading = false
     @Published private(set) var isSending = false
+    @Published private(set) var furiganaCache: [Int: [FuriganaSegment]] = [:]
     private var topicDeck = ChatTopicDeck()
 
     var transcriptRows: [ChatTranscriptRow] {
-        chatTranscriptRows(messages: messages, corrections: corrections)
+        let visibleMessages = pendingUserMessage.map { messages + [$0] } ?? messages
+        return chatTranscriptRows(messages: visibleMessages, corrections: corrections)
     }
 
     func loadTopics(using client: APIClient) async {
@@ -104,6 +107,7 @@ final class ChatStore: ObservableObject {
             activeSession = detail.session
             messages = detail.messages
             corrections = detail.corrections
+            pendingUserMessage = nil
             draft = ""
             errorMessage = nil
         } catch {
@@ -112,20 +116,30 @@ final class ChatStore: ObservableObject {
     }
 
     func send(using client: APIClient) async {
-        guard let activeSession else { return }
+        guard let activeSession, !isSending else { return }
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
+        pendingUserMessage = ConversationMessage(
+            id: Int.min,
+            sessionID: activeSession.id,
+            role: "user",
+            content: message,
+            createdAt: ISO8601DateFormatter().string(from: Date())
+        )
+        draft = ""
         isSending = true
         defer { isSending = false }
         do {
             let turn = try await client.sendChatMessage(sessionID: activeSession.id, message: message)
+            pendingUserMessage = nil
             messages.append(turn.user)
             if let correction = turn.correction { corrections.append(correction) }
             messages.append(turn.assistant)
-            draft = ""
             errorMessage = nil
         } catch {
-            // Keep the draft so a failed cloud request never makes the learner retype it.
+            pendingUserMessage = nil
+            // Restore the failed text without erasing anything typed while waiting.
+            draft = draft.isEmpty ? message : "\(message)\n\(draft)"
             errorMessage = error.localizedDescription
         }
     }
@@ -134,6 +148,7 @@ final class ChatStore: ObservableObject {
         activeSession = nil
         messages = []
         corrections = []
+        pendingUserMessage = nil
         draft = ""
         errorMessage = nil
         if displayedTopics.isEmpty { showNextTopics() }
@@ -141,6 +156,26 @@ final class ChatStore: ObservableObject {
 
     func removeCorrection(id: Int) {
         corrections.removeAll { $0.id == id }
+    }
+
+    func ensureFurigana(for message: ConversationMessage, using client: APIClient) async {
+        guard message.role == "assistant", furiganaCache[message.id] == nil else { return }
+        do {
+            let segments = try await client.furigana(text: message.content)
+            // @Published does not fire on in-place subscript mutation; reassign the
+            // whole dictionary so the transcript re-renders with ruby.
+            var updated = furiganaCache
+            updated[message.id] = segments
+            furiganaCache = updated
+        } catch {
+            // Keep the message readable without ruby if the fetch fails.
+        }
+    }
+
+    func prefetchFurigana(using client: APIClient) async {
+        for message in messages where message.role == "assistant" {
+            await ensureFurigana(for: message, using: client)
+        }
     }
 
     private func createSession(
@@ -155,6 +190,7 @@ final class ChatStore: ObservableObject {
             activeSession = creation.session
             messages = [creation.assistant]
             corrections = []
+            pendingUserMessage = nil
             draft = ""
             errorMessage = nil
         } catch {
@@ -168,6 +204,7 @@ struct ChatView: View {
     @StateObject private var store = ChatStore()
     @State private var showingHistory = false
     @State private var showingCorrections = false
+    @AppStorage("showFurigana") private var showFurigana = false
 
     private var client: APIClient? {
         configuration.endpoint.map { APIClient(baseURL: $0) }
@@ -292,6 +329,9 @@ struct ChatView: View {
             .onChange(of: store.messages.count) {
                 guard let last = store.transcriptRows.last else { return }
                 withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                if showFurigana, let client {
+                    Task { await store.prefetchFurigana(using: client) }
+                }
             }
             .onChange(of: store.isSending) {
                 if store.isSending { withAnimation { proxy.scrollTo("thinking", anchor: .bottom) } }
@@ -303,7 +343,11 @@ struct ChatView: View {
     private func transcriptRow(_ row: ChatTranscriptRow) -> some View {
         switch row {
         case .message(let message):
-            MessageBubble(message: message)
+            MessageBubble(
+                message: message,
+                showFurigana: showFurigana,
+                furigana: store.furiganaCache[message.id]
+            )
         case .correction(let correction):
             CorrectionCard(correction: correction, showsTopic: false)
         }
@@ -349,6 +393,14 @@ struct ChatView: View {
     private var secondaryActions: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
+                Button {
+                    showFurigana.toggle()
+                    if showFurigana, let client {
+                        Task { await store.prefetchFurigana(using: client) }
+                    }
+                } label: {
+                    Label("显示假名", systemImage: showFurigana ? "checkmark.circle.fill" : "circle")
+                }
                 if store.activeSession != nil {
                     Button {
                         store.beginNewTopic()
@@ -411,23 +463,35 @@ private struct TopicCard: View {
 
 private struct MessageBubble: View {
     let message: ConversationMessage
+    var showFurigana = false
+    var furigana: [FuriganaSegment]?
 
     var body: some View {
-        Text(message.content)
-            .font(.body)
-            .foregroundStyle(message.role == "user" ? Color.white : DesignTokens.ink)
-            .lineSpacing(4)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .background(
-                message.role == "user" ? DesignTokens.accent : DesignTokens.surface,
-                in: RoundedRectangle(cornerRadius: 16)
-            )
-            .frame(
-                maxWidth: UIScreen.main.bounds.width * 0.82,
-                alignment: message.role == "user" ? .trailing : .leading
-            )
-            .frame(maxWidth: .infinity, alignment: message.role == "user" ? .trailing : .leading)
+        Group {
+            if showFurigana, message.role == "assistant", let furigana, !furigana.isEmpty {
+                FuriganaText(
+                    segments: furigana,
+                    fontSize: 17,
+                    textColor: DesignTokens.ink
+                )
+            } else {
+                Text(message.content)
+                    .font(.body)
+                    .foregroundStyle(message.role == "user" ? Color.white : DesignTokens.ink)
+                    .lineSpacing(4)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            message.role == "user" ? DesignTokens.accent : DesignTokens.surface,
+            in: RoundedRectangle(cornerRadius: 16)
+        )
+        .frame(
+            maxWidth: UIScreen.main.bounds.width * 0.82,
+            alignment: message.role == "user" ? .trailing : .leading
+        )
+        .frame(maxWidth: .infinity, alignment: message.role == "user" ? .trailing : .leading)
     }
 }
 

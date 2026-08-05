@@ -1,79 +1,166 @@
-<!doctype html>
-<html lang="zh-Hans">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Harvest · 添加阅读材料</title>
-    <link rel="stylesheet" href="/static/ingest.css">
-  </head>
-  <body>
-    <main>
-      <p class="eyebrow">HARVEST · 阅读跟读</p>
-      <h1>留一段日语，<br>慢慢读进去。</h1>
-      <p class="intro">材料会在后台生成朗读。完成后，打开 iPhone 上的 Harvest 开始听读。</p>
-      {% if error %}<p class="notice error">{{ error }}</p>{% endif %}
-      {% if created_material_id %}
-      <section class="job-status" data-material-id="{{ created_material_id }}" aria-live="polite">
-        <p class="status-label">准备朗读</p>
-        <p class="status-message">已加入材料库，正在连接后台。</p>
-      </section>
-      {% endif %}
-      <form method="post" action="/ingest-web">
-        <label>标题 <span>可选</span><input name="title" maxlength="160" placeholder="例如：雨の日の散歩"></label>
-        <label>粘贴日语文本<textarea name="source_text" rows="12" placeholder="ここに読みたい日本語を貼り付けます。"></textarea></label>
-        <div class="or"><span>或</span></div>
-        <label>网页链接<input type="url" name="source_url" placeholder="https://example.com/article"></label>
-        <button type="submit">开始准备朗读</button>
+{% extends "base.html" %}
+{% block title %}Harvest · 摄入{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1 class="title is-4">添加阅读材料</h1>
+  <p class="subtitle is-6">粘贴一段日语、贴一个链接或上传视频。材料会在后台生成朗读，完成后到 iPhone 上打开 Harvest 开始听读。</p>
+</header>
+
+{% if error %}<div class="notification is-danger is-light">{{ error }}</div>{% endif %}
+
+{% if created_material_id %}
+<section class="job-status" data-material-id="{{ created_material_id }}" aria-live="polite">
+  <span class="tag is-warning is-light">待处理</span>
+  <p class="status-message">已加入材料库，正在连接后台。</p>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2 class="title is-5">文本 / 链接摄入</h2>
+  <form method="post" action="/ingest-web">
+    <div class="field">
+      <label class="label">来源类型</label>
+      <div class="control">
+        <label class="radio"><input type="radio" name="source_mode" value="text" checked> 粘贴日语文本</label>
+        <label class="radio"><input type="radio" name="source_mode" value="url"> 网页链接</label>
+      </div>
+    </div>
+    <div class="field">
+      <label class="label">标题 <span class="has-text-grey-light is-size-7">可选</span></label>
+      <div class="control">
+        <input class="input" name="title" maxlength="160" placeholder="例如：雨の日の散歩">
+      </div>
+    </div>
+    <div class="field" id="text-group">
+      <label class="label">日语文本</label>
+      <div class="control">
+        <textarea class="textarea" name="source_text" rows="12" placeholder="ここに読みたい日本語を貼り付けます。"></textarea>
+      </div>
+    </div>
+    <div class="field" id="url-group" hidden>
+      <label class="label">网页链接</label>
+      <div class="control">
+        <input class="input" type="url" name="source_url" placeholder="https://example.com/article">
+      </div>
+    </div>
+    <div class="field">
+      <div class="control">
+        <button type="submit" class="button is-primary">开始准备朗读</button>
+      </div>
+    </div>
+    <p class="help">链接会在后台提取正文，一次只提交一种来源。</p>
+  </form>
+</section>
+
+<section class="card">
+  <h2 class="title is-5">视频摄入</h2>
+  <div class="columns">
+    <div class="column">
+      <form method="post" action="/ingest-web/video-file" enctype="multipart/form-data">
+        <div class="field">
+          <label class="label">标题 <span class="has-text-grey-light is-size-7">可选</span></label>
+          <div class="control">
+            <input class="input" name="title" maxlength="160" placeholder="例如：ドラマ 第1話">
+          </div>
+        </div>
+        <div class="field">
+          <label class="label">本地视频</label>
+          <div class="control">
+            <input class="input" type="file" name="video" accept="video/mp4,video/quicktime,video/x-m4v,video/webm,video/x-matroska" required>
+          </div>
+        </div>
+        <div class="field">
+          <div class="control">
+            <button type="submit" class="button is-primary">上传并准备视频</button>
+          </div>
+        </div>
       </form>
-      <p class="hint">一次只提交一种来源。链接会在后台提取正文。</p>
-      <section class="ingest-section">
-        <p class="eyebrow">视频跟读</p>
-        <h2>留下一段画面，<br>把对白慢慢听清。</h2>
-        <form method="post" action="/ingest-web/video-file" enctype="multipart/form-data">
-          <label>标题 <span>可选</span><input name="title" maxlength="160" placeholder="例如：ドラマ 第1話"></label>
-          <label>本地视频<input type="file" name="video" accept="video/mp4,video/quicktime,video/x-m4v,video/webm,video/x-matroska" required></label>
-          <button type="submit">上传并准备视频</button>
-        </form>
-        <form method="post" action="/ingest-web/video-link">
-          <label>标题 <span>可选</span><input name="title" maxlength="160"></label>
-          <label>视频链接<input type="url" name="video_url" required placeholder="https://..."></label>
-          <button type="submit">下载并准备视频</button>
-        </form>
-        <p class="hint">一次只处理一个视频，不下载播放列表。请确认链接内容允许个人下载使用。</p>
-      </section>
-    </main>
-    {% if created_material_id %}
-    <script>
-      const statusBox = document.querySelector(".job-status");
-      const statusMessage = statusBox.querySelector(".status-message");
-      const materialID = statusBox.dataset.materialId;
+    </div>
+    <div class="column">
+      <form method="post" action="/ingest-web/video-link">
+        <div class="field">
+          <label class="label">标题 <span class="has-text-grey-light is-size-7">可选</span></label>
+          <div class="control">
+            <input class="input" name="title" maxlength="160">
+          </div>
+        </div>
+        <div class="field">
+          <label class="label">视频链接</label>
+          <div class="control">
+            <input class="input" type="url" name="video_url" required placeholder="https://...">
+          </div>
+        </div>
+        <div class="field">
+          <div class="control">
+            <button type="submit" class="button is-light">下载并准备视频</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+  <p class="help">一次只处理一个视频，不下载播放列表。请确认链接内容允许个人下载使用。</p>
+</section>
+{% endblock %}
 
-      function describe(material) {
-        switch (material.status) {
-          case "pending": return "已加入队列，等待开始准备。";
-          case "processing": return material.kind === "video" ? "正在下载、转码并生成字幕。" : "正在生成朗读。完成后会自动提示你。";
-          case "ready": return material.kind === "video" ? "视频已准备好。现在可在 iPhone 打开 Harvest。" : "朗读已准备好。现在可在 iPhone 打开 Harvest 开始听读。";
-          case "failed": return `准备没有完成：${material.error_message || "请查看后台日志后重试。"}`;
-          default: return "正在确认材料状态。";
-        }
-      }
+{% block scripts %}
+<script>
+  const modeRadios = document.querySelectorAll('input[name="source_mode"]');
+  const textGroup = document.getElementById("text-group");
+  const urlGroup = document.getElementById("url-group");
+  function syncMode() {
+    const mode = document.querySelector('input[name="source_mode"]:checked').value;
+    textGroup.hidden = mode !== "text";
+    urlGroup.hidden = mode !== "url";
+  }
+  modeRadios.forEach((radio) => radio.addEventListener("change", syncMode));
+  syncMode();
 
-      async function refreshStatus() {
-        try {
-          const response = await fetch(`/materials/${materialID}`, { cache: "no-store" });
-          if (!response.ok) throw new Error("状态暂时不可用");
-          const material = await response.json();
-          statusBox.dataset.status = material.status;
-          statusMessage.textContent = describe(material);
-          if (material.status === "ready" || material.status === "failed") return;
-        } catch (_) {
-          statusMessage.textContent = "暂时无法读取状态，后台仍会继续处理。";
-        }
-        window.setTimeout(refreshStatus, 3000);
-      }
+  {% if created_material_id %}
+  const statusBox = document.querySelector(".job-status");
+  const statusMessage = statusBox.querySelector(".status-message");
+  const statusBadge = statusBox.querySelector(".tag");
+  const materialID = statusBox.dataset.materialId;
 
-      refreshStatus();
-    </script>
-    {% endif %}
-  </body>
-</html>
+  function describe(material) {
+    switch (material.status) {
+      case "pending": return "已加入队列，等待开始准备。";
+      case "processing": return material.kind === "video" ? "正在下载、转码并生成字幕。" : "正在生成朗读。完成后会自动提示你。";
+      case "downloaded": return "视频已下载并转码完成，请在材料页点击「开始转录」。";
+      case "ready": return material.kind === "video" ? "视频已准备好。现在可在 iPhone 打开 Harvest。" : "朗读已准备好。现在可在 iPhone 打开 Harvest 开始听读。";
+      case "failed": return "准备没有完成：" + (material.error_message || "请查看后台日志后重试。");
+      default: return "正在确认材料状态。";
+    }
+  }
+
+  const badgeLabels = { pending: "待处理", processing: "处理中", ready: "已就绪", failed: "失败" };
+  const badgeClasses = {
+    pending: "is-warning is-light", processing: "is-info is-light",
+    ready: "is-success is-light", failed: "is-danger is-light"
+  };
+
+  let failures = 0;
+  const MAX_FAILURES = 10;
+
+  async function refreshStatus() {
+    try {
+      const response = await fetch(`/materials/${materialID}`, { cache: "no-store" });
+      if (!response.ok) throw new Error("status unavailable");
+      const material = await response.json();
+      failures = 0;
+      statusBox.dataset.status = material.status;
+      statusMessage.textContent = describe(material);
+      statusBadge.className = "tag " + (badgeClasses[material.status] || "is-light");
+      statusBadge.textContent = badgeLabels[material.status] || "处理中";
+      if (material.status === "ready" || material.status === "failed") return;
+    } catch (_) {
+      failures += 1;
+      statusMessage.textContent = "暂时无法读取状态，后台仍会继续处理。";
+      if (failures >= MAX_FAILURES) return;
+    }
+    window.setTimeout(refreshStatus, 3000);
+  }
+
+  refreshStatus();
+  {% endif %}
+</script>
+{% endblock %}

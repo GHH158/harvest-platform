@@ -23,7 +23,10 @@ class VisionService:
         ]}]}
         response = httpx.post(
             f"{self.settings.dashscope_chat_base_url.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {self.settings.dashscope_api_key}"}, json=payload, timeout=90.0,
+            headers={"Authorization": f"Bearer {self.settings.dashscope_api_key}"},
+            json=payload,
+            timeout=90.0,
+            trust_env=False,
         )
         response.raise_for_status()
         text = response.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()

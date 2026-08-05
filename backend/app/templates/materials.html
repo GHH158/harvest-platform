@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Harvest · 材料{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1 class="title is-4">材料</h1>
+  <p class="subtitle is-6">共 {{ total }} 份材料。状态表示该材料当前能否在 iPhone 上消费。</p>
+</header>
+
+<form method="get" action="/admin/materials" class="filter-bar">
+  <div class="field">
+    <label class="label">状态筛选</label>
+    <div class="control">
+      <div class="select is-fullwidth">
+        <select name="status" onchange="this.form.submit()">
+          <option value=""{% if not status_filter %} selected{% endif %}>全部</option>
+          <option value="pending"{% if status_filter == "pending" %} selected{% endif %}>待处理</option>
+          <option value="processing"{% if status_filter == "processing" %} selected{% endif %}>处理中</option>
+          <option value="downloaded"{% if status_filter == "downloaded" %} selected{% endif %}>待转录</option>
+          <option value="ready"{% if status_filter == "ready" %} selected{% endif %}>已就绪</option>
+          <option value="failed"{% if status_filter == "failed" %} selected{% endif %}>失败</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <div class="field">
+    <div class="control">
+      <button type="submit" class="button is-light">筛选</button>
+    </div>
+  </div>
+</form>
+
+<section class="card">
+  <div class="table-wrap">
+    <table class="table is-fullwidth is-hoverable">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>标题</th>
+          <th>类型</th>
+          <th>来源</th>
+          <th>状态</th>
+          <th>创建时间</th>
+          <th>错误</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for material in materials %}
+        <tr>
+          <td class="cell-muted">{{ material.id }}</td>
+          <td class="cell-main">{{ material.title }}</td>
+          <td class="cell-muted">{{ material.kind | kind_label }}</td>
+          <td class="cell-muted">{{ material.source_type }}</td>
+          <td><span class="tag {{ material.status | status_tag }}">{{ material.status | status_label }}</span></td>
+          <td class="cell-muted">{{ material.created_at | datetime_local }}</td>
+          <td class="cell-error">{{ material.error_message or "—" }}</td>
+          <td>
+            {% if material.kind == "video" and material.status == "downloaded" %}
+            <form method="post" action="/admin/materials/{{ material.id }}/start-transcription">
+              <button type="submit" class="button is-small is-primary">开始转录</button>
+            </form>
+            {% else %}
+            <span class="has-text-grey">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8"><div class="has-text-centered has-text-grey py-5">暂无材料</div></td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if pages > 1 %}
+  <nav class="pagination is-centered mt-4" role="navigation" aria-label="pagination">
+    <a class="pagination-previous {{ 'is-disabled' if page <= 1 else '' }}" href="/admin/materials?status={{ status_filter or '' }}&page={{ page - 1 }}">上一页</a>
+    <a class="pagination-next {{ 'is-disabled' if page >= pages else '' }}" href="/admin/materials?status={{ status_filter or '' }}&page={{ page + 1 }}">下一页</a>
+    <ul class="pagination-list">
+      <li><span class="has-text-grey">共 {{ total }} 条 · 第 {{ page }}/{{ pages }} 页</span></li>
+    </ul>
+  </nav>
+  {% endif %}
+</section>
+{% endblock %}

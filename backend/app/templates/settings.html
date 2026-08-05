@@ -1,70 +1,496 @@
-<!doctype html>
-<html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Harvest · 服务设置</title><link rel="stylesheet" href="/static/ingest.css"></head><body>
-<main class="ingest-shell">
-  <p class="eyebrow">HARVEST · 服务设置</p>
-  <h1>把服务准备好，<br>其余交给后台。</h1>
-  <p class="lede">此页仅由本机或 Tailscale 私有网络访问。密钥写入本机 <code>.env</code>（权限 600），保存后不会回显；重启服务后 worker 才会读取新配置。</p>
-  {% if saved %}<p class="notice">已保存。准备实调时运行 <code>./stop.sh && ./start.sh</code>。</p>{% endif %}
-  <form method="post" class="ingest-card settings-card">
-    <h2>本机与网络</h2>
-    <label>数据库地址（已配置：{{ "是" if status.DATABASE_URL else "否" }}）<input type="password" name="DATABASE_URL" placeholder="留空则保持现有值"></label>
-    <label>Tailscale 主机名<input name="TAILSCALE_HOSTNAME" value="{{ values.TAILSCALE_HOSTNAME }}"></label>
-    <h2>百炼（免费额度优先）</h2>
-    <label>百炼 API Key（已配置：{{ "是" if status.DASHSCOPE_API_KEY else "否" }}）<input type="password" name="DASHSCOPE_API_KEY" placeholder="留空则保持现有值"></label>
-    <label class="check"><input type="checkbox" name="CLEAR_DASHSCOPE_API_KEY">清除现有百炼 Key</label>
-    <label>TTS 服务地址<input name="DASHSCOPE_BASE_URL" value="{{ values.DASHSCOPE_BASE_URL }}"></label>
-    <label>TTS 模型<input name="DASHSCOPE_TTS_MODEL" value="{{ values.DASHSCOPE_TTS_MODEL }}"></label>
-    <label>TTS 音色 ID<input name="DASHSCOPE_TTS_VOICE" value="{{ values.DASHSCOPE_TTS_VOICE or '' }}" placeholder="建议使用下方创建的日语复刻音色"></label>
-    <label>ASR 模型<input name="DASHSCOPE_ASR_MODEL" value="{{ values.DASHSCOPE_ASR_MODEL }}"></label>
-    <label>聊天兼容接口<input name="DASHSCOPE_CHAT_BASE_URL" value="{{ values.DASHSCOPE_CHAT_BASE_URL }}"></label>
-    <label>聊天模型<input name="DASHSCOPE_CHAT_MODEL" value="{{ values.DASHSCOPE_CHAT_MODEL }}"></label>
-    <label>聊天模型路由<select name="LLM_PROVIDER"><option value="auto"{% if values.LLM_PROVIDER == "auto" %} selected{% endif %}>自动：Qwen 失败后切 DeepSeek</option><option value="dashscope"{% if values.LLM_PROVIDER == "dashscope" %} selected{% endif %}>只用百炼 Qwen</option><option value="deepseek"{% if values.LLM_PROVIDER == "deepseek" %} selected{% endif %}>只用 DeepSeek</option></select></label>
-    <label>自动降级<select name="LLM_FALLBACK_ON_ERROR"><option value="true"{% if values.LLM_FALLBACK_ON_ERROR %} selected{% endif %}>开启</option><option value="false"{% if not values.LLM_FALLBACK_ON_ERROR %} selected{% endif %}>关闭</option></select></label>
-    <label>语音聊天模型<input name="DASHSCOPE_OMNI_MODEL" value="{{ values.DASHSCOPE_OMNI_MODEL }}"></label>
-    <label>语音聊天 WebSocket 地址<input name="DASHSCOPE_OMNI_WS_URL" value="{{ values.DASHSCOPE_OMNI_WS_URL or '' }}" placeholder="wss://业务空间ID.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"></label>
-    <label>语音聊天音色<input name="DASHSCOPE_OMNI_VOICE" value="{{ values.DASHSCOPE_OMNI_VOICE }}"></label>
-    <label>语音老师角色<textarea name="DASHSCOPE_OMNI_INSTRUCTIONS" rows="4">{{ values.DASHSCOPE_OMNI_INSTRUCTIONS }}</textarea></label>
-    <label>视觉模型<input name="DASHSCOPE_VL_MODEL" value="{{ values.DASHSCOPE_VL_MODEL }}"></label>
-    <h2>DeepSeek（百炼额度耗尽后的备用）</h2>
-    <label>DeepSeek API Key（已配置：{{ "是" if status.DEEPSEEK_API_KEY else "否" }}）<input type="password" name="DEEPSEEK_API_KEY" placeholder="留空则保持现有值"></label>
-    <label class="check"><input type="checkbox" name="CLEAR_DEEPSEEK_API_KEY">清除现有 DeepSeek Key</label>
-    <label>DeepSeek 服务地址<input name="DEEPSEEK_BASE_URL" value="{{ values.DEEPSEEK_BASE_URL }}"></label>
-    <label>DeepSeek 模型<input name="DEEPSEEK_MODEL" value="{{ values.DEEPSEEK_MODEL }}"></label>
-    <h2>OSS</h2>
-    <label>Endpoint<input name="OSS_ENDPOINT" value="{{ values.OSS_ENDPOINT }}"></label><label>Bucket<input name="OSS_BUCKET" value="{{ values.OSS_BUCKET }}"></label>
-    <label>Access Key ID（已配置：{{ "是" if status.OSS_ACCESS_KEY_ID else "否" }}）<input type="password" name="OSS_ACCESS_KEY_ID" placeholder="留空则保持现有值"></label>
-    <label class="check"><input type="checkbox" name="CLEAR_OSS_ACCESS_KEY_ID">清除现有 Access Key ID</label>
-    <label>Access Key Secret（已配置：{{ "是" if status.OSS_ACCESS_KEY_SECRET else "否" }}）<input type="password" name="OSS_ACCESS_KEY_SECRET" placeholder="留空则保持现有值"></label>
-    <label class="check"><input type="checkbox" name="CLEAR_OSS_ACCESS_KEY_SECRET">清除现有 Access Key Secret</label>
-    <label>公网访问前缀<input name="OSS_PUBLIC_BASE_URL" value="{{ values.OSS_PUBLIC_BASE_URL }}"></label>
-    <label>ASR 临时音轨保留天数<input type="number" min="1" name="OSS_TEMPORARY_RETENTION_DAYS" value="{{ values.OSS_TEMPORARY_RETENTION_DAYS }}"></label>
-    <label>跟读原始录音保留天数<input type="number" min="1" name="OSS_SHADOWING_RETENTION_DAYS" value="{{ values.OSS_SHADOWING_RETENTION_DAYS }}"></label>
-    <h2>本地视频保护</h2>
-    <label>单个视频最大字节数<input type="number" min="1" name="MAX_VIDEO_UPLOAD_BYTES" value="{{ values.MAX_VIDEO_UPLOAD_BYTES }}"></label>
-    <label>单张照片最大字节数<input type="number" min="1" name="MAX_PHOTO_UPLOAD_BYTES" value="{{ values.MAX_PHOTO_UPLOAD_BYTES }}"></label>
-    <label>录音最大字节数<input type="number" min="1" name="MAX_AUDIO_UPLOAD_BYTES" value="{{ values.MAX_AUDIO_UPLOAD_BYTES }}"></label>
-    <label>磁盘保留字节数<input type="number" min="0" name="MIN_FREE_DISK_BYTES" value="{{ values.MIN_FREE_DISK_BYTES }}"></label>
-    <button type="submit">保存本机设置</button>
-  </form>
-  <form method="post" action="/settings/voice-profile" enctype="multipart/form-data" class="ingest-card settings-card">
-    <h2>日语声音复刻</h2>
-    <p>上传本人或已获授权的 3–30 秒日语录音。任务会先经 OSS 临时中转，成功后自动成为阅读默认音色。</p>
-    {% if voice_job %}<p class="notice" id="voice-job" data-job-id="{{ voice_job }}">音色任务 #{{ voice_job }} 已加入队列，正在等待后台处理。</p>{% endif %}
-    <label>音色名称<input name="name" maxlength="160" placeholder="例如：我的日语朗读"></label>
-    <label>音色前缀 <span>最多 10 个英文字母或数字</span><input name="prefix" maxlength="10" pattern="[A-Za-z0-9]+" placeholder="myvoice"></label>
-    <label>参考录音<input type="file" name="sample" accept="audio/*" required></label>
-    <button type="submit">创建日语复刻音色</button>
-    {% if voice_profiles %}<div class="profile-list"><h3>已有音色</h3>{% for profile in voice_profiles %}<div class="profile-row"><span>{{ profile.name }}{% if profile.is_default %} · 当前默认{% endif %}</span>{% if not profile.is_default %}<button type="submit" formnovalidate formaction="/settings/voice-profile/{{ profile.id }}/default">设为默认</button>{% endif %}</div>{% endfor %}</div>{% endif %}
-  </form>
-  <form method="post" action="/settings/oss-lifecycle" class="ingest-card settings-card">
-    <h2>OSS 自动清理</h2>
-    <p>先保存上面的 OSS 配置，再应用规则。只匹配 <code>temporary/</code> 和 <code>shadowing/</code>；<code>materials/</code> 下的朗读和 HLS 不会自动删除。</p>
-    {% if lifecycle_rules %}
-      <p class="notice">已应用：{% for rule in lifecycle_rules %}<code>{{ rule.prefix }}</code> {{ rule.days }} 天{% if not loop.last %}；{% endif %}{% endfor %}。</p>
-    {% endif %}
-    {% if lifecycle_error %}<p class="notice">未能应用：{{ lifecycle_error }}</p>{% endif %}
-    <button type="submit">应用 OSS 生命周期规则</button>
-  </form>
-</main>
-{% if voice_job %}<script>const voiceNotice=document.querySelector("#voice-job");async function pollVoice(){try{const response=await fetch(`/jobs/${voiceNotice.dataset.jobId}`,{cache:"no-store"});const job=await response.json();if(job.status==="done"){voiceNotice.textContent="音色已经创建并设为默认。刷新页面可查看。";return}if(job.status==="failed"){voiceNotice.textContent=`音色没有创建成功：${job.error_message||"请查看后台日志。"}`;return}}catch(_){}window.setTimeout(pollVoice,2000)}pollVoice()</script>{% endif %}
-</body></html>
+{% extends "base.html" %}
+{% block title %}Harvest · 设置{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1 class="title is-4">服务设置</h1>
+  <p class="subtitle is-6">此页仅由本机或 Tailscale 私有网络访问。密钥写入本机 <code>.env</code>（权限 600），保存后不会回显；保存后运行 <code>./stop.sh &amp;&amp; ./start.sh</code> 重启服务，worker 才会读取新配置。</p>
+</header>
+
+{% if saved %}<div class="notification is-success is-light">已保存。准备实调时运行 <code>./stop.sh &amp;&amp; ./start.sh</code>。</div>{% endif %}
+{% if lifecycle_error %}<div class="notification is-danger is-light">未能应用：{{ lifecycle_error }}</div>{% endif %}
+
+<form method="post" action="/settings">
+  <section class="card">
+    <h2 class="title is-5">本机与网络</h2>
+    <div class="field">
+      <label class="label">数据库地址 <span class="tag is-light secret-badge">{{ "已配置" if status.DATABASE_URL else "未配置" }}</span></label>
+      <div class="control">
+        <input class="input" type="password" name="DATABASE_URL" placeholder="留空则保持现有值">
+      </div>
+    </div>
+    <div class="field">
+      <label class="label">Tailscale 主机名</label>
+      <div class="control">
+        <input class="input" name="TAILSCALE_HOSTNAME" value="{{ values.TAILSCALE_HOSTNAME }}">
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 class="title is-5">百炼（免费额度优先）</h2>
+    <div class="field">
+      <label class="label">百炼 API Key <span class="tag {{ 'is-success is-light' if status.DASHSCOPE_API_KEY else 'is-light' }} secret-badge">{{ "已配置" if status.DASHSCOPE_API_KEY else "未配置" }}</span></label>
+      <div class="control">
+        <input class="input" type="password" name="DASHSCOPE_API_KEY" placeholder="留空则保持现有值">
+      </div>
+      <p class="help"><label class="checkbox"><input type="checkbox" name="CLEAR_DASHSCOPE_API_KEY"> 清除现有百炼 Key</label></p>
+    </div>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">TTS 服务地址</label>
+          <div class="control">
+            <input class="input" name="DASHSCOPE_BASE_URL" value="{{ values.DASHSCOPE_BASE_URL }}">
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">TTS 模型</label>
+          <div class="control">
+            <input class="input" name="DASHSCOPE_TTS_MODEL" value="{{ values.DASHSCOPE_TTS_MODEL }}">
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="field">
+      <label class="label">TTS 音色 ID</label>
+      <div class="control">
+        <input class="input" name="DASHSCOPE_TTS_VOICE" value="{{ values.DASHSCOPE_TTS_VOICE or '' }}" placeholder="建议使用下方创建的日语复刻音色">
+      </div>
+    </div>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">ASR 模型</label>
+          <div class="control">
+            <input class="input" name="DASHSCOPE_ASR_MODEL" value="{{ values.DASHSCOPE_ASR_MODEL }}">
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">聊天兼容接口</label>
+          <div class="control">
+            <input class="input" name="DASHSCOPE_CHAT_BASE_URL" value="{{ values.DASHSCOPE_CHAT_BASE_URL }}">
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="field">
+      <label class="label">统一文本问答模型（陪读 / 聊天 / 字幕翻译）</label>
+      <div class="control">
+        <input class="input" name="DASHSCOPE_CHAT_MODEL" value="{{ values.DASHSCOPE_CHAT_MODEL }}">
+      </div>
+    </div>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">聊天模型路由</label>
+          <div class="control">
+            <div class="select is-fullwidth">
+              <select name="LLM_PROVIDER">
+                <option value="auto"{% if values.LLM_PROVIDER == "auto" %} selected{% endif %}>自动：Max 额度耗尽或失败后切 DeepSeek</option>
+                <option value="dashscope"{% if values.LLM_PROVIDER == "dashscope" %} selected{% endif %}>只用百炼 Qwen</option>
+                <option value="deepseek"{% if values.LLM_PROVIDER == "deepseek" %} selected{% endif %}>只用 DeepSeek</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">自动降级</label>
+          <div class="control">
+            <div class="select is-fullwidth">
+              <select name="LLM_FALLBACK_ON_ERROR">
+                <option value="true"{% if values.LLM_FALLBACK_ON_ERROR %} selected{% endif %}>开启</option>
+                <option value="false"{% if not values.LLM_FALLBACK_ON_ERROR %} selected{% endif %}>关闭</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">语音聊天模型</label>
+          <div class="control">
+            <input class="input" name="DASHSCOPE_OMNI_MODEL" value="{{ values.DASHSCOPE_OMNI_MODEL }}">
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">语音聊天 WebSocket 地址</label>
+          <div class="control">
+            <input class="input" name="DASHSCOPE_OMNI_WS_URL" value="{{ values.DASHSCOPE_OMNI_WS_URL or '' }}" placeholder="wss://业务空间ID.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime">
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">语音聊天音色</label>
+          <div class="control">
+            <input class="input" name="DASHSCOPE_OMNI_VOICE" value="{{ values.DASHSCOPE_OMNI_VOICE }}">
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">视觉模型</label>
+          <div class="control">
+            <input class="input" name="DASHSCOPE_VL_MODEL" value="{{ values.DASHSCOPE_VL_MODEL }}">
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="field">
+      <label class="label">语音老师补充要求（可选）</label>
+      <div class="control">
+        <textarea class="textarea" name="DASHSCOPE_OMNI_INSTRUCTIONS" rows="4">{{ values.DASHSCOPE_OMNI_INSTRUCTIONS }}</textarea>
+      </div>
+      <p class="help">正式的中文母语学习者、上下文教学和口语规则已由代码统一应用；这里仅填写本次服务的额外偏好，不能替换正式规则。</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 class="title is-5">DeepSeek（百炼额度耗尽后的备用）</h2>
+    <div class="field">
+      <label class="label">DeepSeek API Key <span class="tag {{ 'is-success is-light' if status.DEEPSEEK_API_KEY else 'is-light' }} secret-badge">{{ "已配置" if status.DEEPSEEK_API_KEY else "未配置" }}</span></label>
+      <div class="control">
+        <input class="input" type="password" name="DEEPSEEK_API_KEY" placeholder="留空则保持现有值">
+      </div>
+      <p class="help"><label class="checkbox"><input type="checkbox" name="CLEAR_DEEPSEEK_API_KEY"> 清除现有 DeepSeek Key</label></p>
+    </div>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">DeepSeek 服务地址</label>
+          <div class="control">
+            <input class="input" name="DEEPSEEK_BASE_URL" value="{{ values.DEEPSEEK_BASE_URL }}">
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">DeepSeek 模型</label>
+          <div class="control">
+            <input class="input" name="DEEPSEEK_MODEL" value="{{ values.DEEPSEEK_MODEL }}">
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 class="title is-5">OSS</h2>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">Endpoint</label>
+          <div class="control">
+            <input class="input" name="OSS_ENDPOINT" value="{{ values.OSS_ENDPOINT }}">
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">Bucket</label>
+          <div class="control">
+            <input class="input" name="OSS_BUCKET" value="{{ values.OSS_BUCKET }}">
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="field">
+      <label class="label">Access Key ID <span class="tag {{ 'is-success is-light' if status.OSS_ACCESS_KEY_ID else 'is-light' }} secret-badge">{{ "已配置" if status.OSS_ACCESS_KEY_ID else "未配置" }}</span></label>
+      <div class="control">
+        <input class="input" type="password" name="OSS_ACCESS_KEY_ID" placeholder="留空则保持现有值">
+      </div>
+      <p class="help"><label class="checkbox"><input type="checkbox" name="CLEAR_OSS_ACCESS_KEY_ID"> 清除现有 Access Key ID</label></p>
+    </div>
+    <div class="field">
+      <label class="label">Access Key Secret <span class="tag {{ 'is-success is-light' if status.OSS_ACCESS_KEY_SECRET else 'is-light' }} secret-badge">{{ "已配置" if status.OSS_ACCESS_KEY_SECRET else "未配置" }}</span></label>
+      <div class="control">
+        <input class="input" type="password" name="OSS_ACCESS_KEY_SECRET" placeholder="留空则保持现有值">
+      </div>
+      <p class="help"><label class="checkbox"><input type="checkbox" name="CLEAR_OSS_ACCESS_KEY_SECRET"> 清除现有 Access Key Secret</label></p>
+    </div>
+    <div class="field">
+      <label class="label">公网访问前缀</label>
+      <div class="control">
+        <input class="input" name="OSS_PUBLIC_BASE_URL" value="{{ values.OSS_PUBLIC_BASE_URL }}">
+      </div>
+    </div>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">ASR 临时音轨保留天数</label>
+          <div class="control">
+            <input class="input" type="number" min="1" name="OSS_TEMPORARY_RETENTION_DAYS" value="{{ values.OSS_TEMPORARY_RETENTION_DAYS }}">
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">跟读原始录音保留天数</label>
+          <div class="control">
+            <input class="input" type="number" min="1" name="OSS_SHADOWING_RETENTION_DAYS" value="{{ values.OSS_SHADOWING_RETENTION_DAYS }}">
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">OSS 单次上传超时（秒）</label>
+          <div class="control">
+            <input class="input" type="number" min="15" max="600" name="OSS_UPLOAD_TIMEOUT_SECONDS" value="{{ values.OSS_UPLOAD_TIMEOUT_SECONDS }}">
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">OSS 上传最大尝试次数</label>
+          <div class="control">
+            <input class="input" type="number" min="1" max="10" name="OSS_UPLOAD_MAX_ATTEMPTS" value="{{ values.OSS_UPLOAD_MAX_ATTEMPTS }}">
+          </div>
+          <p class="help">网络中断时从未完成对象继续，不重复上传字节数一致的分片。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 class="title is-5">本地视频保护</h2>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">单个视频最大字节数</label>
+          <div class="control">
+            <input class="input" type="number" min="1" name="MAX_VIDEO_UPLOAD_BYTES" value="{{ values.MAX_VIDEO_UPLOAD_BYTES }}">
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">单张照片最大字节数</label>
+          <div class="control">
+            <input class="input" type="number" min="1" name="MAX_PHOTO_UPLOAD_BYTES" value="{{ values.MAX_PHOTO_UPLOAD_BYTES }}">
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">录音最大字节数</label>
+          <div class="control">
+            <input class="input" type="number" min="1" name="MAX_AUDIO_UPLOAD_BYTES" value="{{ values.MAX_AUDIO_UPLOAD_BYTES }}">
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">磁盘保留字节数</label>
+          <div class="control">
+            <input class="input" type="number" min="0" name="MIN_FREE_DISK_BYTES" value="{{ values.MIN_FREE_DISK_BYTES }}">
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">链接视频最高分辨率</label>
+          <div class="control">
+            <input class="input" type="number" min="240" max="2160" name="VIDEO_DOWNLOAD_MAX_HEIGHT" value="{{ values.VIDEO_DOWNLOAD_MAX_HEIGHT }}">
+          </div>
+          <p class="help">默认 720p；没有该档位时自动选择更低分辨率。</p>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">链接视频最高帧率</label>
+          <div class="control">
+            <input class="input" type="number" min="15" max="120" name="VIDEO_DOWNLOAD_MAX_FPS" value="{{ values.VIDEO_DOWNLOAD_MAX_FPS }}">
+          </div>
+          <p class="help">日语学习视频默认 30fps，避免下载无用的 60fps 画面。</p>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">软件转码最大线程数</label>
+          <div class="control">
+            <input class="input" type="number" min="1" max="8" name="VIDEO_TRANSCODE_MAX_THREADS" value="{{ values.VIDEO_TRANSCODE_MAX_THREADS }}">
+          </div>
+          <p class="help">硬件转码不可用时生效；默认 2，避免占满整机 CPU。</p>
+        </div>
+      </div>
+    </div>
+    <button type="submit" class="button is-primary">保存本机设置</button>
+  </section>
+</form>
+
+<form method="post" action="/settings/voice-profile" enctype="multipart/form-data" class="card" id="voice-profile-form" data-video-ready="{{ 'true' if voice_separation_ready else 'false' }}">
+  <h2 class="title is-5">创建日语复刻音色</h2>
+  <p class="help">上传本人或已获授权的日语录音或视频。音频会直接复刻；视频会先分离背景音乐并自动选择较干净的人声片段。成功后自动成为阅读默认音色。</p>
+  {% if voice_job %}<div class="notification is-info is-light" id="voice-job" data-job-id="{{ voice_job }}">音色任务 #{{ voice_job }} 已加入队列，正在等待后台处理。</div>{% endif %}
+  <div class="columns">
+    <div class="column">
+      <div class="field">
+        <label class="label">音色名称</label>
+        <div class="control">
+          <input class="input" name="name" maxlength="160" placeholder="例如：我的日语朗读" required>
+        </div>
+      </div>
+    </div>
+    <div class="column">
+      <div class="field">
+        <label class="label">音色前缀 <span class="has-text-grey-light is-size-7">最多 10 个英文字母或数字</span></label>
+        <div class="control">
+          <input class="input" name="prefix" maxlength="10" pattern="[A-Za-z0-9]+" placeholder="myvoice" required>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="field">
+    <label class="label">日语录音或视频</label>
+    <div class="control">
+      <input class="input" type="file" name="sample" id="voice-source-file" accept="audio/*,video/mp4,video/quicktime,video/webm,video/x-matroska" required>
+    </div>
+    <p class="help" id="voice-source-help">音频需要 3–30 秒；选择视频后会显示人声选段设置。</p>
+  </div>
+  <div id="video-voice-options" hidden>
+    <div class="notification is-light" style="margin-top:16px;">
+      <p>视频会使用 Demucs 分离人声，再按说话连续性、信噪比、静音和削波自动评分。系统不能在多人对话中判断你想克隆哪一个人。</p>
+      <p class="mt-2">人声分离组件：{{ "已安装" if voice_separation_ready else "尚未安装" }}。首次运行可能需要下载本地模型。</p>
+    </div>
+    {% if not voice_separation_ready %}<div class="notification is-danger is-light">视频路径暂不可用。运行 <code>./.venv/bin/pip install -e '.[voice]'</code> 后重启 worker；直接音频仍可使用。</div>{% endif %}
+    <div class="columns">
+    <div class="column">
+      <div class="field">
+        <label class="label">片段选择</label>
+        <div class="control">
+          <div class="select is-fullwidth">
+            <select name="selection_mode" id="voice-selection-mode">
+              <option value="auto" selected>自动选择最佳片段</option>
+              <option value="manual">手动指定单人说话片段</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="column" id="voice-start-field" hidden>
+      <div class="field">
+        <label class="label">手动起点（秒）</label>
+        <div class="control">
+          <input class="input" type="number" min="0" step="0.1" name="clip_start_seconds" value="0">
+        </div>
+      </div>
+    </div>
+    <div class="column">
+      <div class="field">
+        <label class="label">复刻片段时长（秒）<span class="has-text-grey-light is-size-7">默认 20 秒；允许 3–30 秒</span></label>
+        <div class="control">
+          <input class="input" type="number" min="3" max="30" step="0.5" name="clip_duration_seconds" value="20" required>
+        </div>
+      </div>
+    </div>
+    </div>
+  </div>
+  <div class="field">
+    <label class="checkbox"><input type="checkbox" name="authorized" required> 我确认文件中的目标声音属于本人，或已获得明确的声音复刻授权</label>
+  </div>
+  <button type="submit" class="button is-primary" id="voice-submit">创建日语复刻音色</button>
+  {% if voice_profiles %}
+  <div class="profile-list" style="margin-top:18px;border-top:1px solid #EEF0F3;padding-top:12px;">
+    <p class="has-text-weight-semibold mb-2" style="font-size:0.9rem;">已有音色</p>
+    {% for profile in voice_profiles %}
+    <div class="level">
+      <div class="level-left"><span class="level-item">{{ profile.name }}{% if profile.is_default %} · 当前默认{% endif %}</span></div>
+      <div class="level-right">{% if not profile.is_default %}<button type="submit" formnovalidate formaction="/settings/voice-profile/{{ profile.id }}/default" class="button is-small is-light level-item">设为默认</button>{% endif %}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</form>
+
+<form method="post" action="/settings/oss-lifecycle" class="card">
+  <h2 class="title is-5">OSS 自动清理</h2>
+  <p class="help">先保存上面的 OSS 配置，再应用规则。只匹配 <code>temporary/</code> 和 <code>shadowing/</code>；<code>materials/</code> 下的朗读和 HLS 不会自动删除。</p>
+  {% if lifecycle_rules %}
+    <div class="notification is-success is-light">已应用：{% for rule in lifecycle_rules %}<code>{{ rule.prefix }}</code> {{ rule.days }} 天{% if not loop.last %}；{% endif %}{% endfor %}。</div>
+  {% endif %}
+  <button type="submit" class="button is-light">应用 OSS 生命周期规则</button>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const voiceForm = document.querySelector("#voice-profile-form");
+  const sourceFile = document.querySelector("#voice-source-file");
+  const sourceHelp = document.querySelector("#voice-source-help");
+  const videoOptions = document.querySelector("#video-voice-options");
+  const voiceSubmit = document.querySelector("#voice-submit");
+  const selectionMode = document.querySelector("#voice-selection-mode");
+  const startField = document.querySelector("#voice-start-field");
+  const videoReady = voiceForm && voiceForm.dataset.videoReady === "true";
+  const selectedFileIsVideo = () => {
+    const file = sourceFile && sourceFile.files && sourceFile.files[0];
+    return Boolean(file && (file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm|mkv)$/i.test(file.name)));
+  };
+  if (selectionMode && startField) {
+    const syncSelection = () => { startField.hidden = !selectedFileIsVideo() || selectionMode.value !== "manual"; };
+    selectionMode.addEventListener("change", syncSelection);
+    syncSelection();
+  }
+  if (sourceFile && videoOptions && voiceSubmit && sourceHelp) {
+    const syncSource = () => {
+      const isVideo = selectedFileIsVideo();
+      videoOptions.hidden = !isVideo;
+      voiceSubmit.disabled = isVideo && !videoReady;
+      sourceHelp.textContent = isVideo
+        ? "已识别为视频：提交后先分离背景音乐，再创建音色。"
+        : "音频需要 3–30 秒，提交后直接创建音色。";
+      if (selectionMode && startField) startField.hidden = !isVideo || selectionMode.value !== "manual";
+    };
+    sourceFile.addEventListener("change", syncSource);
+    syncSource();
+  }
+</script>
+{% if voice_job %}
+<script>
+  const voiceNotice = document.querySelector("#voice-job");
+  async function pollVoice() {
+    try {
+      const response = await fetch(`/jobs/${voiceNotice.dataset.jobId}`, { cache: "no-store" });
+      const job = await response.json();
+      if (job.status === "running" && job.kind === "voice_enrollment_video") {
+        voiceNotice.textContent = "正在本机分析候选片段并分离人声。首次运行还需要下载 Demucs 模型，请耐心等待。";
+      }
+      if (job.status === "done") {
+        const start = job.payload && job.payload.selected_start_seconds;
+        if (typeof start === "number") {
+          voiceNotice.textContent = "音色已经创建并设为默认。系统选择了视频 " + start.toFixed(1) + " 秒附近的人声片段。刷新页面可查看。";
+        } else {
+          voiceNotice.textContent = "音色已经创建并设为默认。刷新页面可查看。";
+        }
+        return;
+      }
+      if (job.status === "failed") {
+        voiceNotice.textContent = "音色没有创建成功：" + (job.error_message || "请查看后台日志。");
+        voiceNotice.classList.add("is-danger");
+        return;
+      }
+    } catch (_) {}
+    window.setTimeout(pollVoice, 2000);
+  }
+  pollVoice();
+</script>
+{% endif %}
+{% endblock %}

@@ -10,6 +10,16 @@ struct Material: Codable, Identifiable, Hashable {
     let errorMessage: String?
     let durationMs: Int?
     let audioURL: URL?
+    let createdAt: String?
+    let updatedAt: String?
+    let thumbnailPath: String?
+    let jobID: Int?
+    let progressPercent: Int?
+    let progressLabel: String?
+    let etaMinutes: Int?
+    let retryable: Bool?
+    let failureTitle: String?
+    let failureSummary: String?
 
     enum CodingKeys: String, CodingKey {
         case id, kind, title, status
@@ -18,6 +28,16 @@ struct Material: Codable, Identifiable, Hashable {
         case errorMessage = "error_message"
         case durationMs = "duration_ms"
         case audioURL = "audio_url"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case thumbnailPath = "thumbnail_path"
+        case jobID = "job_id"
+        case progressPercent = "progress_percent"
+        case progressLabel = "progress_label"
+        case etaMinutes = "eta_minutes"
+        case retryable
+        case failureTitle = "failure_title"
+        case failureSummary = "failure_summary"
     }
 }
 
@@ -42,16 +62,29 @@ struct MaterialDetail: Codable {
     }
 }
 
+struct MaterialPlaybackState: Codable, Equatable {
+    let materialID: Int
+    let positionMs: Int
+    let updatedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case materialID = "material_id"
+        case positionMs = "position_ms"
+        case updatedAt = "updated_at"
+    }
+}
+
 struct Token: Codable, Identifiable, Hashable {
     let id: Int
     let segmentID: Int
     let index: Int
     let surface: String
+    let reading: String?
     let startMs: Int
     let endMs: Int
 
     enum CodingKeys: String, CodingKey {
-        case id, surface
+        case id, surface, reading
         case segmentID = "segment_id"
         case index = "idx"
         case startMs = "start_ms"
@@ -260,4 +293,13 @@ struct Segment: Codable, Identifiable, Hashable {
         case startMs = "start_ms"
         case endMs = "end_ms"
     }
+}
+
+struct FuriganaSegment: Codable, Hashable {
+    let surface: String
+    let reading: String?
+}
+
+struct FuriganaResponse: Codable {
+    let segments: [FuriganaSegment]
 }

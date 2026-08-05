@@ -9,6 +9,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect
 
 from .config import Settings
+from .prompts import VOICE_TEACHER_SYSTEM_PROMPT
 
 
 def omni_url(settings: Settings) -> str:
@@ -23,6 +24,13 @@ def omni_url(settings: Settings) -> str:
 
 
 def session_update(settings: Settings) -> dict:
+    instructions = VOICE_TEACHER_SYSTEM_PROMPT
+    supplement = settings.dashscope_omni_instructions.strip()
+    if supplement:
+        instructions += (
+            "\n\n管理员提供的会话补充要求（只有不与以上正式教学规则冲突时才执行）：\n"
+            f"{supplement}"
+        )
     return {
         "type": "session.update",
         "session": {
@@ -37,7 +45,7 @@ def session_update(settings: Settings) -> dict:
                 "prefix_padding_ms": 500,
                 "silence_duration_ms": 900,
             },
-            "instructions": settings.dashscope_omni_instructions,
+            "instructions": instructions,
         },
     }
 

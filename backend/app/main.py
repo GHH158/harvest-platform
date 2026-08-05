@@ -8,12 +8,13 @@ import shutil
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, status
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -28,12 +29,15 @@ from .chat import (
     generate_chat_turn,
     topic_for,
 )
+from .companion import build_companion_messages
 from .config import ROOT_DIR, get_settings
 from .db import apply_schema, make_engine
+from .furigana import ruby_segments
 from .llm import LLMService
 from .omni import relay_voice_teacher
 from .repository import Repository
 from .storage import ObjectStorage
+from .voice import validate_video_voice_clip, voice_separation_available
 
 
 class MaterialCreate(BaseModel):
@@ -95,6 +99,10 @@ class VideoLinkCreate(BaseModel):
     url: str = Field(min_length=1, max_length=2_000)
 
 
+class PlaybackStateUpdate(BaseModel):
+    position_ms: int = Field(ge=0, le=2_147_483_647)
+
+
 def title_for_text(value: str) -> str:
     first_line = next((line.strip() for line in value.splitlines() if line.strip()), "未命名材料")
     return f"{first_line[:36]}{'…' if len(first_line) > 36 else ''}"
@@ -104,10 +112,65 @@ def title_for_url(value: str) -> str:
     return urlparse(value).netloc or "网页材料"
 
 
+_MATERIAL_JOB_PRESENTATION: dict[str, tuple[str, int, int]] = {
+    "fetch": ("正在提取网页内容", 12, 3),
+    "vision": ("正在识别照片文字", 18, 3),
+    "tts": ("正在生成朗读音频", 58, 5),
+    "download_video": ("正在下载视频", 15, 10),
+    "transcode": ("正在处理视频", 38, 10),
+    "upload_video": ("正在上传媒体", 62, 8),
+    "asr_video": ("正在转录字幕", 82, 5),
+    "translate_video": ("正在翻译字幕", 95, 2),
+}
+
+_MATERIAL_FAILURE_TITLES = {
+    "fetch": "网页导入失败",
+    "vision": "照片识别失败",
+    "tts": "朗读生成失败",
+    "download_video": "视频下载失败",
+    "transcode": "视频处理失败",
+    "upload_video": "媒体上传失败",
+    "asr_video": "转录失败",
+    "translate_video": "字幕翻译失败",
+}
+
+
+def _error_summary(message: str) -> str:
+    lowered = message.lower()
+    if any(token in lowered for token in ("timeout", "timed out", "connection", "network", "requesterror", "http")):
+        return "网络连接中断"
+    if any(token in lowered for token in ("key", "unauthorized", "forbidden", "401", "403")):
+        return "服务配置或授权无效"
+    if any(token in lowered for token in ("disk", "space", "磁盘", "空间不足")):
+        return "本机存储空间不足"
+    if any(token in lowered for token in ("format", "codec", "ffmpeg", "格式")):
+        return "文件格式或媒体处理异常"
+    return "后台处理未能完成"
+
+
+def _job_eta_minutes(kind: str, payload: dict, updated_at: datetime | None, default_minutes: int) -> int:
+    estimate = default_minutes
+    if kind == "tts":
+        text_length = len(str(payload.get("text", "")))
+        estimate = max(default_minutes, round(text_length / 16 / 60) + 2)
+    if updated_at is not None:
+        reference = updated_at if updated_at.tzinfo else updated_at.replace(tzinfo=UTC)
+        elapsed = max(0, int((datetime.now(UTC) - reference).total_seconds() / 60))
+        estimate = max(1, estimate - elapsed)
+    return estimate
+
+
 def serialise_material(material: dict) -> dict:
     settings = get_settings()
     audio_key = material.pop("audio_oss_key", None)
     video_key = material.pop("video_oss_key", None)
+    thumbnail_path = material.pop("thumbnail_local_path", None)
+    job_id = material.pop("current_job_id", None)
+    job_kind = str(material.pop("current_job_kind", "") or "")
+    job_status = str(material.pop("current_job_status", "") or "")
+    job_error = str(material.pop("current_job_error_message", "") or "")
+    job_payload = dict(material.pop("current_job_payload", None) or {})
+    job_updated_at = material.pop("current_job_updated_at", None)
     material["audio_url"] = (
         f"{settings.oss_public_base_url.rstrip('/')}/{audio_key}" if audio_key and settings.oss_public_base_url else None
     )
@@ -116,38 +179,112 @@ def serialise_material(material: dict) -> dict:
         if video_key and settings.oss_public_base_url
         else None
     )
+    material["thumbnail_path"] = f"/materials/{material['id']}/thumbnail" if thumbnail_path else None
+    material["job_id"] = int(job_id) if job_id is not None else None
+    material["progress_percent"] = None
+    material["progress_label"] = None
+    material["eta_minutes"] = None
+    material["retryable"] = False
+    material["failure_title"] = None
+    material["failure_summary"] = None
+
+    if material.get("status") in {"pending", "processing"}:
+        label, percent, eta = _MATERIAL_JOB_PRESENTATION.get(job_kind, ("正在准备素材", 8, 3))
+        if job_status == "pending":
+            percent = max(3, percent - 6)
+        material["progress_percent"] = percent
+        material["progress_label"] = label
+        material["eta_minutes"] = _job_eta_minutes(job_kind, job_payload, job_updated_at, eta)
+    elif material.get("status") == "downloaded":
+        material["progress_percent"] = 45
+        material["progress_label"] = "视频已准备，等待开始转录"
+    elif material.get("status") == "failed":
+        raw_error = str(material.get("error_message") or job_error or "后台处理未能完成")
+        material["failure_title"] = _MATERIAL_FAILURE_TITLES.get(job_kind, "素材处理失败")
+        material["failure_summary"] = _error_summary(raw_error)
+        material["retryable"] = job_status == "failed" and bool(job_id)
     return material
 
 
 _engine: Engine | None = None
 _repository: Repository | None = None
+_llm_service: LLMService | None = None
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global _engine, _repository
+    global _engine, _repository, _llm_service
     engine = make_engine()
+    llm = LLMService(get_settings())
     try:
         apply_schema(engine)
         _engine = engine
         _repository = Repository(engine)
+        _llm_service = llm
         yield
     finally:
+        llm.close()
         engine.dispose()
         if _engine is engine:
             _engine = None
             _repository = None
+        if _llm_service is llm:
+            _llm_service = None
 
 
 app = FastAPI(title="Harvest", version="0.1.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT_DIR / "backend" / "app" / "static"), name="static")
 templates = Jinja2Templates(directory=ROOT_DIR / "backend" / "app" / "templates")
 
+templates.env.filters["datetime_local"] = lambda value: value.strftime("%Y-%m-%d %H:%M") if value else "—"
+_STATUS_LABELS = {
+    "pending": "待处理",
+    "processing": "处理中",
+    "downloaded": "待转录",
+    "ready": "已就绪",
+    "failed": "失败",
+}
+_JOB_STATUS_LABELS = {"pending": "待处理", "running": "执行中", "done": "完成", "failed": "失败"}
+_STATUS_TAGS = {
+    "pending": "is-warning is-light",
+    "processing": "is-info is-light",
+    "downloaded": "is-warning is-light",
+    "ready": "is-success is-light",
+    "failed": "is-danger is-light",
+}
+_JOB_STATUS_TAGS = {
+    "pending": "is-warning is-light",
+    "running": "is-info is-light",
+    "done": "is-success is-light",
+    "failed": "is-danger is-light",
+}
+templates.env.filters["status_label"] = lambda s: _STATUS_LABELS.get(s, s)
+templates.env.filters["status_tag"] = lambda s: _STATUS_TAGS.get(s, "is-light")
+templates.env.filters["job_status_label"] = lambda s: _JOB_STATUS_LABELS.get(s, s)
+templates.env.filters["job_status_tag"] = lambda s: _JOB_STATUS_TAGS.get(s, "is-light")
+templates.env.filters["kind_label"] = lambda k: {"reading": "阅读", "video": "视频"}.get(k, k)
+
+_JOB_KINDS = (
+    "fetch", "tts", "asr", "vision", "download_video", "transcode",
+    "upload_video", "asr_video", "translate_video", "shadowing",
+    "voice_enrollment", "voice_enrollment_video",
+)
+
+
+def page_context(active: str, **extra: object) -> dict[str, object]:
+    return {"active": active, **extra}
+
 
 def repository() -> Repository:
     if _repository is None:
         raise RuntimeError("应用数据库尚未初始化。")
     return _repository
+
+
+def llm_service() -> LLMService:
+    if _llm_service is None:
+        raise RuntimeError("应用文本模型服务尚未初始化。")
+    return _llm_service
 
 
 _SETTINGS_KEYS = (
@@ -159,8 +296,10 @@ _SETTINGS_KEYS = (
     "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
     "DEEPSEEK_MODEL", "OSS_ENDPOINT", "OSS_BUCKET", "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET",
     "OSS_PUBLIC_BASE_URL", "OSS_TEMPORARY_RETENTION_DAYS", "OSS_SHADOWING_RETENTION_DAYS",
+    "OSS_UPLOAD_TIMEOUT_SECONDS", "OSS_UPLOAD_MAX_ATTEMPTS",
     "TAILSCALE_HOSTNAME", "MAX_VIDEO_UPLOAD_BYTES", "MAX_PHOTO_UPLOAD_BYTES",
-    "MAX_AUDIO_UPLOAD_BYTES", "MIN_FREE_DISK_BYTES",
+    "MAX_AUDIO_UPLOAD_BYTES", "MIN_FREE_DISK_BYTES", "VIDEO_DOWNLOAD_MAX_HEIGHT",
+    "VIDEO_DOWNLOAD_MAX_FPS", "VIDEO_TRANSCODE_MAX_THREADS",
 )
 _SECRET_KEYS = {"DATABASE_URL", "DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY", "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET"}
 
@@ -227,7 +366,14 @@ def settings_context(**messages: object) -> dict[str, object]:
     secret_status = {key: bool(getattr(settings, key.lower(), None)) for key in _SECRET_KEYS}
     values = {key: getattr(settings, key.lower(), "") for key in _SETTINGS_KEYS if key not in _SECRET_KEYS}
     profiles = _repository.voice_profiles() if _repository is not None else []
-    return {"status": secret_status, "values": values, "voice_profiles": profiles, **messages}
+    return {
+        "active": "settings",
+        "status": secret_status,
+        "values": values,
+        "voice_profiles": profiles,
+        "voice_separation_ready": voice_separation_available(),
+        **messages,
+    }
 
 
 @app.post("/settings", response_class=HTMLResponse)
@@ -321,6 +467,7 @@ async def post_photo(title: Annotated[str | None, Form()] = None, photo: UploadF
         title=(title or "").strip() or Path(photo.filename).stem, source_type="photo", source_ref=photo.filename,
         job_kind="vision", payload={"image_path": str(destination)},
     )
+    repository().store_material_thumbnail(material_id, str(destination))
     return {"material_id": material_id, "job_id": job_id, "status": "pending"}
 
 
@@ -347,28 +494,117 @@ def get_voice_profiles() -> list[dict]:
 async def post_voice_profile(
     name: Annotated[str, Form()],
     prefix: Annotated[str, Form()],
+    selection_mode: Annotated[str, Form()] = "auto",
+    clip_start_seconds: Annotated[float, Form()] = 0.0,
+    clip_duration_seconds: Annotated[float, Form()] = 20.0,
+    authorized: Annotated[bool, Form()] = False,
     sample: UploadFile = File(),
 ) -> dict[str, int | str]:
     if not name.strip():
         raise HTTPException(status_code=422, detail="请填写音色名称。")
     if re.fullmatch(r"[A-Za-z0-9]{1,10}", prefix.strip()) is None:
         raise HTTPException(status_code=422, detail="音色前缀只接受 1–10 个英文字母或数字。")
-    if not sample.filename or not (sample.content_type or "").startswith("audio/"):
-        raise HTTPException(status_code=415, detail="请选择 3–30 秒的音频文件。")
+    if not authorized:
+        raise HTTPException(status_code=422, detail="请先确认文件中的声音属于本人或已经获得明确授权。")
+    if not sample.filename:
+        raise HTTPException(status_code=422, detail="请选择一个日语录音或视频文件。")
+
+    content_type = (sample.content_type or "").lower()
+    suffix = Path(sample.filename).suffix.lower()
+    video_suffixes = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
+    audio_suffixes = {".m4a", ".mp3", ".wav", ".aac", ".caf", ".flac", ".ogg", ".aiff", ".aif"}
+    if content_type.startswith("video/") or (
+        not content_type.startswith("audio/") and suffix in video_suffixes
+    ):
+        return await _enqueue_video_voice_profile(
+            name=name,
+            prefix=prefix,
+            selection_mode=selection_mode,
+            clip_start_seconds=clip_start_seconds,
+            clip_duration_seconds=clip_duration_seconds,
+            video=sample,
+        )
+    if not content_type.startswith("audio/") and suffix not in audio_suffixes:
+        raise HTTPException(status_code=415, detail="只接受音频或受支持的视频文件。")
+
     settings = get_settings()
-    suffix = Path(sample.filename).suffix.lower() or ".m4a"
+    suffix = suffix or ".m4a"
     directory = settings.data_dir / "voice-profiles"
     directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / f"sample-{int(time.time() * 1000)}{suffix}"
+    destination = directory / f"sample-{time.time_ns()}{suffix}"
     await save_upload_stream(
         sample, destination, settings.max_audio_upload_bytes, settings.min_free_disk_bytes, "参考录音"
     )
-    job_id = repository().enqueue_job(
-        kind="voice_enrollment",
-        material_id=None,
-        payload={"name": name.strip()[:160], "prefix": prefix.strip(), "sample_path": str(destination)},
+    try:
+        job_id = repository().enqueue_job(
+            kind="voice_enrollment",
+            material_id=None,
+            payload={"name": name.strip()[:160], "prefix": prefix.strip(), "sample_path": str(destination)},
+        )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return {"job_id": job_id, "status": "pending", "source_kind": "audio"}
+
+
+async def _enqueue_video_voice_profile(
+    *,
+    name: str,
+    prefix: str,
+    selection_mode: str,
+    clip_start_seconds: float,
+    clip_duration_seconds: float,
+    video: UploadFile,
+) -> dict[str, int | str]:
+    normalized_mode = selection_mode.strip().lower()
+    if normalized_mode not in {"auto", "manual"}:
+        raise HTTPException(status_code=422, detail="片段选择方式只支持 auto 或 manual。")
+    selected_start = None if normalized_mode == "auto" else clip_start_seconds
+    try:
+        validate_video_voice_clip(selected_start, clip_duration_seconds)
+    except RuntimeError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if not video.filename:
+        raise HTTPException(status_code=422, detail="请选择包含日语人声的视频文件。")
+    suffix = Path(video.filename).suffix.lower() or ".mp4"
+    if suffix not in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}:
+        raise HTTPException(status_code=415, detail="暂不支持这种视频格式。")
+
+    settings = get_settings()
+    directory = settings.data_dir / "voice-profiles" / "video-uploads"
+    directory.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(directory).free < settings.min_free_disk_bytes:
+        raise HTTPException(status_code=507, detail="本机磁盘空间不足，暂不能接收视频。")
+    destination = directory / f"voice-source-{time.time_ns()}{suffix}"
+    await save_upload_stream(
+        video,
+        destination,
+        settings.max_video_upload_bytes,
+        settings.min_free_disk_bytes,
+        "声音复刻视频",
     )
-    return {"job_id": job_id, "status": "pending"}
+    try:
+        job_id = repository().enqueue_job(
+            kind="voice_enrollment_video",
+            material_id=None,
+            payload={
+                "name": name.strip()[:160],
+                "prefix": prefix.strip(),
+                "source_path": str(destination),
+                "selection_mode": normalized_mode,
+                "clip_start_seconds": selected_start,
+                "clip_duration_seconds": clip_duration_seconds,
+            },
+        )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "source_kind": "video",
+        "selection_mode": normalized_mode,
+    }
 
 
 @app.post("/voice-profiles/{profile_id}/default")
@@ -382,9 +618,21 @@ def choose_voice_profile(profile_id: int) -> dict[str, int | str]:
 async def settings_voice_profile(
     name: Annotated[str, Form()],
     prefix: Annotated[str, Form()],
+    selection_mode: Annotated[str, Form()] = "auto",
+    clip_start_seconds: Annotated[float, Form()] = 0.0,
+    clip_duration_seconds: Annotated[float, Form()] = 20.0,
+    authorized: Annotated[bool, Form()] = False,
     sample: UploadFile = File(),
 ) -> RedirectResponse:
-    result = await post_voice_profile(name=name, prefix=prefix, sample=sample)
+    result = await post_voice_profile(
+        name=name,
+        prefix=prefix,
+        selection_mode=selection_mode,
+        clip_start_seconds=clip_start_seconds,
+        clip_duration_seconds=clip_duration_seconds,
+        authorized=authorized,
+        sample=sample,
+    )
     return RedirectResponse(
         url=f"/settings?voice_job={result['job_id']}", status_code=status.HTTP_303_SEE_OTHER
     )
@@ -415,6 +663,71 @@ def get_material(material_id: int) -> dict:
     material["segments"] = repository().get_segments(material_id)
     material["tokens"] = repository().get_tokens(material_id)
     return serialise_material(material)
+
+
+@app.get("/materials/{material_id}/thumbnail")
+def get_material_thumbnail(material_id: int) -> FileResponse:
+    path = repository().material_thumbnail_path(material_id)
+    if not path or not Path(path).is_file():
+        raise HTTPException(status_code=404, detail="该素材没有可用封面。")
+    media_type = "image/png" if Path(path).suffix.lower() == ".png" else "image/jpeg"
+    return FileResponse(path, media_type=media_type)
+
+
+@app.get("/materials/{material_id}/playback")
+def get_material_playback(material_id: int) -> dict:
+    state = repository().get_playback_state(material_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="视频素材不存在。")
+    return state
+
+
+@app.put("/materials/{material_id}/playback")
+def put_material_playback(material_id: int, payload: PlaybackStateUpdate) -> dict:
+    state = repository().save_playback_state(material_id, payload.position_ms)
+    if state is None:
+        raise HTTPException(status_code=404, detail="视频素材不存在。")
+    return state
+
+
+@app.post("/materials/{material_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+def retry_material(material_id: int) -> dict[str, int | str]:
+    job_id = repository().retry_failed_material(material_id)
+    if job_id is None:
+        raise HTTPException(status_code=404, detail="素材不存在。")
+    if job_id == 0:
+        raise HTTPException(status_code=409, detail="没有可以重新尝试的失败任务。")
+    return {"material_id": material_id, "job_id": job_id, "status": "pending"}
+
+
+def enqueue_video_transcription(material_id: int) -> int:
+    repo = repository()
+    material = repo.get_material(material_id)
+    if material is None:
+        raise HTTPException(status_code=404, detail="素材不存在。")
+    if material["kind"] != "video" or material["status"] != "downloaded":
+        raise HTTPException(status_code=409, detail="只有已下载待转录的视频可以开始转录。")
+    transcode_payload = repo.latest_transcode_payload(material_id)
+    if not transcode_payload or not transcode_payload.get("source_path"):
+        raise HTTPException(status_code=409, detail="找不到本地转码记录，无法开始转录。")
+    output_dir = get_settings().data_dir / "video" / f"material-{material_id}"
+    repo.mark_material_processing(material_id)
+    return repo.enqueue_job(
+        kind="upload_video",
+        material_id=material_id,
+        payload={
+            "source_path": transcode_payload["source_path"],
+            "video_directory": str(output_dir / "hls-video"),
+            "audio_directory": str(output_dir / "hls-audio"),
+            "asr_audio_path": str(output_dir / "asr-audio.m4a"),
+        },
+    )
+
+
+@app.post("/materials/{material_id}/start-transcription", status_code=status.HTTP_202_ACCEPTED)
+def start_material_transcription(material_id: int) -> dict[str, int | str]:
+    job_id = enqueue_video_transcription(material_id)
+    return {"material_id": material_id, "job_id": job_id, "status": "pending"}
 
 
 @app.get("/materials/{material_id}/segments")
@@ -455,15 +768,14 @@ def post_companion(payload: CompanionRequest) -> dict:
     if payload.segment_id and not context:
         raise HTTPException(status_code=404, detail="该材料中不存在这句话。")
     user = repo.add_companion_message(payload.material_id, payload.segment_id, "user", payload.question.strip())
-    context_text = "\n".join(f"{item['idx'] + 1}. {item['text_ja']}" for item in context) or "（未指定句子）"
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": "你是克制、耐心的日语陪读老师。用中文解释，必要时给简短日语例句。"},
-    ]
     history = repo.companion_messages(payload.material_id)[-12:-1]
-    messages.extend({"role": item["role"], "content": item["content"]} for item in history)
-    messages.append({"role": "user", "content": f"阅读上下文：\n{context_text}\n\n问题：{payload.question.strip()}"})
+    messages = build_companion_messages(context=context, history=history, question=payload.question)
     try:
-        answer = LLMService(get_settings()).reply(messages)
+        answer = llm_service().reply(
+            messages,
+            enable_thinking=False,
+            max_tokens=1_200,
+        )
     except Exception as error:
         raise _llm_error(error) from error
     assistant = repo.add_companion_message(payload.material_id, payload.segment_id, "assistant", answer)
@@ -478,7 +790,7 @@ def _chat_turn(*, topic: str, history: list[dict], guidance: str, user_message: 
         user_message=user_message,
     )
     try:
-        return generate_chat_turn(LLMService(get_settings()), messages)
+        return generate_chat_turn(llm_service(), messages)
     except ChatOutputError as error:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
     except Exception as error:
@@ -609,6 +921,19 @@ def post_chat(payload: ChatRequest) -> dict:
     return {"user": user, "correction": correction, "assistant": assistant}
 
 
+class FuriganaRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=4_000)
+
+
+@app.post("/furigana")
+def furigana(payload: FuriganaRequest) -> dict[str, object]:
+    try:
+        segments = ruby_segments(payload.text)
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return {"segments": segments}
+
+
 @app.post("/shadowing", status_code=status.HTTP_202_ACCEPTED)
 async def post_shadowing(segment_id: int = Form(), audio: UploadFile = File()) -> dict[str, int | str]:
     repo = repository()
@@ -673,6 +998,65 @@ def get_job(job_id: int) -> dict:
     return job
 
 
+@app.get("/admin/materials", response_class=HTMLResponse)
+def admin_materials_page(
+    request: Request,
+    status_filter: str | None = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> HTMLResponse:
+    repo = repository()
+    total = repo.count_materials(status=status_filter)
+    materials = repo.list_materials(status=status_filter, limit=limit, offset=(page - 1) * limit)
+    return templates.TemplateResponse(
+        request,
+        "materials.html",
+        page_context(
+            "materials",
+            materials=materials,
+            total=total,
+            page=page,
+            limit=limit,
+            pages=max(1, (total + limit - 1) // limit),
+            status_filter=status_filter,
+        ),
+    )
+
+
+@app.post("/admin/materials/{material_id}/start-transcription", response_class=HTMLResponse)
+def start_transcription(material_id: int) -> RedirectResponse:
+    enqueue_video_transcription(material_id)
+    return RedirectResponse(url="/admin/materials", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.get("/admin/jobs", response_class=HTMLResponse)
+def admin_jobs_page(
+    request: Request,
+    status_filter: str | None = Query(default=None, alias="status"),
+    kind: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> HTMLResponse:
+    repo = repository()
+    total = repo.count_jobs(status=status_filter, kind=kind)
+    jobs = repo.list_jobs(status=status_filter, kind=kind, limit=limit, offset=(page - 1) * limit)
+    return templates.TemplateResponse(
+        request,
+        "jobs.html",
+        page_context(
+            "jobs",
+            jobs=jobs,
+            total=total,
+            page=page,
+            limit=limit,
+            pages=max(1, (total + limit - 1) // limit),
+            status_filter=status_filter,
+            kind=kind,
+            job_kinds=_JOB_KINDS,
+        ),
+    )
+
+
 @app.get("/ingest-web", response_class=HTMLResponse)
 def ingest_page(
     request: Request,
@@ -682,7 +1066,7 @@ def ingest_page(
     return templates.TemplateResponse(
         request,
         "ingest.html",
-        {"error": error, "created_material_id": created},
+        page_context("ingest", error=error, created_material_id=created),
     )
 
 
@@ -696,7 +1080,9 @@ def ingest_form(
     try:
         material_id, _ = create_material(MaterialCreate(title=title, text=source_text, url=source_url))
     except ValueError as error:
-        return templates.TemplateResponse(request, "ingest.html", {"error": str(error)}, status_code=422)
+        return templates.TemplateResponse(
+            request, "ingest.html", page_context("ingest", error=str(error)), status_code=422
+        )
     return RedirectResponse(url=f"/ingest-web?created={material_id}", status_code=status.HTTP_303_SEE_OTHER)
 
 

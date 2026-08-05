@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 struct OfflineEntry: Codable, Identifiable {
     let material: MaterialDetail
@@ -79,6 +80,13 @@ enum VideoOfflineMedia: Equatable {
     case shadowing
 }
 
+enum ConnectivityStatus: Equatable {
+    case unknown
+    case wifi
+    case cellular
+    case unavailable
+}
+
 struct HLSSegment: Hashable {
     let url: URL
     let duration: Double
@@ -109,24 +117,47 @@ struct HLSPlaylist {
     }
 }
 
+struct OfflineStorageInfo: Equatable {
+    let usedBytes: Int64
+    let availableBytes: Int64
+}
+
 @MainActor
 final class OfflineLibrary: ObservableObject {
     @Published private(set) var entries: [OfflineEntry] = []
     @Published private(set) var activeDownloadIDs: Set<Int> = []
+    @Published private(set) var connectivity: ConnectivityStatus = .unknown
+    @Published private(set) var loadWarning: String?
     private let fileManager = FileManager.default
     private let downloadSession: URLSession
     private let rootDirectoryOverride: URL?
+    private let monitor = NWPathMonitor()
 
     init(downloadSession: URLSession? = nil, rootDirectory: URL? = nil) {
         self.downloadSession = downloadSession ?? Self.makeDownloadSession()
         rootDirectoryOverride = rootDirectory
         load()
+        // Real usage only (tests inject a session and should not start a path monitor).
+        if downloadSession == nil {
+            monitor.pathUpdateHandler = { [weak self] path in
+                let status: ConnectivityStatus
+                if path.status == .satisfied {
+                    status = path.isExpensive ? .cellular : .wifi
+                } else {
+                    status = .unavailable
+                }
+                Task { @MainActor in self?.connectivity = status }
+            }
+            monitor.start(queue: .global(qos: .utility))
+        }
     }
 
     private static func makeDownloadSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
         configuration.allowsCellularAccess = false
         configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 600
         return URLSession(configuration: configuration)
     }
 
@@ -177,11 +208,61 @@ final class OfflineLibrary: ObservableObject {
         try? persist()
     }
 
+    func remove(ids: Set<Int>) {
+        for entry in entries where ids.contains(entry.id) && !isDownloading(entry.id) {
+            if let directory = try? directory(for: entry.id) { try? fileManager.removeItem(at: directory) }
+        }
+        entries.removeAll { ids.contains($0.id) && !isDownloading($0.id) }
+        try? persist()
+    }
+
+    func storageInfo() -> OfflineStorageInfo {
+        guard let root = try? rootDirectory() else { return OfflineStorageInfo(usedBytes: 0, availableBytes: 0) }
+        let available = (try? root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage ?? 0
+        return OfflineStorageInfo(usedBytes: directoryBytes(root), availableBytes: available)
+    }
+
+    /// Removes URL cache and files not referenced by the persisted offline
+    /// manifest. Registered complete and partial HLS segments remain resumable.
+    @discardableResult
+    func clearCache() -> Int64 {
+        URLCache.shared.removeAllCachedResponses()
+        guard let root = try? rootDirectory() else { return 0 }
+        let before = directoryBytes(root)
+        var referenced = Set<String>()
+        if let manifest = try? manifestURL() { referenced.insert(manifest.standardizedFileURL.path()) }
+        for entry in entries {
+            if let path = entry.localAudioPath { referenced.insert(URL(fileURLWithPath: path).standardizedFileURL.path()) }
+            for path in (entry.videoSegmentPaths ?? []).compactMap(\.self) {
+                referenced.insert(URL(fileURLWithPath: path).standardizedFileURL.path())
+            }
+            for path in (entry.audioSegmentPaths ?? []).compactMap(\.self) {
+                referenced.insert(URL(fileURLWithPath: path).standardizedFileURL.path())
+            }
+        }
+        if let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator {
+                let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+                if isFile, !referenced.contains(url.standardizedFileURL.path()) {
+                    try? fileManager.removeItem(at: url)
+                }
+            }
+        }
+        return max(0, before - directoryBytes(root))
+    }
+
     private func downloadReading(_ material: MaterialDetail) async throws {
         guard let remoteURL = material.audioURL else { throw OfflineLibraryError.noAudio }
         let directory = try directory(for: material.id)
         let destination = directory.appending(path: "reading.mp3")
-        try await download(remoteURL, to: destination)
+        let attributes = try? fileManager.attributesOfItem(atPath: destination.path())
+        let existingSize = (attributes?[.size] as? NSNumber)?.intValue ?? 0
+        try await downloadResumable(remoteURL, to: destination, resumeOffset: existingSize)
         upsert(OfflineEntry(material: material, localAudioPath: destination.path()))
         try persist()
     }
@@ -251,6 +332,34 @@ final class OfflineLibrary: ObservableObject {
         try fileManager.moveItem(at: temporaryURL, to: destination)
     }
 
+    /// Byte-range resumable download for single-file media (reading audio).
+    /// `200` → write whole body (server ignored Range); `206` → append to the
+    /// existing partial file; `416` → already complete.
+    private func downloadResumable(_ remoteURL: URL, to destination: URL, resumeOffset: Int) async throws {
+        var request = URLRequest(url: remoteURL)
+        if resumeOffset > 0 {
+            request.setValue("bytes=\(resumeOffset)-", forHTTPHeaderField: "Range")
+        }
+        let (data, response) = try await downloadSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw OfflineLibraryError.segmentDownloadFailed(nil) }
+        switch http.statusCode {
+        case 200:
+            try data.write(to: destination, options: .atomic)
+        case 206:
+            if !fileManager.fileExists(atPath: destination.path()) {
+                fileManager.createFile(atPath: destination.path(), contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: destination)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.close()
+        case 416:
+            break
+        default:
+            throw OfflineLibraryError.segmentDownloadFailed(http.statusCode)
+        }
+    }
+
     private func publishVideoEntry(
         _ material: MaterialDetail,
         media: VideoOfflineMedia,
@@ -302,10 +411,43 @@ final class OfflineLibrary: ObservableObject {
 
     private func manifestURL() throws -> URL { try rootDirectory().appending(path: "manifest.json") }
 
+    private func directoryBytes(_ root: URL) -> Int64 {
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileAllocatedSizeKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            guard let values = try? url.resourceValues(
+                forKeys: [.isRegularFileKey, .fileAllocatedSizeKey, .fileSizeKey]
+            ), values.isRegularFile == true else { continue }
+            total += Int64(values.fileAllocatedSize ?? values.fileSize ?? 0)
+        }
+        return total
+    }
+
     private func load() {
-        guard let url = try? manifestURL(), let data = try? Data(contentsOf: url),
-              let restored = try? JSONDecoder().decode([OfflineEntry].self, from: data) else { return }
-        entries = restored.filter(\.hasPlayableMedia)
+        guard let url = try? manifestURL(), let data = try? Data(contentsOf: url) else { return }
+        if let restored = try? JSONDecoder().decode([OfflineEntry].self, from: data) {
+            entries = restored.filter(\.hasPlayableMedia)
+            return
+        }
+        // Partially corrupted manifest: salvage every individually-valid entry instead
+        // of silently wiping all downloads.
+        let failable = try? JSONDecoder().decode([FailableCodable<OfflineEntry>].self, from: data)
+        let salvaged = failable?.compactMap(\.wrapped).filter(\.hasPlayableMedia) ?? []
+        entries = salvaged
+        loadWarning = salvaged.isEmpty
+            ? "已下载清单损坏，原有文件已保留。可重新下载。"
+            : "部分已下载记录损坏，已跳过。可重新下载。"
+    }
+
+    private struct FailableCodable<T: Decodable>: Decodable {
+        let wrapped: T?
+        init(from decoder: Decoder) throws {
+            wrapped = try? T(from: decoder)
+        }
     }
 
     private func persist() throws {

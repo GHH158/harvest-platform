@@ -17,6 +17,11 @@ final class AppConfiguration: ObservableObject {
         try KeychainStore.save(endpoint: trimmed)
         endpoint = url
     }
+
+    func clearEndpoint() {
+        KeychainStore.deleteEndpoint()
+        endpoint = nil
+    }
 }
 
 enum ConfigurationError: LocalizedError {

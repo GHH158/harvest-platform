@@ -1,0 +1,139 @@
+/* Harvest admin — warm theme matching the app design language (docs §1.5).
+   Bulma is loaded first from /static/vendor/bulma.min.css; this file only overrides.
+   Palette: warm paper #FAF9F5 · warm ink #3D3929 · terracotta #B86542. */
+
+:root {
+  --bulma-primary-h: 18deg;
+  --bulma-primary-s: 47%;
+  --bulma-primary-l: 49%;
+  --harvest-sidebar-bg: #F3F0E8;
+  --harvest-content-bg: #FAF9F5;
+  --harvest-card-bg: #FFFEFA;
+  --harvest-ink: #3D3929;
+  --harvest-muted: #8A7F6E;
+  --harvest-line: #E6E0D4;
+  --harvest-terracotta: #B86542;
+}
+
+html, body { height: 100%; }
+body { background: var(--harvest-content-bg); color: var(--harvest-ink); }
+
+/* Layout: light warm sidebar + content */
+.layout { display: flex; min-height: 100vh; }
+
+.sidebar {
+  position: sticky; top: 0;
+  width: 240px; height: 100vh;
+  flex-shrink: 0;
+  background: var(--harvest-sidebar-bg);
+  border-right: 1px solid var(--harvest-line);
+  padding: 26px 18px;
+  display: flex; flex-direction: column; gap: 28px;
+}
+.brand { display: flex; align-items: center; gap: 11px; padding: 0 6px; }
+.brand-mark {
+  width: 34px; height: 34px; border-radius: 9px;
+  background: linear-gradient(135deg, var(--bulma-primary), #D98E6A);
+  color: #FFFFFF;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 1.1rem;
+  box-shadow: 0 2px 6px rgba(184, 101, 66, 0.35);
+}
+.brand-name {
+  font-size: 1.2rem; font-weight: 700;
+  color: var(--harvest-ink); letter-spacing: -0.01em;
+}
+.sidebar .menu { flex: 1; }
+.sidebar .menu-label {
+  color: #A08F77;
+  font-size: 0.72rem; font-weight: 600;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  margin: 1.6rem 0 0.55rem;
+  padding: 0 0.6rem;
+}
+.sidebar .menu > .menu-label:first-child { margin-top: 0; }
+.sidebar .menu-list { margin: 0 0 0.5rem; }
+.sidebar .menu-list li + li { margin-top: 4px; }
+.sidebar .menu-list a {
+  display: flex; align-items: center; gap: 11px;
+  color: #6F6353;
+  border-radius: 8px;
+  padding: 0.68rem 0.8rem;
+  font-size: 0.95rem;
+  transition: background 120ms, color 120ms;
+}
+.sidebar .menu-list a svg { opacity: 0.85; flex-shrink: 0; }
+.sidebar .menu-list a:hover { color: var(--harvest-ink); background: rgba(184, 101, 66, 0.08); }
+.sidebar .menu-list a.is-active {
+  color: #A65636;
+  font-weight: 600;
+  background: rgba(184, 101, 66, 0.10);
+}
+.sidebar .menu-list a.is-active svg { opacity: 1; }
+
+.content { flex: 1; padding: 28px 32px; min-width: 0; }
+
+/* Page header — serif title for an editorial, content-first feel */
+.page-head { margin-bottom: 22px; }
+.page-head .title {
+  font-family: "New York", Georgia, "Times New Roman", serif;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin-bottom: 0.35rem;
+}
+.page-head .subtitle { margin-top: 0.35rem; color: var(--harvest-muted); }
+
+/* Card containers for forms / lists */
+.card {
+  background: var(--harvest-card-bg);
+  border: 1px solid var(--harvest-line);
+  border-radius: 10px;
+  padding: 22px;
+  margin-bottom: 18px;
+  box-shadow: 0 1px 2px rgba(61, 57, 41, 0.04);
+}
+
+/* Filter bar (list pages) */
+.filter-bar { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 18px; }
+.filter-bar .field { flex: 0 1 220px; margin-bottom: 0; }
+.filter-bar .field .label { margin-bottom: 0.35rem; }
+
+/* Tables — warm header tint and hairline rows */
+.table-wrap { overflow-x: auto; }
+.table th { background: #F7F4EC; }
+.table th, .table td { border-color: #EAE4D7; }
+.cell-main { font-weight: 600; }
+.cell-muted { color: var(--harvest-muted); font-size: 0.9rem; }
+.cell-error { color: #B91C1C; font-size: 0.9rem; max-width: 320px; word-break: break-all; }
+
+/* Secret badge next to a label */
+.secret-badge { margin-left: 6px; vertical-align: 1px; }
+
+/* Job status poll box (ingest) */
+.job-status { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.job-status .status-message { margin: 0; color: var(--harvest-muted); }
+.job-status[data-status="ready"] { background: #ECFDF5; border: 1px solid #A7F3D0; border-radius: 10px; padding: 14px 18px; }
+.job-status[data-status="ready"] .status-message { color: #047857; }
+.job-status[data-status="failed"] { background: #FEF2F2; border: 1px solid #FECACA; border-radius: 10px; padding: 14px 18px; }
+.job-status[data-status="failed"] .status-message { color: #B91C1C; }
+
+/* Form fields inside the settings cards: tighten Bulma defaults slightly */
+.card .field { margin-bottom: 1rem; }
+.card .columns { margin-bottom: 0; }
+.card .columns .field { margin-bottom: 1rem; }
+
+/* Responsive: collapse sidebar to a top bar */
+@media (max-width: 760px) {
+  .layout { flex-direction: column; }
+  .sidebar {
+    position: static; width: 100%; height: auto;
+    border-right: none; border-bottom: 1px solid var(--harvest-line);
+    flex-direction: row; align-items: center; flex-wrap: wrap;
+    gap: 10px 16px; padding: 12px 16px;
+  }
+  .sidebar .menu { flex: 1; min-width: 0; }
+  .sidebar .menu-label { display: none; }
+  .sidebar .menu-list { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: 0; }
+  .sidebar .menu-list li + li { margin-top: 0; }
+  .content { padding: 20px 16px; }
+}

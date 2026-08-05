@@ -30,6 +30,9 @@ enum DesignTokens {
             : UIColor(red: 0.902, green: 0.878, blue: 0.831, alpha: 1)
     })
 
+    static let cardShadow = Color.black.opacity(0.05)
+    static let heroSize: CGFloat = 40
+
     static let pageInset: CGFloat = 24
     static let cardRadius: CGFloat = 18
     static let readingSize: CGFloat = 22

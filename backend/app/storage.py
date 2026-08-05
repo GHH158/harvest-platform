@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -9,26 +10,38 @@ from oss2.models import BucketLifecycle, LifecycleExpiration, LifecycleRule
 
 from .config import Settings
 
+MULTIPART_THRESHOLD_BYTES = 8 * 1024 * 1024
+MULTIPART_PART_SIZE_BYTES = 4 * 1024 * 1024
+
 
 class ObjectStorage:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._bucket_instance: oss2.Bucket | None = None
 
-    def _bucket(self) -> oss2.Bucket:
-        if self._bucket_instance is not None:
-            return self._bucket_instance
+    def validate_configuration(self) -> None:
         required = {
             "OSS_ENDPOINT": self.settings.oss_endpoint,
             "OSS_BUCKET": self.settings.oss_bucket,
             "OSS_ACCESS_KEY_ID": self.settings.oss_access_key_id,
             "OSS_ACCESS_KEY_SECRET": self.settings.oss_access_key_secret,
+            "OSS_PUBLIC_BASE_URL": self.settings.oss_public_base_url,
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise RuntimeError(f"OSS 配置不完整: {', '.join(missing)}")
+
+    def _bucket(self) -> oss2.Bucket:
+        if self._bucket_instance is not None:
+            return self._bucket_instance
+        self.validate_configuration()
         auth = oss2.Auth(self.settings.oss_access_key_id, self.settings.oss_access_key_secret)
-        self._bucket_instance = oss2.Bucket(auth, self.settings.oss_endpoint, self.settings.oss_bucket)
+        self._bucket_instance = oss2.Bucket(
+            auth,
+            self.settings.oss_endpoint,
+            self.settings.oss_bucket,
+            connect_timeout=self.settings.oss_upload_timeout_seconds,
+        )
         return self._bucket_instance
 
     def upload_file(self, local_path: Path, oss_key: str) -> str:
@@ -39,29 +52,87 @@ class ObjectStorage:
             ".mp3": "audio/mpeg",
             ".mp4": "video/mp4",
         }.get(local_path.suffix.lower()) or mimetypes.guess_type(local_path.name)[0] or "application/octet-stream"
-        result = self._bucket().put_object_from_file(
+        headers = {"Content-Type": content_type}
+        last_error: Exception | None = None
+        for attempt in range(1, self.settings.oss_upload_max_attempts + 1):
+            try:
+                result = self._upload_once(local_path, oss_key, headers)
+                if result.status != 200:
+                    raise RuntimeError(f"OSS 上传失败，HTTP {result.status}")
+                break
+            except Exception as error:
+                if not self._is_retryable(error) or attempt >= self.settings.oss_upload_max_attempts:
+                    raise
+                last_error = error
+                self._bucket_instance = None
+                delay = min(2 ** (attempt - 1), 8)
+                print(
+                    f"OSS 上传暂时失败，{delay} 秒后重试 {attempt + 1}/"
+                    f"{self.settings.oss_upload_max_attempts}: {oss_key}: {error}",
+                    flush=True,
+                )
+                time.sleep(delay)
+        else:  # pragma: no cover - loop either succeeds or raises.
+            assert last_error is not None
+            raise last_error
+        return self.public_url(oss_key)
+
+    def _upload_once(self, local_path: Path, oss_key: str, headers: dict[str, str]):
+        bucket = self._bucket()
+        if local_path.stat().st_size < MULTIPART_THRESHOLD_BYTES:
+            return bucket.put_object_from_file(oss_key, str(local_path), headers=headers)
+        checkpoint_root = self.settings.data_dir / "oss-upload-checkpoints"
+        checkpoint_root.mkdir(parents=True, exist_ok=True)
+        return oss2.resumable_upload(
+            bucket,
             oss_key,
             str(local_path),
-            headers={"Content-Type": content_type},
+            store=oss2.ResumableStore(root=str(checkpoint_root)),
+            headers=headers,
+            multipart_threshold=MULTIPART_THRESHOLD_BYTES,
+            part_size=MULTIPART_PART_SIZE_BYTES,
+            num_threads=1,
         )
-        if result.status != 200:
-            raise RuntimeError(f"OSS 上传失败，HTTP {result.status}")
-        return self.public_url(oss_key)
+
+    @staticmethod
+    def _is_retryable(error: Exception) -> bool:
+        if isinstance(error, oss2.exceptions.RequestError):
+            return True
+        if isinstance(error, oss2.exceptions.ServerError):
+            return int(error.status) in {408, 429, 500, 502, 503, 504}
+        return False
 
     def upload_audio(self, local_path: Path, oss_key: str) -> str:
         return self.upload_file(local_path, oss_key)
 
     def upload_tree(self, directory: Path, oss_prefix: str) -> list[str]:
-        files = sorted(path for path in directory.rglob("*") if path.is_file())
+        files = sorted(
+            (path for path in directory.rglob("*") if path.is_file()),
+            key=lambda path: (path.suffix.lower() == ".m3u8", path.as_posix()),
+        )
         if not files:
             raise RuntimeError(f"没有可上传的 HLS 文件: {directory}")
+        remote_sizes = self._remote_sizes(f"{oss_prefix.rstrip('/')}/")
         keys: list[str] = []
         for path in files:
             relative = path.relative_to(directory).as_posix()
             key = f"{oss_prefix.rstrip('/')}/{relative}"
-            self.upload_file(path, key)
+            if remote_sizes.get(key) != path.stat().st_size:
+                self.upload_file(path, key)
             keys.append(key)
         return keys
+
+    def _remote_sizes(self, prefix: str) -> dict[str, int]:
+        try:
+            return {
+                item.key: int(item.size)
+                for item in oss2.ObjectIterator(self._bucket(), prefix=prefix)
+            }
+        except (oss2.exceptions.RequestError, oss2.exceptions.ServerError):
+            # Listing is an optimization. Per-object retries below remain the
+            # source of truth if the network is too unstable for this preflight.
+            self._bucket_instance = None
+            return {}
 
     def delete(self, oss_key: str) -> None:
         self._bucket().delete_object(oss_key)
@@ -97,5 +168,6 @@ class ObjectStorage:
         ]
 
     def public_url(self, oss_key: str) -> str:
-        assert self.settings.oss_public_base_url
+        self.validate_configuration()
+        assert self.settings.oss_public_base_url  # Narrowed by validate_configuration.
         return f"{self.settings.oss_public_base_url.rstrip('/')}/{quote(oss_key)}"
