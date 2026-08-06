@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1151,3 +1152,135 @@ class Repository:
                 ),
                 {"material_id": material_id, "duration_ms": duration_ms},
             )
+
+    # ── vocabulary ──────────────────────────────────────────────
+
+    @staticmethod
+    def _vocabulary_row(row: Any) -> dict[str, Any]:
+        data = dict(row)
+        for key in ("created_at", "next_review_at"):
+            value = data.get(key)
+            if hasattr(value, "isoformat"):
+                data[key] = value.isoformat()
+        return data
+
+    def add_vocabulary(
+        self,
+        *,
+        word: str,
+        reading: str | None,
+        meaning: str,
+        part_of_speech: str | None,
+        context: str | None,
+        example_ja: str | None = None,
+        example_zh: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Save a word, or fold the save into the existing entry for the same word.
+
+        Re-saving a word already in the table only fills in fields that are still
+        blank (an entry stored before example sentences existed can pick one up)
+        and never touches review progress — looking a word up again should not
+        demote a word already worked up to a higher Leitner box.
+
+        Returns (row, already_saved).
+        """
+        params = {
+            "word": word.strip(),
+            "reading": reading,
+            "meaning": meaning.strip(),
+            "part_of_speech": part_of_speech,
+            "context": context,
+            "example_ja": example_ja,
+            "example_zh": example_zh,
+        }
+        with self.engine.begin() as connection:
+            existing = connection.execute(
+                text("SELECT id FROM vocabulary WHERE word = :word ORDER BY id LIMIT 1"),
+                {"word": params["word"]},
+            ).mappings().one_or_none()
+            if existing is not None:
+                row = connection.execute(
+                    text(
+                        """UPDATE vocabulary SET
+                             reading        = COALESCE(reading, :reading),
+                             part_of_speech = COALESCE(part_of_speech, :part_of_speech),
+                             context        = COALESCE(context, :context),
+                             example_ja     = COALESCE(example_ja, :example_ja),
+                             example_zh     = COALESCE(example_zh, :example_zh)
+                           WHERE id = :id
+                           RETURNING *"""
+                    ),
+                    {**params, "id": existing["id"]},
+                ).mappings().one()
+                return self._vocabulary_row(row), True
+            row = connection.execute(
+                text(
+                    """INSERT INTO vocabulary
+                        (word, reading, meaning, part_of_speech, context, example_ja, example_zh)
+                     VALUES (:word, :reading, :meaning, :part_of_speech, :context, :example_ja, :example_zh)
+                     RETURNING *"""
+                ),
+                params,
+            ).mappings().one()
+        return self._vocabulary_row(row), False
+
+    def list_vocabulary(self, *, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT * FROM vocabulary ORDER BY created_at DESC, id DESC "
+                    "LIMIT :limit OFFSET :offset"
+                ),
+                {"limit": limit, "offset": offset},
+            ).mappings().all()
+        return [self._vocabulary_row(row) for row in rows]
+
+    def delete_vocabulary(self, vocabulary_id: int) -> bool:
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                text("DELETE FROM vocabulary WHERE id = :id"), {"id": vocabulary_id}
+            )
+        return result.rowcount > 0
+
+    # Leitner-style spaced repetition: correct answers push the word into a
+    # higher box (longer gap before it's due again); a miss drops it back to
+    # box 1 so it resurfaces soon.
+    _REVIEW_INTERVALS: dict[int, timedelta] = {
+        1: timedelta(minutes=10),
+        2: timedelta(days=1),
+        3: timedelta(days=3),
+        4: timedelta(days=7),
+        5: timedelta(days=14),
+        6: timedelta(days=30),
+    }
+
+    def list_due_vocabulary(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT * FROM vocabulary WHERE next_review_at <= now()
+                     ORDER BY next_review_at ASC, id ASC LIMIT :limit"""
+                ),
+                {"limit": limit},
+            ).mappings().all()
+        return [self._vocabulary_row(row) for row in rows]
+
+    def record_vocabulary_review(self, vocabulary_id: int, *, correct: bool) -> dict[str, Any] | None:
+        with self.engine.begin() as connection:
+            current = connection.execute(
+                text("SELECT box FROM vocabulary WHERE id = :id"), {"id": vocabulary_id}
+            ).mappings().one_or_none()
+            if current is None:
+                return None
+            new_box = min(int(current["box"]) + 1, 6) if correct else 1
+            next_review_at = datetime.now(UTC) + self._REVIEW_INTERVALS[new_box]
+            row = connection.execute(
+                text(
+                    """UPDATE vocabulary
+                       SET box = :box, review_count = review_count + 1, next_review_at = :next_review_at
+                       WHERE id = :id
+                       RETURNING *"""
+                ),
+                {"box": new_box, "next_review_at": next_review_at, "id": vocabulary_id},
+            ).mappings().one()
+        return self._vocabulary_row(row)

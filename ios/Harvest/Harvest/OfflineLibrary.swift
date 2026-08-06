@@ -155,9 +155,10 @@ final class OfflineLibrary: ObservableObject {
     private static func makeDownloadSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
         configuration.allowsCellularAccess = false
-        configuration.waitsForConnectivity = true
-        configuration.timeoutIntervalForRequest = 60
-        configuration.timeoutIntervalForResource = 600
+        // Never block app startup waiting for Wi-Fi/Tailscale to appear.
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 300
         return URLSession(configuration: configuration)
     }
 
@@ -185,7 +186,9 @@ final class OfflineLibrary: ObservableObject {
     }
 
     func resumeIncompleteDownloads() {
-        for entry in entries where entry.hasIncompleteRequestedVideoMedia {
+        // Cap concurrent resume work so a reinstall/cold start does not stampede the network.
+        let pending = entries.filter(\.hasIncompleteRequestedVideoMedia).prefix(2)
+        for entry in pending {
             Task { try? await self.resume(entry) }
         }
     }

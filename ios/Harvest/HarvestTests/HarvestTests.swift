@@ -174,6 +174,7 @@ struct HarvestTests {
            - 第一项
            2. 第二项
            > 请留意语气。
+           > 第二行引用。
         ```ja
         昨日、映画を見ました。
         ```
@@ -184,12 +185,28 @@ struct HarvestTests {
             .paragraph("**重点**：这里使用过去时。"),
             .unorderedItem("第一项"),
             .orderedItem(number: "2", text: "第二项"),
-            .quote("请留意语气。"),
+            .quote("请留意语气。\n第二行引用。"),
             .code("昨日、映画を見ました。"),
         ])
         #expect(String(inlineMarkdown("**重点**、`例句`与[说明](https://example.com)").characters) == "重点、例句与说明")
+        #expect(String(styledInlineMarkdown("**重点** 和 `例句`").characters) == "重点 和 例句")
         #expect(containsInlineMarkdownSyntax("「皆さん」表示 **大家**"))
         #expect(!containsInlineMarkdownSyntax("「皆さん」表示大家"))
+        #expect(isMostlyJapanese("参加者が集まらず、講演会が流会になった。"))
+        #expect(!isMostlyJapanese("这里说明为什么使用「は」而不是「が」。"))
+        // Kanji ratio alone cannot separate the two languages: a Chinese explanation is
+        // ~100% kanji, so it used to be styled as a Japanese example. Kana is the real
+        // signal. These are lines taken from actual companion replies.
+        #expect(isMostlyJapanese("近所にコンビニがある。（附近有便利店。）"))
+        #expect(isMostlyJapanese("参加者が集まらず、講演会が流会になった。（因参加者未凑齐，讲座取消了。）"))
+        #expect(!isMostlyJapanese("「近所」侧重日常生活圈内的邻近感，带有自己熟悉、经常经过的语感。"))
+        #expect(!isMostlyJapanese("词性与接续：名词，常以「近所に」「近所の＋名词」形式出现。"))
+        // Known limit: a Chinese sentence that quotes a whole Japanese sentence lands in
+        // the same kana range as a Japanese example followed by a Chinese translation
+        // (measured on real replies: examples reach down to 0.30, explanations up to
+        // 0.34). Those stay ambiguous on purpose rather than breaking real examples.
+        #expect(isListBlock(.unorderedItem("x")))
+        #expect(!isListBlock(.paragraph("x")))
     }
 
     @Test func voiceTeacherUsesWebSocketThroughTheMacEndpoint() throws {

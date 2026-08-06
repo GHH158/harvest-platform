@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shlex
@@ -932,6 +933,171 @@ def furigana(payload: FuriganaRequest) -> dict[str, object]:
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     return {"segments": segments}
+
+
+# ── dictionary & vocabulary ────────────────────────────────────
+
+class DictionaryLookupRequest(BaseModel):
+    word: str = Field(min_length=1, max_length=100)
+    context: str | None = None
+
+
+_DICTIONARY_SYSTEM = (
+    "你是一个日语词典助手。用户给你一个日语词（可能来自剪贴板复制），"
+    "你返回读音、释义、词性、便于记忆的提示，以及例句。\n\n"
+    "规则：\n"
+    "- reading：该词的平假名读音\n"
+    "- meaning：简洁中文核心释义；若词有明显多义，只给最常用的 1–2 个，不要堆砌\n"
+    "- part_of_speech：用中文标注（他動詞／自動詞／い形容詞／な形容詞／名詞／副詞／助詞／接続詞 等）\n"
+    "- memory_hint：一句简短中文记忆钩子（语感、常见搭配、易混点或具体场景联想），"
+    "要具体可记，不要空泛鼓励，不要复述释义原文\n"
+    "- examples：2 或 3 个自然、短小的当代日语例句，每句必须包含被查的词本身；"
+    "zh 为对应简洁中文翻译；不要罗马字，不要解释语法长文\n"
+    "- 不确定时在 meaning 里写「待确认：…」，不要编造冷僻义项\n\n"
+    "只返回一个 JSON 对象，不要任何其他文字：\n"
+    '{"reading":"平假名","meaning":"中文释义","part_of_speech":"词性",'
+    '"memory_hint":"记忆提示","examples":[{"ja":"日语例句","zh":"中文翻译"}]}'
+)
+
+
+def _dictionary_lookup(*, word: str, context: str | None) -> dict[str, object]:
+    cleaned = word.strip()
+    if not cleaned:
+        raise HTTPException(status_code=422, detail="请提供要查询的词。")
+    user_prompt = f"请解释并给出记忆提示与例句：{cleaned}"
+    if context and context.strip():
+        user_prompt += f"\n\n（可选参考上下文，不必复述）：{context.strip()}"
+    messages = [
+        {"role": "system", "content": _DICTIONARY_SYSTEM},
+        {"role": "user", "content": user_prompt},
+    ]
+    try:
+        raw = llm_service().reply(messages, enable_thinking=False, json_mode=True, max_tokens=900)
+    except Exception as error:
+        raise _llm_error(error) from error
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=503, detail="词典服务返回格式异常，请重试。") from error
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=503, detail="词典服务返回格式异常，请重试。")
+
+    normalized: dict[str, object] = {}
+    for key in ("reading", "meaning", "part_of_speech", "memory_hint"):
+        value = result.get(key)
+        if value is None:
+            normalized[key] = None
+        else:
+            text = str(value).strip()
+            normalized[key] = text or None
+
+    examples: list[dict[str, str]] = []
+    raw_examples = result.get("examples")
+    if isinstance(raw_examples, list):
+        for item in raw_examples:
+            if not isinstance(item, dict):
+                continue
+            ja = str(item.get("ja") or "").strip()
+            zh = str(item.get("zh") or "").strip()
+            if not ja or not zh:
+                continue
+            examples.append({"ja": ja, "zh": zh})
+            if len(examples) >= 3:
+                break
+    normalized["examples"] = examples
+    return normalized
+
+
+class DictionaryLookupResponse(BaseModel):
+    word: str
+    reading: str | None = None
+    meaning: str | None = None
+    part_of_speech: str | None = None
+    memory_hint: str | None = None
+    examples: list[dict[str, str]] = []
+
+
+@app.post("/dictionary/lookup")
+def dictionary_lookup(payload: DictionaryLookupRequest) -> dict:
+    result = _dictionary_lookup(word=payload.word, context=payload.context)
+    return {
+        "word": payload.word.strip(),
+        "reading": result.get("reading"),
+        "meaning": result.get("meaning"),
+        "part_of_speech": result.get("part_of_speech"),
+        "memory_hint": result.get("memory_hint"),
+        "examples": result.get("examples") or [],
+    }
+
+
+class VocabularyCreate(BaseModel):
+    word: str = Field(min_length=1, max_length=100)
+    reading: str | None = None
+    meaning: str | None = None
+    part_of_speech: str | None = None
+    context: str | None = None
+    example_ja: str | None = None
+    example_zh: str | None = None
+
+    @field_validator("example_ja", "example_zh")
+    @classmethod
+    def _example_requires_pair(cls, value: str | None) -> str | None:
+        stripped = value.strip() if value else None
+        return stripped or None
+
+
+@app.post("/vocabulary", status_code=status.HTTP_201_CREATED)
+def add_vocabulary(payload: VocabularyCreate) -> dict:
+    meaning = (payload.meaning or "").strip()
+    if not meaning:
+        raise HTTPException(status_code=422, detail="释义不能为空。")
+    # A cloze review needs both sides of the example; drop a lone half.
+    example_ja = payload.example_ja
+    example_zh = payload.example_zh
+    if not (example_ja and example_zh):
+        example_ja = None
+        example_zh = None
+    row, already_saved = repository().add_vocabulary(
+        word=payload.word.strip(),
+        reading=(payload.reading or None),
+        meaning=meaning,
+        part_of_speech=(payload.part_of_speech or None),
+        context=payload.context,
+        example_ja=example_ja,
+        example_zh=example_zh,
+    )
+    # Lets the client say "已在生词表" instead of claiming a fresh save.
+    return {**row, "already_saved": already_saved}
+
+
+@app.get("/vocabulary")
+def list_vocabulary() -> list[dict]:
+    return repository().list_vocabulary()
+
+
+@app.delete("/vocabulary/{vocabulary_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_vocabulary(vocabulary_id: int) -> Response:
+    deleted = repository().delete_vocabulary(vocabulary_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="生词不存在。")
+
+
+@app.get("/vocabulary/review")
+def review_vocabulary(limit: int = Query(default=20, ge=1, le=50)) -> list[dict]:
+    return repository().list_due_vocabulary(limit=limit)
+
+
+class VocabularyReviewResult(BaseModel):
+    correct: bool
+
+
+@app.post("/vocabulary/{vocabulary_id}/review")
+def submit_vocabulary_review(vocabulary_id: int, payload: VocabularyReviewResult) -> dict:
+    updated = repository().record_vocabulary_review(vocabulary_id, correct=payload.correct)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="生词不存在。")
+    return updated
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/shadowing", status_code=status.HTTP_202_ACCEPTED)

@@ -107,8 +107,9 @@ struct MaterialListView: View {
         } message: {
             Text(errorMessage ?? "未知错误")
         }
-        .task(id: configuration.endpoint) { await load() }
-        .task {
+        .task(id: configuration.endpoint) {
+            await load()
+            // Poll only after the first paint finishes, and only while jobs are active.
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(4))
                 guard materials.contains(where: { $0.status == "pending" || $0.status == "processing" }) else {
@@ -117,7 +118,6 @@ struct MaterialListView: View {
                 await load(showingProgress: false)
             }
         }
-        .onAppear { Task { await load(showingProgress: false) } }
     }
 
     private var libraryContent: some View {

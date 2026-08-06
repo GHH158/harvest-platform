@@ -64,7 +64,8 @@ final class ChatStore: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var isLoading = false
     @Published private(set) var isSending = false
-    @Published private(set) var furiganaCache: [Int: [FuriganaSegment]] = [:]
+    /// Text-keyed ruby cache shared with Markdown rendering (same as companion).
+    @Published private(set) var furiganaCache: [String: [FuriganaSegment]] = [:]
     private var topicDeck = ChatTopicDeck()
 
     var transcriptRows: [ChatTranscriptRow] {
@@ -158,14 +159,14 @@ final class ChatStore: ObservableObject {
         corrections.removeAll { $0.id == id }
     }
 
-    func ensureFurigana(for message: ConversationMessage, using client: APIClient) async {
-        guard message.role == "assistant", furiganaCache[message.id] == nil else { return }
+    func ensureFurigana(for text: String, using client: APIClient) async {
+        guard !text.isEmpty, furiganaCache[text] == nil else { return }
         do {
-            let segments = try await client.furigana(text: message.content)
+            let segments = try await client.furigana(text: text)
             // @Published does not fire on in-place subscript mutation; reassign the
             // whole dictionary so the transcript re-renders with ruby.
             var updated = furiganaCache
-            updated[message.id] = segments
+            updated[text] = segments
             furiganaCache = updated
         } catch {
             // Keep the message readable without ruby if the fetch fails.
@@ -174,7 +175,17 @@ final class ChatStore: ObservableObject {
 
     func prefetchFurigana(using client: APIClient) async {
         for message in messages where message.role == "assistant" {
-            await ensureFurigana(for: message, using: client)
+            for block in markdownBlocks(from: message.content) {
+                switch block {
+                case .paragraph(let text), .heading(_, let text), .unorderedItem(let text),
+                     .orderedItem(_, let text), .quote(let text):
+                    for run in furiganaRuns(in: text) where run.annotate {
+                        await ensureFurigana(for: run.text, using: client)
+                    }
+                case .code, .divider, .spacer:
+                    break
+                }
+            }
         }
     }
 
@@ -204,7 +215,12 @@ struct ChatView: View {
     @StateObject private var store = ChatStore()
     @State private var showingHistory = false
     @State private var showingCorrections = false
+    @State private var showManualLookup = false
+    @State private var lookupWord: LookupWord?
+    @FocusState private var isInputFocused: Bool
     @AppStorage("showFurigana") private var showFurigana = false
+    /// Avoid loading chat topics until the user opens this tab (TabView would otherwise fire on cold start).
+    var isActive: Bool = true
 
     private var client: APIClient? {
         configuration.endpoint.map { APIClient(baseURL: $0) }
@@ -230,9 +246,15 @@ struct ChatView: View {
         .background(DesignTokens.canvas.ignoresSafeArea())
         .navigationTitle(store.activeSession?.topic ?? "聊天老师")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { secondaryActions }
-        .task(id: configuration.endpoint) {
-            guard let client else { return }
+        .toolbar {
+            secondaryActions
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("完成") { isInputFocused = false }
+            }
+        }
+        .task(id: "\(configuration.endpoint?.absoluteString ?? "")-\(isActive)") {
+            guard isActive, let client else { return }
             await store.loadTopics(using: client)
         }
         .sheet(isPresented: $showingHistory) {
@@ -241,6 +263,7 @@ struct ChatView: View {
                     ChatHistoryView(
                         client: client,
                         onSelect: { sessionID in
+                            isInputFocused = false
                             Task { await store.openSession(id: sessionID, using: client) }
                         },
                         onDelete: { sessionID in
@@ -259,6 +282,32 @@ struct ChatView: View {
                 }
             }
         }
+        .sheet(isPresented: $showManualLookup) {
+            WordPickSheet { word in
+                showManualLookup = false
+                DispatchQueue.main.async {
+                    lookupWord = LookupWord(word: word, context: nil)
+                }
+            }
+        }
+        .sheet(item: $lookupWord) { item in
+            WordLookupSheet(word: item.word, context: item.context)
+                .environmentObject(configuration)
+        }
+        .onChange(of: lookupWord?.id) { _, _ in
+            if lookupWord != nil { isInputFocused = false }
+        }
+    }
+
+    /// Copy a word from the message, then tap 查词. Uses clipboard first.
+    private func lookupFromClipboard() {
+        isInputFocused = false
+        // Prefer the current selection range if the system put it on the pasteboard.
+        if let query = clipboardLookupQuery() {
+            lookupWord = LookupWord(word: query, context: nil)
+            return
+        }
+        showManualLookup = true
     }
 
     private var topicHome: some View {
@@ -284,6 +333,7 @@ struct ChatView: View {
                         ForEach(store.displayedTopics) { topic in
                             Button {
                                 guard let client else { return }
+                                isInputFocused = false
                                 Task { await store.start(topic: topic, using: client) }
                             } label: {
                                 TopicCard(topic: topic)
@@ -304,7 +354,9 @@ struct ChatView: View {
             }
             .padding(.horizontal, DesignTokens.pageInset)
             .padding(.bottom, 30)
+            .frame(maxWidth: .infinity)
         }
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private var conversation: some View {
@@ -325,7 +377,10 @@ struct ChatView: View {
                     }
                 }
                 .padding(DesignTokens.pageInset)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Do not add a full-area onTapGesture here — it blocks text selection/copy.
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: store.messages.count) {
                 guard let last = store.transcriptRows.last else { return }
                 withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
@@ -346,7 +401,11 @@ struct ChatView: View {
             MessageBubble(
                 message: message,
                 showFurigana: showFurigana,
-                furigana: store.furiganaCache[message.id]
+                furiganaCache: store.furiganaCache,
+                onWordTap: { word in
+                    isInputFocused = false
+                    lookupWord = LookupWord(word: word, context: message.content)
+                }
             )
         case .correction(let correction):
             CorrectionCard(correction: correction, showsTopic: false)
@@ -361,6 +420,7 @@ struct ChatView: View {
                 axis: .vertical
             )
             .lineLimit(1...5)
+            .focused($isInputFocused)
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
             .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 15))
@@ -392,6 +452,15 @@ struct ChatView: View {
     @ToolbarContentBuilder
     private var secondaryActions: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                lookupFromClipboard()
+            } label: {
+                Image(systemName: "character.book.closed")
+                    .foregroundStyle(DesignTokens.ink)
+            }
+            .accessibilityLabel("查词")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button {
                     showFurigana.toggle()
@@ -400,6 +469,11 @@ struct ChatView: View {
                     }
                 } label: {
                     Label("显示假名", systemImage: showFurigana ? "checkmark.circle.fill" : "circle")
+                }
+                Button {
+                    lookupFromClipboard()
+                } label: {
+                    Label("查剪贴板中的词", systemImage: "doc.on.clipboard")
                 }
                 if store.activeSession != nil {
                     Button {
@@ -423,6 +497,7 @@ struct ChatView: View {
 
     private func submit() {
         guard let client else { return }
+        isInputFocused = false
         Task {
             if store.activeSession == nil {
                 await store.startCustomTopic(using: client)
@@ -464,34 +539,44 @@ private struct TopicCard: View {
 private struct MessageBubble: View {
     let message: ConversationMessage
     var showFurigana = false
-    var furigana: [FuriganaSegment]?
+    var furiganaCache: [String: [FuriganaSegment]] = [:]
+    var onWordTap: ((String) -> Void)?
+
+    private var isUser: Bool { message.role == "user" }
 
     var body: some View {
-        Group {
-            if showFurigana, message.role == "assistant", let furigana, !furigana.isEmpty {
-                FuriganaText(
-                    segments: furigana,
-                    fontSize: 17,
-                    textColor: DesignTokens.ink
-                )
-            } else {
-                Text(message.content)
-                    .font(.body)
-                    .foregroundStyle(message.role == "user" ? Color.white : DesignTokens.ink)
-                    .lineSpacing(4)
-            }
-        }
+        // Tap a word to look it up directly; long-press still selects/copies for phrases.
+        SelectableText(
+            text: message.content,
+            font: .preferredFont(forTextStyle: .body),
+            textColor: isUser ? .white : UIColor(DesignTokens.ink),
+            lineSpacing: 5,
+            onWordTap: onWordTap
+        )
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .background(
-            message.role == "user" ? DesignTokens.accent : DesignTokens.surface,
+            isUser ? DesignTokens.accent : DesignTokens.surface,
             in: RoundedRectangle(cornerRadius: 16)
         )
+        .overlay {
+            if !isUser {
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(DesignTokens.separator, lineWidth: 0.5)
+            }
+        }
         .frame(
-            maxWidth: UIScreen.main.bounds.width * 0.82,
-            alignment: message.role == "user" ? .trailing : .leading
+            maxWidth: UIScreen.main.bounds.width * (isUser ? 0.78 : 0.88),
+            alignment: isUser ? .trailing : .leading
         )
-        .frame(maxWidth: .infinity, alignment: message.role == "user" ? .trailing : .leading)
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+        .contextMenu {
+            Button {
+                UIPasteboard.general.string = message.content
+            } label: {
+                Label("复制全文", systemImage: "doc.on.doc")
+            }
+        }
     }
 }
 

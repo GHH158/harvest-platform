@@ -303,3 +303,86 @@ struct FuriganaSegment: Codable, Hashable {
 struct FuriganaResponse: Codable {
     let segments: [FuriganaSegment]
 }
+
+// MARK: - Dictionary & Vocabulary
+
+struct DictionaryExample: Codable, Hashable {
+    let ja: String
+    let zh: String
+}
+
+struct DictionaryLookupResult: Codable {
+    let word: String
+    let reading: String?
+    let meaning: String?
+    let partOfSpeech: String?
+    let memoryHint: String?
+    let examples: [DictionaryExample]
+
+    enum CodingKeys: String, CodingKey {
+        case word, reading, meaning, examples
+        case partOfSpeech = "part_of_speech"
+        case memoryHint = "memory_hint"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        word = try container.decode(String.self, forKey: .word)
+        reading = try container.decodeIfPresent(String.self, forKey: .reading)
+        meaning = try container.decodeIfPresent(String.self, forKey: .meaning)
+        partOfSpeech = try container.decodeIfPresent(String.self, forKey: .partOfSpeech)
+        memoryHint = try container.decodeIfPresent(String.self, forKey: .memoryHint)
+        examples = try container.decodeIfPresent([DictionaryExample].self, forKey: .examples) ?? []
+    }
+}
+
+struct VocabularyWord: Codable, Identifiable {
+    let id: Int
+    let word: String
+    let reading: String?
+    let meaning: String
+    let partOfSpeech: String?
+    let context: String?
+    let exampleJA: String?
+    let exampleZH: String?
+    let box: Int
+    let reviewCount: Int
+    let nextReviewAt: String
+    let createdAt: String
+    /// Only present on the save response: true when the word was already in the table.
+    let alreadySaved: Bool
+
+    /// A word only supports cloze review once it has a matched example pair.
+    var hasExample: Bool { exampleJA != nil && exampleZH != nil }
+
+    enum CodingKeys: String, CodingKey {
+        case id, word, reading, meaning, context, box
+        case partOfSpeech = "part_of_speech"
+        case exampleJA = "example_ja"
+        case exampleZH = "example_zh"
+        case reviewCount = "review_count"
+        case nextReviewAt = "next_review_at"
+        case createdAt = "created_at"
+        case alreadySaved = "already_saved"
+    }
+
+    // Custom decode so an older backend that hasn't rolled out the review-scheduling
+    // columns yet (box/review_count/next_review_at/example_ja/example_zh) degrades
+    // gracefully instead of failing the whole list with a decode error.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(Int.self, forKey: .id)
+        word = try container.decode(String.self, forKey: .word)
+        reading = try container.decodeIfPresent(String.self, forKey: .reading)
+        meaning = try container.decode(String.self, forKey: .meaning)
+        partOfSpeech = try container.decodeIfPresent(String.self, forKey: .partOfSpeech)
+        context = try container.decodeIfPresent(String.self, forKey: .context)
+        exampleJA = try container.decodeIfPresent(String.self, forKey: .exampleJA)
+        exampleZH = try container.decodeIfPresent(String.self, forKey: .exampleZH)
+        box = try container.decodeIfPresent(Int.self, forKey: .box) ?? 1
+        reviewCount = try container.decodeIfPresent(Int.self, forKey: .reviewCount) ?? 0
+        nextReviewAt = try container.decodeIfPresent(String.self, forKey: .nextReviewAt) ?? ""
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+        alreadySaved = try container.decodeIfPresent(Bool.self, forKey: .alreadySaved) ?? false
+    }
+}

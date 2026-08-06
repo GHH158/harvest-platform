@@ -21,22 +21,44 @@ struct HarvestApp: App {
             .environmentObject(configuration)
             .environmentObject(offlineLibrary)
             .tint(DesignTokens.accent)
-            .task { offlineLibrary.resumeIncompleteDownloads() }
+            // Do not compete with first paint / material list for bandwidth.
+            .task {
+                try? await Task.sleep(for: .seconds(1.5))
+                guard !Task.isCancelled else { return }
+                offlineLibrary.resumeIncompleteDownloads()
+            }
         }
     }
 }
 
+private enum MainTab: Hashable {
+    case materials
+    case chat
+    case downloads
+    case vocabulary
+    case settings
+}
+
 struct MainTabView: View {
+    @State private var selectedTab: MainTab = .materials
+
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             NavigationStack { MaterialListView() }
                 .tabItem { Label("素材", systemImage: "text.book.closed") }
-            NavigationStack { ChatView() }
+                .tag(MainTab.materials)
+            NavigationStack { ChatView(isActive: selectedTab == .chat) }
                 .tabItem { Label("聊天", systemImage: "bubble.left.and.bubble.right") }
+                .tag(MainTab.chat)
             NavigationStack { DownloadsView() }
                 .tabItem { Label("下载", systemImage: "arrow.down.circle") }
+                .tag(MainTab.downloads)
+            NavigationStack { VocabularyView(isActive: selectedTab == .vocabulary) }
+                .tabItem { Label("生词", systemImage: "character.book.closed") }
+                .tag(MainTab.vocabulary)
             NavigationStack { SettingsView(isOnboarding: false) }
                 .tabItem { Label("设置", systemImage: "gearshape") }
+                .tag(MainTab.settings)
         }
         .tint(DesignTokens.accent)
     }

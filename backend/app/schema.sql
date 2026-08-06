@@ -179,3 +179,22 @@ CREATE TABLE IF NOT EXISTS voice_profile (
     is_default    BOOLEAN NOT NULL DEFAULT false,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS vocabulary (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    word           TEXT NOT NULL,
+    reading        TEXT,
+    meaning        TEXT NOT NULL,
+    part_of_speech TEXT,
+    context        TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_vocabulary_created ON vocabulary(created_at DESC, id DESC);
+-- Cloze-review support: an example sentence to blank the word out of, plus
+-- Leitner-style spaced-repetition scheduling (box 1 = review soon, higher = longer gap).
+ALTER TABLE vocabulary ADD COLUMN IF NOT EXISTS example_ja TEXT;
+ALTER TABLE vocabulary ADD COLUMN IF NOT EXISTS example_zh TEXT;
+ALTER TABLE vocabulary ADD COLUMN IF NOT EXISTS box INT NOT NULL DEFAULT 1;
+ALTER TABLE vocabulary ADD COLUMN IF NOT EXISTS review_count INT NOT NULL DEFAULT 0;
+ALTER TABLE vocabulary ADD COLUMN IF NOT EXISTS next_review_at TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS idx_vocabulary_next_review ON vocabulary(next_review_at ASC, id ASC);

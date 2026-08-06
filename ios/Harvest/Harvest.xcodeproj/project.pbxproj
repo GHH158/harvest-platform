@@ -27,6 +27,11 @@
 		A00000000000000000000018 /* VoiceTeacherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000020 /* VoiceTeacherView.swift */; };
 		A00000000000000000000019 /* CompanionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* CompanionView.swift */; };
 		A0000000000000000000001A /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* Components.swift */; };
+		A0000000000000000000001B /* WordLookupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000022 /* WordLookupSheet.swift */; };
+		A0000000000000000000001D /* WordPickSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000024 /* WordPickSheet.swift */; };
+		A0000000000000000000001E /* SelectableText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000025 /* SelectableText.swift */; };
+		A0000000000000000000001C /* VocabularyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000023 /* VocabularyView.swift */; };
+		A0000000000000000000001F /* VocabularyReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000026 /* VocabularyReviewView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -62,6 +67,11 @@
 		A1000000000000000000001A /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		A10000000000000000000020 /* VoiceTeacherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTeacherView.swift; sourceTree = "<group>"; };
 		A10000000000000000000021 /* CompanionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionView.swift; sourceTree = "<group>"; };
+		A10000000000000000000022 /* WordLookupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordLookupSheet.swift; sourceTree = "<group>"; };
+		A10000000000000000000024 /* WordPickSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPickSheet.swift; sourceTree = "<group>"; };
+		A10000000000000000000025 /* SelectableText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectableText.swift; sourceTree = "<group>"; };
+		A10000000000000000000023 /* VocabularyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocabularyView.swift; sourceTree = "<group>"; };
+		A10000000000000000000026 /* VocabularyReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocabularyReviewView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -113,6 +123,11 @@
 				A10000000000000000000020 /* VoiceTeacherView.swift */,
 				A10000000000000000000021 /* CompanionView.swift */,
 				A1000000000000000000001A /* Components.swift */,
+				A10000000000000000000022 /* WordLookupSheet.swift */,
+				A10000000000000000000024 /* WordPickSheet.swift */,
+				A10000000000000000000025 /* SelectableText.swift */,
+				A10000000000000000000023 /* VocabularyView.swift */,
+				A10000000000000000000026 /* VocabularyReviewView.swift */,
 			);
 			path = Harvest;
 			sourceTree = "<group>";
@@ -233,6 +248,11 @@
 				A00000000000000000000018 /* VoiceTeacherView.swift in Sources */,
 				A00000000000000000000019 /* CompanionView.swift in Sources */,
 				A0000000000000000000001A /* Components.swift in Sources */,
+				A0000000000000000000001B /* WordLookupSheet.swift in Sources */,
+				A0000000000000000000001D /* WordPickSheet.swift in Sources */,
+				A0000000000000000000001E /* SelectableText.swift in Sources */,
+				A0000000000000000000001C /* VocabularyView.swift in Sources */,
+				A0000000000000000000001F /* VocabularyReviewView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

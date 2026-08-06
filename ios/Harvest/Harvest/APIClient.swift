@@ -14,8 +14,21 @@ enum APIClientError: LocalizedError {
 
 struct APIClient {
     let baseURL: URL
-    var session: URLSession = .shared
+    var session: URLSession = APIClient.sharedSession
     private let decoder = JSONDecoder()
+
+    /// Shared session tuned for local Tailscale control-plane calls.
+    /// Default `URLSession.shared` can hang for a minute+ when the Mac/Tailscale is cold,
+    /// which freezes first launch behind "正在翻开素材库".
+    private static let sharedSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 12
+        configuration.timeoutIntervalForResource = 20
+        configuration.httpMaximumConnectionsPerHost = 4
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
 
     func materials() async throws -> [Material] {
         try await get("materials")
@@ -54,6 +67,7 @@ struct APIClient {
     func savePlaybackState(materialID: Int, positionMs: Int) async throws -> MaterialPlaybackState {
         var request = URLRequest(url: baseURL.appending(path: "materials/\(materialID)/playback"))
         request.httpMethod = "PUT"
+        request.timeoutInterval = 12
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["position_ms": max(0, positionMs)])
         return try await send(request)
@@ -64,7 +78,7 @@ struct APIClient {
     }
 
     func sendChat(sessionID: String, message: String) async throws -> ChatReply {
-        try await post("chat", body: ["session_id": sessionID, "message": message])
+        try await post("chat", body: ["session_id": sessionID, "message": message], timeout: 60)
     }
 
     func chatTopics() async throws -> [ChatTopic] {
@@ -75,7 +89,7 @@ struct APIClient {
         var body: [String: String] = [:]
         if let starterID { body["starter_id"] = starterID }
         if let topic { body["topic"] = topic }
-        return try await post("chat/sessions", body: body)
+        return try await post("chat/sessions", body: body, timeout: 45)
     }
 
     func chatSessions() async throws -> [ChatSession] {
@@ -91,7 +105,7 @@ struct APIClient {
     }
 
     func sendChatMessage(sessionID: String, message: String) async throws -> ChatTurnResponse {
-        try await post("chat/sessions/\(sessionID)/messages", body: ["message": message])
+        try await post("chat/sessions/\(sessionID)/messages", body: ["message": message], timeout: 60)
     }
 
     func chatCorrections(
@@ -123,6 +137,60 @@ struct APIClient {
         return response.segments
     }
 
+    func dictionaryLookup(word: String, context: String? = nil) async throws -> DictionaryLookupResult {
+        var body: [String: String] = ["word": word]
+        if let context { body["context"] = context }
+        // LLM lookup is slower than list APIs.
+        return try await post("dictionary/lookup", body: body, timeout: 60)
+    }
+
+    func addVocabulary(
+        word: String,
+        reading: String?,
+        meaning: String,
+        partOfSpeech: String?,
+        context: String?,
+        exampleJA: String? = nil,
+        exampleZH: String? = nil
+    ) async throws -> VocabularyWord {
+        var body: [String: String] = ["word": word, "meaning": meaning]
+        if let reading { body["reading"] = reading }
+        if let partOfSpeech { body["part_of_speech"] = partOfSpeech }
+        if let context { body["context"] = context }
+        if let exampleJA { body["example_ja"] = exampleJA }
+        if let exampleZH { body["example_zh"] = exampleZH }
+        return try await post("vocabulary", body: body)
+    }
+
+    func listVocabulary() async throws -> [VocabularyWord] {
+        try await get("vocabulary")
+    }
+
+    func deleteVocabulary(id: Int) async throws {
+        try await delete("vocabulary/\(id)")
+    }
+
+    /// Words due for spaced-repetition review right now, oldest-due first.
+    func reviewDueVocabulary(limit: Int = 20) async throws -> [VocabularyWord] {
+        guard var components = URLComponents(
+            url: baseURL.appending(path: "vocabulary/review"),
+            resolvingAgainstBaseURL: false
+        ) else { throw APIClientError.badResponse }
+        components.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        guard let url = components.url else { throw APIClientError.badResponse }
+        return try await get(url: url)
+    }
+
+    /// Records a review outcome; the server reschedules the word's next review time.
+    func submitVocabularyReview(id: Int, correct: Bool) async throws -> VocabularyWord {
+        var request = URLRequest(url: baseURL.appending(path: "vocabulary/\(id)/review"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 12
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["correct": correct])
+        return try await send(request)
+    }
+
     func companion(materialID: Int) async throws -> [ConversationMessage] {
         try await get("companion/\(materialID)")
     }
@@ -130,6 +198,7 @@ struct APIClient {
     func sendCompanion(materialID: Int, segmentID: Int, question: String) async throws -> ChatReply {
         var request = URLRequest(url: baseURL.appending(path: "companion"))
         request.httpMethod = "POST"
+        request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "material_id": materialID, "segment_id": segmentID, "question": question,
@@ -141,6 +210,7 @@ struct APIClient {
         let boundary = "Harvest-\(UUID().uuidString)"
         var request = URLRequest(url: baseURL.appending(path: "shadowing"))
         request.httpMethod = "POST"
+        request.timeoutInterval = 60
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         var body = Data()
         body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"segment_id\"\r\n\r\n\(segmentID)\r\n".data(using: .utf8)!)
@@ -186,22 +256,19 @@ struct APIClient {
     }
 
     private func get<Response: Decodable>(url: URL) async throws -> Response {
-        let (data, response) = try await session.data(from: url)
-        guard let http = response as? HTTPURLResponse else { throw APIClientError.badResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
-            throw APIClientError.server(detail ?? "服务暂时不可用（HTTP \(http.statusCode)）。")
-        }
-        do {
-            return try decoder.decode(Response.self, from: data)
-        } catch {
-            throw APIClientError.badResponse
-        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        return try await send(request)
     }
 
-    private func post<Response: Decodable>(_ path: String, body: [String: String]) async throws -> Response {
+    private func post<Response: Decodable>(
+        _ path: String,
+        body: [String: String],
+        timeout: TimeInterval = 12
+    ) async throws -> Response {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
         return try await send(request)
@@ -210,27 +277,45 @@ struct APIClient {
     private func postWithoutBody<Response: Decodable>(_ path: String) async throws -> Response {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
+        request.timeoutInterval = 12
         return try await send(request)
     }
 
     private func send<Response: Decodable>(_ request: URLRequest) async throws -> Response {
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw APIClientError.badResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
-            throw APIClientError.server(detail ?? "服务暂时不可用（HTTP \(http.statusCode)）。")
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw APIClientError.badResponse }
+            guard (200..<300).contains(http.statusCode) else {
+                let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
+                throw APIClientError.server(detail ?? "服务暂时不可用（HTTP \(http.statusCode)）。")
+            }
+            do { return try decoder.decode(Response.self, from: data) } catch { throw APIClientError.badResponse }
+        } catch let error as APIClientError {
+            throw error
+        } catch let error as URLError where error.code == .timedOut {
+            throw APIClientError.server("连接超时。请确认 Mac 上的 Harvest 服务和 Tailscale 已就绪。")
+        } catch {
+            throw APIClientError.server(error.localizedDescription)
         }
-        do { return try decoder.decode(Response.self, from: data) } catch { throw APIClientError.badResponse }
     }
 
     private func delete(_ path: String) async throws {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "DELETE"
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw APIClientError.badResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
-            throw APIClientError.server(detail ?? "服务暂时不可用（HTTP \(http.statusCode)）。")
+        request.timeoutInterval = 12
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw APIClientError.badResponse }
+            guard (200..<300).contains(http.statusCode) else {
+                let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
+                throw APIClientError.server(detail ?? "服务暂时不可用（HTTP \(http.statusCode)）。")
+            }
+        } catch let error as APIClientError {
+            throw error
+        } catch let error as URLError where error.code == .timedOut {
+            throw APIClientError.server("连接超时。请确认 Mac 上的 Harvest 服务和 Tailscale 已就绪。")
+        } catch {
+            throw APIClientError.server(error.localizedDescription)
         }
     }
 
