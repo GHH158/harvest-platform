@@ -19,10 +19,14 @@ class SubmissionRepository:
     def __init__(self) -> None:
         self.created: dict[str, Any] | None = None
         self.thumbnail: tuple[int, str] | None = None
+        self.existing_material: dict[str, Any] | None = None
 
     def create_material_with_job(self, **values: Any) -> tuple[int, int]:
         self.created = values
         return 41, 73
+
+    def find_material_by_source_url(self, url: str) -> dict[str, Any] | None:
+        return self.existing_material
 
     def store_material_thumbnail(self, material_id: int, local_path: str) -> None:
         self.thumbnail = material_id, local_path
@@ -280,6 +284,35 @@ def test_video_link_creates_download_job(monkeypatch: pytest.MonkeyPatch) -> Non
     assert repository.created is not None
     assert repository.created["kind"] == "video"
     assert repository.created["job_kind"] == "download_video"
+
+
+def test_video_link_already_imported_is_rejected_instead_of_downloaded_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = SubmissionRepository()
+    repository.existing_material = {"id": 32, "title": "日本で人気", "status": "ready"}
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    with pytest.raises(HTTPException) as caught:
+        main.post_video_link(main.VideoLinkCreate(url="https://youtu.be/AgWRJo8n8L8?si=zLpnn"))
+
+    assert caught.value.status_code == 409
+    assert "#32" in caught.value.detail
+    # The expensive part must not start.
+    assert repository.created is None
+
+
+def test_reimporting_a_failed_link_points_at_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = SubmissionRepository()
+    repository.existing_material = {"id": 29, "title": "日本の雨", "status": "failed"}
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    with pytest.raises(HTTPException) as caught:
+        main.post_video_link(main.VideoLinkCreate(url="https://youtu.be/AgWRJo8n8L8"))
+
+    assert caught.value.status_code == 409
+    assert "重试" in caught.value.detail
+    assert repository.created is None
 
 
 def test_photo_upload_streams_and_enforces_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

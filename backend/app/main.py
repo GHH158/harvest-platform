@@ -327,6 +327,23 @@ def _update_env(values: dict[str, str], clear_keys: set[str] | None = None) -> N
     get_settings.cache_clear()
 
 
+def _reject_duplicate_source(url: str) -> None:
+    """Stop the same link becoming a second material (§5.2.1).
+
+    Re-importing a link that failed is almost always meant as a retry, so point
+    at the retry action instead of silently paying for another download.
+    """
+    existing = repository().find_material_by_source_url(url)
+    if existing is None:
+        return
+    title = existing["title"] or "未命名素材"
+    if existing["status"] == "failed":
+        detail = f"这个链接已经导入过了：「{title}」（素材 #{existing['id']}，之前处理失败）。请在素材库里点重试，不要重新导入。"
+    else:
+        detail = f"这个链接已经导入过了：「{title}」（素材 #{existing['id']}）。直接打开它就行。"
+    raise HTTPException(status_code=409, detail=detail)
+
+
 def create_material(payload: MaterialCreate) -> tuple[int, int]:
     repo = repository()
     if payload.text and payload.text.strip():
@@ -340,6 +357,7 @@ def create_material(payload: MaterialCreate) -> tuple[int, int]:
         )
     assert payload.url
     source_url = payload.url.strip()
+    _reject_duplicate_source(source_url)
     title_provided = bool((payload.title or "").strip())
     return repo.create_material_with_job(
         title=(payload.title or "").strip() or title_for_url(source_url),
@@ -433,6 +451,7 @@ def create_video_link(payload: VideoLinkCreate) -> tuple[int, int]:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=422, detail="请输入完整的 http 或 https 视频链接。")
+    _reject_duplicate_source(url)
     title_provided = bool((payload.title or "").strip())
     return repository().create_material_with_job(
         kind="video",

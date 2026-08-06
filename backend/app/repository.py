@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import Engine, text
 
 from .chat import build_correction_guidance
+from .text import canonical_source_key
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,29 @@ class Job:
 class Repository:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
+
+    def find_material_by_source_url(self, url: str) -> dict[str, Any] | None:
+        """Existing material imported from the same source, ignoring share noise.
+
+        Compared in Python rather than SQL because the canonical form cannot be
+        expressed as a plain column match; a personal library is small enough
+        that scanning the URL-sourced rows is cheaper than storing a second key.
+        """
+        key = canonical_source_key(url)
+        if not key:
+            return None
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT id, title, status, source_ref FROM material
+                       WHERE source_type = 'url' AND source_ref IS NOT NULL
+                       ORDER BY id"""
+                )
+            ).mappings().all()
+        for row in rows:
+            if canonical_source_key(row["source_ref"]) == key:
+                return dict(row)
+        return None
 
     def create_material_with_job(
         self,
