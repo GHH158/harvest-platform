@@ -26,6 +26,8 @@ class PipelineRepository:
         self.tokens: list[dict[str, Any]] | None = None
         self.video_assets: dict[str, Any] | None = None
         self.video_segments: list[dict[str, Any]] | None = None
+        self.video_ready: list[int] = []
+        self.translation_batches: list[tuple[int, int]] = []
         self.segment_translations: list[str] | None = None
         self.reading_completion: dict[str, Any] | None = None
         self.reading_segments: list[dict[str, Any]] = []
@@ -92,8 +94,18 @@ class PipelineRepository:
     def replace_video_segments(self, material_id: int, segments: list[dict[str, Any]]) -> None:
         self.video_segments = segments
 
-    def save_segment_translations(self, material_id: int, translations: list[str]) -> None:
-        self.segment_translations = translations
+    def save_segment_translations(
+        self, material_id: int, translations: list[str], *, offset: int = 0
+    ) -> None:
+        if offset == 0:
+            self.segment_translations = list(translations)
+        else:
+            assert self.segment_translations is not None
+            self.segment_translations.extend(translations)
+        self.translation_batches.append((offset, len(translations)))
+
+    def mark_video_ready(self, material_id: int) -> None:
+        self.video_ready.append(material_id)
 
     def get_segment(self, segment_id: int) -> dict[str, Any] | None:
         return {"id": segment_id, "text_ja": "雨です。"}
@@ -157,6 +169,96 @@ def test_low_coverage_asr_keeps_estimated_timeline_and_ready_status() -> None:
     assert repository.tokens is None
 
 
+def test_failed_subtitle_translation_keeps_the_video_watchable() -> None:
+    # A video is consumable once ASR has written Japanese subtitles. Losing the
+    # Chinese line to a transient cloud timeout must not take away a material that
+    # already cost a download, transcode, upload and ASR pass.
+    job = Job(id=1, kind="translate_video", material_id=7, payload={"sentences": ["これは。"]}, attempts=1)
+    repository = PipelineRepository([job])
+    worker = Worker(repository, Settings())  # type: ignore[arg-type]
+    worker.llm = StaticLLM(error="dashscope: The read operation timed out")  # type: ignore[assignment]
+
+    assert worker.run_one() is True
+
+    # Job records the diagnostic; material_id is None, so the material is untouched.
+    assert repository.failed == [(1, None, "dashscope: The read operation timed out")]
+    assert repository.segment_translations is None
+
+
+def test_video_becomes_ready_after_subtitles_not_after_translation(tmp_path: Path) -> None:
+    job = Job(
+        id=1,
+        kind="asr_video",
+        material_id=7,
+        payload={
+            "audio_url": "https://oss.example.com/temporary/7.m4a",
+            "temporary_audio_key": "temporary/7.m4a",
+        },
+        attempts=1,
+    )
+    repository = PipelineRepository([job])
+    worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
+    worker.storage = FakeStorage()  # type: ignore[assignment]
+    worker.asr = StaticASR([RecognizedWord("これは。", 0, 1_200)])  # type: ignore[assignment]
+
+    assert worker.run_one() is True
+
+    assert repository.video_ready == [7]
+    assert [job.kind for job in repository.enqueued] == ["translate_video"]
+
+
+class BatchCountingLLM:
+    """Fails on the Nth request, mimicking a read timeout part-way through."""
+
+    def __init__(self, fail_on_call: int | None = None) -> None:
+        self.calls = 0
+        self.batch_sizes: list[int] = []
+        self.fail_on_call = fail_on_call
+
+    def reply(self, messages: list[dict[str, str]]) -> str:
+        self.calls += 1
+        sentences = json.loads(messages[-1]["content"])
+        self.batch_sizes.append(len(sentences))
+        if self.fail_on_call is not None and self.calls == self.fail_on_call:
+            raise RuntimeError("dashscope: The read operation timed out")
+        return json.dumps([f"译{i}" for i in range(len(sentences))], ensure_ascii=False)
+
+
+def test_long_transcript_is_translated_in_batches() -> None:
+    # One request for a whole 137-line transcript hit the client's fixed read timeout
+    # twice in practice; each request must stay small.
+    sentences = [f"文{i}。" for i in range(137)]
+    job = Job(id=1, kind="translate_video", material_id=7, payload={"sentences": sentences}, attempts=1)
+    repository = PipelineRepository([job])
+    worker = Worker(repository, Settings())  # type: ignore[arg-type]
+    llm = BatchCountingLLM()
+    worker.llm = llm  # type: ignore[assignment]
+
+    assert worker.run_one() is True
+
+    assert repository.failed == []
+    assert max(llm.batch_sizes) <= 40
+    assert sum(llm.batch_sizes) == 137
+    assert repository.segment_translations is not None
+    assert len(repository.segment_translations) == 137
+    assert [offset for offset, _ in repository.translation_batches] == [0, 40, 80, 120]
+
+
+def test_batch_failure_keeps_the_lines_already_translated() -> None:
+    sentences = [f"文{i}。" for i in range(137)]
+    job = Job(id=1, kind="translate_video", material_id=7, payload={"sentences": sentences}, attempts=1)
+    repository = PipelineRepository([job])
+    worker = Worker(repository, Settings())  # type: ignore[arg-type]
+    worker.llm = BatchCountingLLM(fail_on_call=3)  # type: ignore[assignment]
+
+    assert worker.run_one() is True
+
+    assert repository.failed == [(1, None, "dashscope: The read operation timed out")]
+    # Batches 1–2 survived; the material was never touched.
+    assert repository.translation_batches == [(0, 40), (40, 40)]
+    assert repository.video_ready == []
+
+
 def test_failed_asr_only_fails_enhancement_job() -> None:
     repository = PipelineRepository([asr_job()])
     worker = Worker(repository, Settings())  # type: ignore[arg-type]
@@ -218,7 +320,12 @@ class FakeStorage:
 
 
 class StaticLLM:
+    def __init__(self, error: str | None = None) -> None:
+        self.error = error
+
     def reply(self, messages: list[dict[str, str]]) -> str:
+        if self.error:
+            raise RuntimeError(self.error)
         sentences = json.loads(messages[-1]["content"])
         return json.dumps(["这是。" for _ in sentences], ensure_ascii=False)
 

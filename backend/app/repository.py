@@ -1159,13 +1159,23 @@ class Repository:
                     {"material_id": material_id, **segment},
                 )
 
-    def save_segment_translations(self, material_id: int, translations: list[str]) -> None:
+    def save_segment_translations(self, material_id: int, translations: list[str], *, offset: int = 0) -> None:
+        """Write the Chinese line only. Becoming consumable is a separate step —
+        translation is an enhancement and must not be what flips `material.status`.
+
+        `offset` is the segment index the batch starts at, so a long transcript can be
+        translated in batches and keep whatever finished if a later batch fails."""
         with self.engine.begin() as connection:
-            for idx, translation in enumerate(translations):
+            for position, translation in enumerate(translations):
                 connection.execute(
                     text("UPDATE segment SET text_zh = :text_zh WHERE material_id = :material_id AND idx = :idx"),
-                    {"material_id": material_id, "idx": idx, "text_zh": translation},
+                    {"material_id": material_id, "idx": offset + position, "text_zh": translation},
                 )
+
+    def mark_video_ready(self, material_id: int) -> None:
+        """A video is consumable once its Japanese subtitles exist (§4.3): it plays,
+        highlights per word and opens the companion. The Chinese line is optional."""
+        with self.engine.begin() as connection:
             duration_ms = connection.execute(
                 text("SELECT max(end_ms) FROM segment WHERE material_id = :material_id"), {"material_id": material_id}
             ).scalar_one_or_none()

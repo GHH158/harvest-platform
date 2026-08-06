@@ -28,7 +28,11 @@ from .video import VideoDownloader, VideoProcessor
 from .vision import VisionService
 from .voice import VideoVoiceExtractor, VoiceEnrollmentService, validate_voice_sample_duration
 
-ENHANCEMENT_JOB_KINDS = {"asr", "translate_reading"}
+ENHANCEMENT_JOB_KINDS = {"asr", "translate_reading", "translate_video"}
+
+# Sentences per subtitle-translation request. Sized against the LLM client's fixed
+# read timeout: 46 sentences in one call succeeded, 137 timed out twice.
+TRANSLATION_BATCH_SIZE = 40
 STANDALONE_JOB_KINDS = {"shadowing", "voice_enrollment", "voice_enrollment_video"}
 
 
@@ -183,22 +187,36 @@ class Worker:
             ],
         )
 
+    def _translate_sentences(self, material_id: int, sentences: list[str], *, label: str) -> None:
+        """Translate a whole transcript in batches, persisting each batch as it lands.
+
+        One request for the entire transcript hits the LLM client's fixed read timeout
+        once a material gets long — measured: 22 and 46 sentences succeeded, 137 timed
+        out twice. Batching keeps each request short, and saving per batch means a late
+        failure leaves the earlier lines translated instead of losing everything.
+        """
+        for start in range(0, len(sentences), TRANSLATION_BATCH_SIZE):
+            batch = sentences[start : start + TRANSLATION_BATCH_SIZE]
+            answer = self.llm.reply(
+                [
+                    {"role": "system", "content": SUBTITLE_TRANSLATION_SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(batch, ensure_ascii=False)},
+                ]
+            )
+            translations = json.loads(answer)
+            if not isinstance(translations, list) or len(translations) != len(batch):
+                raise RuntimeError(f"{label}翻译返回数量不匹配。")
+            self.repository.save_segment_translations(
+                material_id, [str(item) for item in translations], offset=start
+            )
+
     def _translate_reading(self, job: Job) -> None:
         assert job.material_id is not None
         segments = self.repository.get_segments(job.material_id)
         sentences = [str(segment["text_ja"]) for segment in segments]
         if not sentences:
             raise RuntimeError("阅读材料缺少分句，无法翻译。")
-        answer = self.llm.reply(
-            [
-                {"role": "system", "content": SUBTITLE_TRANSLATION_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(sentences, ensure_ascii=False)},
-            ]
-        )
-        translations = json.loads(answer)
-        if not isinstance(translations, list) or len(translations) != len(sentences):
-            raise RuntimeError("阅读材料翻译返回数量不匹配。")
-        self.repository.save_segment_translations(job.material_id, [str(item) for item in translations])
+        self._translate_sentences(job.material_id, sentences, label="阅读材料")
 
     def _score_shadowing(self, job: Job) -> None:
         attempt_id = int(job.payload.get("attempt_id", 0))
@@ -355,6 +373,10 @@ class Worker:
                 for token in alignment.tokens
             ],
         )
+        # The video is watchable from here on: subtitles, word timing and 点词陪读 all
+        # work. Chinese translation is an enhancement queued below, and a transient
+        # failure there must not take the whole material away.
+        self.repository.mark_video_ready(job.material_id)
         self.repository.enqueue_job(
             kind="translate_video",
             material_id=job.material_id,
@@ -369,19 +391,7 @@ class Worker:
         sentences = [str(item) for item in job.payload.get("sentences", [])]
         if not sentences:
             raise RuntimeError("translate_video 任务缺少字幕。")
-        answer = self.llm.reply(
-            [
-                {
-                    "role": "system",
-                    "content": SUBTITLE_TRANSLATION_SYSTEM_PROMPT,
-                },
-                {"role": "user", "content": json.dumps(sentences, ensure_ascii=False)},
-            ]
-        )
-        translations = json.loads(answer)
-        if not isinstance(translations, list) or len(translations) != len(sentences):
-            raise RuntimeError("字幕翻译返回数量不匹配。")
-        self.repository.save_segment_translations(job.material_id, [str(item) for item in translations])
+        self._translate_sentences(job.material_id, sentences, label="字幕")
         temporary_audio_key = str(job.payload.get("temporary_audio_key", ""))
         if temporary_audio_key:
             try:
