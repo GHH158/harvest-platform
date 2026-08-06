@@ -11,6 +11,13 @@ struct ReaderView: View {
     @State private var isLoading = true
     @State private var downloadError: String?
     @State private var isDownloading = false
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var didRestorePlayback = false
+    @State private var lastSavedPositionMs = 0
+    /// Last position actually seen while this view was alive. Saving reads this instead
+    /// of the live player: leaving for 陪读 rebuilds the view, and the replacement player
+    /// reports 0 before its item loads — writing that back erased the resume point.
+    @State private var lastObservedPositionMs = 0
     private let startsOffline: Bool
 
     init(materialID: Int) {
@@ -54,7 +61,12 @@ struct ReaderView: View {
                 await load(showingProgress: false)
             }
         }
-        .onDisappear { player.stop() }
+        .onDisappear {
+            // Leaving for 陪读 tears the player down, so the next appearance has to
+            // restore again — otherwise it silently resumes from the start.
+            player.stop()
+            didRestorePlayback = false
+        }
     }
 
     @ViewBuilder
@@ -127,7 +139,15 @@ struct ReaderView: View {
         }
         .task(id: playbackURL(for: material)) {
             if let audioURL = playbackURL(for: material) { await player.prepare(url: audioURL) }
+            await restorePlaybackPosition(for: material)
         }
+        .onChange(of: player.positionMs) { _, newPosition in
+            savePlaybackPositionIfNeeded(newPosition, in: material)
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase != .active { savePlaybackPosition(in: material, force: true) }
+        }
+        .onDisappear { savePlaybackPosition(in: material, force: true) }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 downloadToolbarButton(material)
@@ -156,6 +176,60 @@ struct ReaderView: View {
 
     private func playbackURL(for material: MaterialDetail) -> URL? {
         offlineLibrary.localAudioURL(for: material.id) ?? material.audioURL
+    }
+
+    /// Reading materials resume like videos do: a local position for instant restore,
+    /// then the server copy when it is newer. Without this, leaving for 陪读 — or simply
+    /// reopening the material — always dropped the listener back at the first sentence.
+    @MainActor
+    private func restorePlaybackPosition(for material: MaterialDetail) async {
+        guard !didRestorePlayback else { return }
+        let store = PlaybackProgressStore()
+        let local = store.load(materialID: material.id)
+        let durationMs = material.durationMs ?? player.durationMs
+        if let local {
+            let position = normalizedResumePosition(local.positionMs, durationMs: durationMs)
+            lastSavedPositionMs = position
+            lastObservedPositionMs = position
+            if position > 0 { player.seek(to: position) }
+        }
+        didRestorePlayback = true
+
+        guard let endpoint = configuration.endpoint,
+              let remote = try? await APIClient(baseURL: endpoint).playbackState(materialID: material.id)
+        else { return }
+        let remoteDate = parsePlaybackDate(remote.updatedAt)
+        guard local == nil || (remoteDate != nil && remoteDate! > local!.updatedAt) else { return }
+        let position = normalizedResumePosition(remote.positionMs, durationMs: durationMs)
+        store.save(materialID: material.id, positionMs: position, updatedAt: remoteDate ?? Date())
+        lastSavedPositionMs = position
+        lastObservedPositionMs = position
+        if position > 0 { player.seek(to: position) }
+    }
+
+    private func savePlaybackPositionIfNeeded(_ positionMs: Int, in material: MaterialDetail) {
+        // A jump back to the very start is what a reloading item reports, not something
+        // the listener did; only real progress or an explicit seek moves the mark.
+        guard positionMs > 0 || player.isPlaying else { return }
+        lastObservedPositionMs = positionMs
+        guard didRestorePlayback, abs(positionMs - lastSavedPositionMs) >= 5_000 else { return }
+        savePlaybackPosition(in: material, force: false)
+    }
+
+    private func savePlaybackPosition(in material: MaterialDetail, force: Bool) {
+        guard didRestorePlayback else { return }
+        let durationMs = material.durationMs ?? player.durationMs
+        let position = normalizedResumePosition(lastObservedPositionMs, durationMs: durationMs)
+        guard force || abs(position - lastSavedPositionMs) >= 5_000 else { return }
+        lastSavedPositionMs = position
+        PlaybackProgressStore().save(materialID: material.id, positionMs: position)
+        guard let endpoint = configuration.endpoint else { return }
+        Task {
+            _ = try? await APIClient(baseURL: endpoint).savePlaybackState(
+                materialID: material.id,
+                positionMs: position
+            )
+        }
     }
 
     @MainActor

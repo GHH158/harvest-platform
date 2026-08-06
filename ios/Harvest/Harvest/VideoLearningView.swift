@@ -1,35 +1,63 @@
 import AVKit
 import SwiftUI
 
-struct StoredVideoPlayback: Codable, Equatable {
+struct StoredPlayback: Codable, Equatable {
     let positionMs: Int
     let updatedAt: Date
 }
 
-struct VideoPlaybackProgressStore {
+struct PlaybackProgressStore {
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
     }
 
-    func load(materialID: Int) -> StoredVideoPlayback? {
+    func load(materialID: Int) -> StoredPlayback? {
         guard let data = defaults.data(forKey: key(materialID)) else { return nil }
-        return try? JSONDecoder().decode(StoredVideoPlayback.self, from: data)
+        return try? JSONDecoder().decode(StoredPlayback.self, from: data)
     }
 
     func save(materialID: Int, positionMs: Int, updatedAt: Date = Date()) {
-        let state = StoredVideoPlayback(positionMs: max(0, positionMs), updatedAt: updatedAt)
+        let state = StoredPlayback(positionMs: max(0, positionMs), updatedAt: updatedAt)
         guard let data = try? JSONEncoder().encode(state) else { return }
         defaults.set(data, forKey: key(materialID))
     }
 
     private func key(_ materialID: Int) -> String {
+        // Kept on the original prefix although reading materials use this store too:
+        // renaming it would orphan every resume point already on disk.
         "harvest.video.playback.\(materialID)"
     }
 }
 
-func normalizedVideoResumePosition(_ positionMs: Int, durationMs: Int?) -> Int {
+/// Server timestamps arrive with or without fractional seconds depending on the row.
+///
+/// PostgreSQL renders microseconds ("…:28.905934+08:00") but `ISO8601DateFormatter`
+/// only accepts up to milliseconds, so the raw string fails both parsers and the
+/// caller silently concludes the server copy is not newer — which kept every resume
+/// point pinned to whatever was cached locally. Trim the fraction to 3 digits first.
+func parsePlaybackDate(_ value: String?) -> Date? {
+    guard let value else { return nil }
+    let withFractions = ISO8601DateFormatter()
+    withFractions.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let parsed = withFractions.date(from: value) { return parsed }
+    if let parsed = ISO8601DateFormatter().date(from: value) { return parsed }
+
+    if let range = value.range(of: #"\.\d{4,9}"#, options: .regularExpression) {
+        let clamped = value.replacingCharacters(in: range, with: String(value[range].prefix(4)))
+        if let parsed = withFractions.date(from: clamped) { return parsed }
+    }
+    // Last resort: drop the fraction entirely.
+    let withoutFraction = value.replacingOccurrences(
+        of: #"\.\d+"#,
+        with: "",
+        options: .regularExpression
+    )
+    return ISO8601DateFormatter().date(from: withoutFraction)
+}
+
+func normalizedResumePosition(_ positionMs: Int, durationMs: Int?) -> Int {
     let position = max(0, positionMs)
     guard position >= 1_000 else { return 0 }
     guard let durationMs, durationMs > 0 else { return position }
@@ -804,10 +832,10 @@ struct VideoLearningView: View {
 
     private func restorePlaybackPosition() async {
         guard !didRestorePlayback else { return }
-        let store = VideoPlaybackProgressStore()
+        let store = PlaybackProgressStore()
         let local = store.load(materialID: material.id)
         if let local {
-            let position = normalizedVideoResumePosition(local.positionMs, durationMs: material.durationMs)
+            let position = normalizedResumePosition(local.positionMs, durationMs: material.durationMs)
             pendingResumePositionMs = position
             lastSavedPositionMs = position
             applyPendingResumePosition()
@@ -818,7 +846,7 @@ struct VideoLearningView: View {
               let remote = try? await APIClient(baseURL: endpoint).playbackState(materialID: material.id) else { return }
         let remoteDate = parsePlaybackDate(remote.updatedAt)
         if local == nil || (remoteDate != nil && remoteDate! > local!.updatedAt) {
-            let position = normalizedVideoResumePosition(remote.positionMs, durationMs: material.durationMs)
+            let position = normalizedResumePosition(remote.positionMs, durationMs: material.durationMs)
             store.save(materialID: material.id, positionMs: position, updatedAt: remoteDate ?? Date())
             lastSavedPositionMs = position
             pendingResumePositionMs = position
@@ -834,10 +862,10 @@ struct VideoLearningView: View {
     private func savePlaybackPosition(force: Bool) {
         guard didRestorePlayback else { return }
         let rawPosition = pendingResumePositionMs ?? watchPlaybackPositionMs
-        let position = normalizedVideoResumePosition(rawPosition, durationMs: material.durationMs)
+        let position = normalizedResumePosition(rawPosition, durationMs: material.durationMs)
         guard force || abs(position - lastSavedPositionMs) >= 5_000 else { return }
         lastSavedPositionMs = position
-        VideoPlaybackProgressStore().save(materialID: material.id, positionMs: position)
+        PlaybackProgressStore().save(materialID: material.id, positionMs: position)
         guard let endpoint = configuration.endpoint else { return }
         Task {
             _ = try? await APIClient(baseURL: endpoint).savePlaybackState(
@@ -845,13 +873,6 @@ struct VideoLearningView: View {
                 positionMs: position
             )
         }
-    }
-
-    private func parsePlaybackDate(_ value: String?) -> Date? {
-        guard let value else { return nil }
-        let withFractions = ISO8601DateFormatter()
-        withFractions.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return withFractions.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 
     private var offlineEntry: OfflineEntry? { offlineLibrary.entry(for: material.id) }

@@ -139,7 +139,7 @@ class Repository:
                                state.updated_at
                         FROM material m
                         LEFT JOIN material_playback_state state ON state.material_id = m.id
-                        WHERE m.id = :material_id AND m.kind = 'video'
+                        WHERE m.id = :material_id
                         """
                     ),
                     {"material_id": material_id},
@@ -157,7 +157,7 @@ class Repository:
                         """
                         INSERT INTO material_playback_state (material_id, position_ms)
                         SELECT id, :position_ms FROM material
-                        WHERE id = :material_id AND kind = 'video'
+                        WHERE id = :material_id
                         ON CONFLICT (material_id) DO UPDATE
                         SET position_ms = EXCLUDED.position_ms
                         RETURNING material_id, position_ms, updated_at

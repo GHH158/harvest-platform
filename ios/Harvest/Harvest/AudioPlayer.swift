@@ -14,6 +14,10 @@ final class AudioPlayer: ObservableObject {
     private var itemObserver: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
     private var loadedURL: URL?
+    /// A seek requested before the item could serve it (resuming right after `prepare`).
+    /// Until it lands, the periodic observer must not report the item's 0 position —
+    /// that would look like the listener rewound and overwrite the saved resume point.
+    private var pendingSeekMs: Int?
 
     func prepare(url: URL) async {
         if loadedURL == url { return }
@@ -42,6 +46,7 @@ final class AudioPlayer: ObservableObject {
                     self.errorMessage = message ?? "朗读播放失败"
                 } else if isReady, self.loadedURL == url {
                     self.errorMessage = nil
+                    self.applyPendingSeek()
                 }
             }
         }
@@ -58,11 +63,16 @@ final class AudioPlayer: ObservableObject {
             queue: .main
         ) { [weak self] time in
             Task { @MainActor in
-                self?.positionMs = max(0, Int(time.seconds * 1_000))
-                if let duration = self?.player?.currentItem?.duration.seconds, duration.isFinite {
-                    self?.durationMs = Int(duration * 1_000)
+                guard let self else { return }
+                // Hold the resume target until the seek lands, otherwise the item's
+                // pre-seek 0 would be mistaken for real playback progress.
+                if self.pendingSeekMs == nil {
+                    self.positionMs = max(0, Int(time.seconds * 1_000))
+                }
+                if let duration = self.player?.currentItem?.duration.seconds, duration.isFinite {
+                    self.durationMs = Int(duration * 1_000)
                     if duration > 0 && time.seconds >= duration {
-                        self?.isPlaying = false
+                        self.isPlaying = false
                     }
                 }
             }
@@ -86,8 +96,22 @@ final class AudioPlayer: ObservableObject {
     }
 
     func seek(to milliseconds: Int) {
-        player?.seek(to: CMTime(value: CMTimeValue(milliseconds), timescale: 1_000))
-        positionMs = milliseconds
+        let target = max(0, milliseconds)
+        positionMs = target
+        guard let player, player.currentItem?.status == .readyToPlay else {
+            // Item still loading; remember the target and apply it once it is ready.
+            pendingSeekMs = target
+            return
+        }
+        pendingSeekMs = nil
+        player.seek(to: CMTime(value: CMTimeValue(target), timescale: 1_000))
+    }
+
+    private func applyPendingSeek() {
+        guard let target = pendingSeekMs, let player else { return }
+        pendingSeekMs = nil
+        positionMs = target
+        player.seek(to: CMTime(value: CMTimeValue(target), timescale: 1_000))
     }
 
     func stop() {

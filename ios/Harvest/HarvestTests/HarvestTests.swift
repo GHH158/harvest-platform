@@ -407,10 +407,10 @@ struct HarvestTests {
     }
 
     @Test func finishedVideoResumePositionRestartsButMiddlePositionIsPreserved() {
-        #expect(normalizedVideoResumePosition(900, durationMs: 100_000) == 0)
-        #expect(normalizedVideoResumePosition(42_000, durationMs: 100_000) == 42_000)
-        #expect(normalizedVideoResumePosition(96_000, durationMs: 100_000) == 0)
-        #expect(normalizedVideoResumePosition(42_000, durationMs: nil) == 42_000)
+        #expect(normalizedResumePosition(900, durationMs: 100_000) == 0)
+        #expect(normalizedResumePosition(42_000, durationMs: 100_000) == 42_000)
+        #expect(normalizedResumePosition(96_000, durationMs: 100_000) == 0)
+        #expect(normalizedResumePosition(42_000, durationMs: nil) == 42_000)
     }
 
     @Test func sentenceLoopRestartsAtTargetBoundaryOnlyWhilePlaying() {
@@ -439,14 +439,37 @@ struct HarvestTests {
         let suite = "HarvestTests.Playback.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = VideoPlaybackProgressStore(defaults: defaults)
+        let store = PlaybackProgressStore(defaults: defaults)
         let date = Date(timeIntervalSince1970: 1_800_000_000)
 
         store.save(materialID: 7, positionMs: 12_000, updatedAt: date)
         store.save(materialID: 8, positionMs: 34_000, updatedAt: date)
 
-        #expect(store.load(materialID: 7) == StoredVideoPlayback(positionMs: 12_000, updatedAt: date))
+        #expect(store.load(materialID: 7) == StoredPlayback(positionMs: 12_000, updatedAt: date))
         #expect(store.load(materialID: 8)?.positionMs == 34_000)
+    }
+
+    @Test func playbackTimestampsParseAcrossPostgresPrecisions() throws {
+        // PostgreSQL renders microseconds; ISO8601DateFormatter only takes milliseconds.
+        // Failing to parse made the caller treat the server copy as "not newer", so a
+        // resume point saved on another device was never picked up.
+        let microseconds = try #require(parsePlaybackDate("2026-08-07T07:41:28.905934+08:00"))
+        let milliseconds = try #require(parsePlaybackDate("2026-08-07T07:41:28.905+08:00"))
+        #expect(abs(microseconds.timeIntervalSince(milliseconds)) < 0.01)
+
+        #expect(parsePlaybackDate("2026-08-05T00:00:00Z") != nil)
+        #expect(parsePlaybackDate("2026-08-07T07:41:28+08:00") != nil)
+        #expect(parsePlaybackDate(nil) == nil)
+        #expect(parsePlaybackDate("not a date") == nil)
+    }
+
+    @Test func resumePositionSurvivesAnItemThatIsNotReadyYet() {
+        // The reader restores before the AVPlayerItem is ready; until the seek lands the
+        // item reports 0, which used to be written back as real progress.
+        #expect(normalizedResumePosition(19_000, durationMs: 54_000) == 19_000)
+        #expect(normalizedResumePosition(0, durationMs: 54_000) == 0)
+        // Near the end counts as finished, so the next open starts over.
+        #expect(normalizedResumePosition(52_000, durationMs: 54_000) == 0)
     }
 
     @Test func videoPlaybackAPIReadsAndWritesIntegerMilliseconds() async throws {

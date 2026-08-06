@@ -148,9 +148,11 @@ def test_video_playback_position_can_be_read_and_updated(monkeypatch: pytest.Mon
     assert repository.position_ms == 34_500
 
 
-def test_video_playback_position_rejects_missing_or_non_video_material(
+def test_playback_position_rejects_unknown_material(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Reading materials keep a position too, so the only rejection left is a
+    # material that does not exist.
     monkeypatch.setattr(main, "repository", PlaybackRepository)
 
     with pytest.raises(HTTPException) as caught:
