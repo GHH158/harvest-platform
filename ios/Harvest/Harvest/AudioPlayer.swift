@@ -65,9 +65,13 @@ final class AudioPlayer: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 // Hold the resume target until the seek lands, otherwise the item's
-                // pre-seek 0 would be mistaken for real playback progress.
+                // pre-seek 0 would be mistaken for real playback progress. Retrying here
+                // rather than only on the status change keeps this independent of KVO
+                // timing — the observer can miss a transition that already happened.
                 if self.pendingSeekMs == nil {
                     self.positionMs = max(0, Int(time.seconds * 1_000))
+                } else {
+                    self.applyPendingSeek()
                 }
                 if let duration = self.player?.currentItem?.duration.seconds, duration.isFinite {
                     self.durationMs = Int(duration * 1_000)
@@ -85,6 +89,8 @@ final class AudioPlayer: ObservableObject {
             player.pause()
             isPlaying = false
         } else {
+            // Last chance to honour a resume point the item was not ready to accept.
+            applyPendingSeek()
             player.rate = rate
             isPlaying = true
         }
@@ -98,20 +104,29 @@ final class AudioPlayer: ObservableObject {
     func seek(to milliseconds: Int) {
         let target = max(0, milliseconds)
         positionMs = target
-        guard let player, player.currentItem?.status == .readyToPlay else {
-            // Item still loading; remember the target and apply it once it is ready.
-            pendingSeekMs = target
-            return
-        }
-        pendingSeekMs = nil
-        player.seek(to: CMTime(value: CMTimeValue(target), timescale: 1_000))
+        pendingSeekMs = target
+        applyPendingSeek()
     }
 
+    /// Applies the outstanding seek, and only forgets it once AVFoundation reports the
+    /// seek actually finished. Clearing it on request instead let a seek issued before
+    /// the item was ready get dropped: the display stayed at the resume point while the
+    /// player sat at 0, so pressing play restarted from the first sentence.
     private func applyPendingSeek() {
-        guard let target = pendingSeekMs, let player else { return }
-        pendingSeekMs = nil
-        positionMs = target
-        player.seek(to: CMTime(value: CMTimeValue(target), timescale: 1_000))
+        guard let target = pendingSeekMs,
+              let player,
+              player.currentItem?.status == .readyToPlay else { return }
+        player.seek(
+            to: CMTime(value: CMTimeValue(target), timescale: 1_000),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        ) { [weak self] finished in
+            guard finished else { return }
+            Task { @MainActor in
+                guard let self, self.pendingSeekMs == target else { return }
+                self.pendingSeekMs = nil
+            }
+        }
     }
 
     func stop() {
