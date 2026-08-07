@@ -83,6 +83,22 @@ struct OfflineEntry: Codable, Identifiable {
         return FileManager.default.fileExists(atPath: localAudioURL.filePath)
     }
 
+    /// Rewrites every stored file path, leaving the rest of the entry untouched.
+    /// Used to switch between the in-memory absolute form and the persisted relative one.
+    func mappingPaths(_ transform: (String) -> String) -> OfflineEntry {
+        OfflineEntry(
+            material: material,
+            localAudioPath: localAudioPath.map(transform),
+            videoSegmentPaths: videoSegmentPaths?.map { $0.map(transform) },
+            audioSegmentPaths: audioSegmentPaths?.map { $0.map(transform) },
+            videoSegmentDurations: videoSegmentDurations,
+            audioSegmentDurations: audioSegmentDurations,
+            totalVideoSegments: totalVideoSegments,
+            totalAudioSegments: totalAudioSegments,
+            downloadedAt: downloadedAt
+        )
+    }
+
     private func contiguousURLs(_ paths: [String?]) -> [URL] {
         var urls: [URL] = []
         for path in paths {
@@ -456,18 +472,45 @@ final class OfflineLibrary: ObservableObject {
 
     private func load() {
         guard let url = try? manifestURL(), let data = try? Data(contentsOf: url) else { return }
+        let root = try? rootDirectory()
+        func resolved(_ list: [OfflineEntry]) -> [OfflineEntry] {
+            guard let root else { return list }
+            return list.map { entry in entry.mappingPaths { absolutePath($0, root: root) } }
+        }
         if let restored = try? JSONDecoder().decode([OfflineEntry].self, from: data) {
-            entries = restored.filter(\.hasPlayableMedia)
+            entries = resolved(restored).filter(\.hasPlayableMedia)
             return
         }
         // Partially corrupted manifest: salvage every individually-valid entry instead
         // of silently wiping all downloads.
         let failable = try? JSONDecoder().decode([FailableCodable<OfflineEntry>].self, from: data)
-        let salvaged = failable?.compactMap(\.wrapped).filter(\.hasPlayableMedia) ?? []
+        let salvaged = resolved(failable?.compactMap(\.wrapped) ?? []).filter(\.hasPlayableMedia)
         entries = salvaged
         loadWarning = salvaged.isEmpty
             ? "已下载清单损坏，原有文件已保留。可重新下载。"
             : "部分已下载记录损坏，已跳过。可重新下载。"
+    }
+
+    /// Paths live in memory as absolute (everything downstream expects that) but are
+    /// persisted relative to the offline root: the app container's absolute path can
+    /// change between installs, which would strand every previously downloaded file.
+    private func relativePath(_ absolute: String, root: URL) -> String {
+        let rootPath = root.filePath
+        guard absolute.hasPrefix(rootPath) else { return absolute }
+        return String(absolute.dropFirst(rootPath.count)).trimmingCharacters(
+            in: CharacterSet(charactersIn: "/")
+        )
+    }
+
+    private func absolutePath(_ stored: String, root: URL) -> String {
+        guard stored.hasPrefix("/") else { return root.appending(path: stored).filePath }
+        // Absolute path written by an older build: usable only if it still resolves,
+        // otherwise re-anchor the layout suffix (material-<id>/…) onto the current root.
+        let decoded = normalizedStoredPath(stored)
+        if fileManager.fileExists(atPath: decoded) { return decoded }
+        guard let marker = decoded.range(of: "/material-", options: .backwards) else { return decoded }
+        let suffix = String(decoded[decoded.index(after: marker.lowerBound)...])
+        return root.appending(path: suffix).filePath
     }
 
     private struct FailableCodable<T: Decodable>: Decodable {
@@ -478,7 +521,9 @@ final class OfflineLibrary: ObservableObject {
     }
 
     private func persist() throws {
-        try JSONEncoder().encode(entries).write(to: manifestURL(), options: .atomic)
+        let root = try rootDirectory()
+        let portable = entries.map { entry in entry.mappingPaths { relativePath($0, root: root) } }
+        try JSONEncoder().encode(portable).write(to: manifestURL(), options: .atomic)
     }
 }
 

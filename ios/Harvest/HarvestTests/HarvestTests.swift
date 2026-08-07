@@ -751,4 +751,61 @@ struct HarvestTests {
         #expect(FileManager.default.fileExists(atPath: normalizedStoredPath(encoded)))
         #expect(normalizedStoredPath(file.filePath) == file.filePath)
     }
+
+    @MainActor @Test func downloadsSurviveTheContainerPathChanging() async throws {
+        // iOS may hand the app a different container path after a reinstall/update.
+        // Persisting absolute paths stranded every downloaded file even though the
+        // bytes were still there, so the manifest stores paths relative to the root.
+        resetStub()
+        let audioURL = URL(string: "https://media.example/reading.mp3")!
+        StubURLProtocol.responses[audioURL] = Data("audio".utf8)
+        let base = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let oldRoot = base.appending(path: "Container A/HarvestOffline")
+        let newRoot = base.appending(path: "Container B/HarvestOffline")
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let materialData = """
+        {"id":7,"kind":"reading","title":"読み物","status":"ready","error_message":null,"duration_ms":8000,"audio_url":"https://media.example/reading.mp3","video_url":null,"segments":[],"tokens":[]}
+        """.data(using: .utf8)!
+        let material = try JSONDecoder().decode(MaterialDetail.self, from: materialData)
+
+        let first = OfflineLibrary(downloadSession: stubSession(), rootDirectory: oldRoot)
+        try await first.download(material)
+        #expect(first.localAudioURL(for: 7) != nil)
+
+        // Simulate the container moving: same files, new absolute prefix.
+        try FileManager.default.createDirectory(
+            at: newRoot.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.moveItem(at: oldRoot, to: newRoot)
+        let reopened = OfflineLibrary(downloadSession: stubSession(), rootDirectory: newRoot)
+
+        let restored = try #require(reopened.localAudioURL(for: 7))
+        #expect(restored.filePath.hasPrefix(newRoot.filePath))
+        #expect(FileManager.default.fileExists(atPath: restored.filePath))
+    }
+
+    @MainActor @Test func manifestStoresPathsRelativeToTheOfflineRoot() async throws {
+        resetStub()
+        let audioURL = URL(string: "https://media.example/reading.mp3")!
+        StubURLProtocol.responses[audioURL] = Data("audio".utf8)
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "Application Support \(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let materialData = """
+        {"id":7,"kind":"reading","title":"読み物","status":"ready","error_message":null,"duration_ms":8000,"audio_url":"https://media.example/reading.mp3","video_url":null,"segments":[],"tokens":[]}
+        """.data(using: .utf8)!
+        let material = try JSONDecoder().decode(MaterialDetail.self, from: materialData)
+        let library = OfflineLibrary(downloadSession: stubSession(), rootDirectory: root)
+
+        try await library.download(material)
+
+        let manifest = try Data(contentsOf: root.appending(path: "manifest.json"))
+        let stored = try JSONDecoder().decode([OfflineEntry].self, from: manifest)
+        let path = try #require(stored.first?.localAudioPath)
+        #expect(path == "material-7/reading.mp3")
+        // In memory it is still absolute, so everything downstream keeps working.
+        #expect(library.entry(for: 7)?.localAudioPath?.hasPrefix("/") == true)
+    }
 }
