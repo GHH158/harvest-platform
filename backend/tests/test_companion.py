@@ -41,3 +41,20 @@ def test_companion_messages_include_context_history_and_question_only() -> None:
     assert "今日は風が強いです。" in messages[-1]["content"]
     assert messages[-1]["content"].endswith("用户问题:\n请重新解释「流会」。")
     assert "JMdict" not in messages[-1]["content"]
+
+
+def test_shared_core_flags_chinese_lookalike_traps() -> None:
+    # The learner is a Chinese native: 5 of 13 real corrections were interference
+    # errors, the clearest being 中文「随时」used as 日语「随時」. Words they can read
+    # are exactly the ones they never look up, so the kernel must volunteer the gap.
+    assert "中文母语者" in INTERACTIVE_TEACHING_CORE_PROMPT
+    assert "汉字看得懂、用法却不同" in INTERACTIVE_TEACHING_CORE_PROMPT
+    assert "只在确实存在差异时给出" in INTERACTIVE_TEACHING_CORE_PROMPT
+
+
+def test_shared_core_reaches_every_teaching_entrance() -> None:
+    from app.chat import CHAT_SYSTEM_PROMPT
+    from app.prompts import VOICE_TEACHER_SYSTEM_PROMPT
+
+    for prompt in (COMPANION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, VOICE_TEACHER_SYSTEM_PROMPT):
+        assert "汉字看得懂、用法却不同" in prompt

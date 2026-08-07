@@ -472,3 +472,18 @@ def test_companion_sends_prior_turns_to_llm(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured[-1]["content"].endswith("用户问题:\n请解释「流会」的意思")
     assert options == [{"enable_thinking": False, "max_tokens": 1_200}]
     assert result["assistant"]["content"] == "新的回答"
+
+
+def test_dictionary_prompt_ranks_the_chinese_difference_first() -> None:
+    # ① same-form-different-use, ② kanji composition, ③ everything else — in that order,
+    # because the first two are the only angles that give a Chinese native both a hook
+    # and the reason behind it.
+    prompt = main._DICTIONARY_SYSTEM
+    assert "中文母语" in prompt
+    first = prompt.index("与中文同形但语感")
+    second = prompt.index("拆解汉字各自的含义")
+    third = prompt.index("再给语感、常见搭配")
+    assert first < second < third
+    assert "不要为了套用①而牵强附会" in prompt
+    # The lookup is no longer clipboard-driven.
+    assert "剪贴板" not in prompt
