@@ -24,7 +24,7 @@ struct VocabularyView: View {
                 WarmEmptyState(
                     title: "还没有生词",
                     systemImage: "bookmark",
-                    message: "在消息里复制日语词，点右上角查词，再选择「加入生词表」"
+                    message: "阅读、陪读或聊天时点一下不认识的日语词，在查词卡片里选「加入生词表」"
                 )
             } else {
                 wordList

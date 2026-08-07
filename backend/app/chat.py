@@ -61,7 +61,18 @@ Conversation behavior
 - Use natural contemporary Japanese for adult conversation.
 - Adapt dynamically to the learner and stay slightly above their demonstrated level.
 - Stay reasonably close to the supplied session topic while allowing natural branches.
-- Reply with 1–3 short Japanese sentences, then exactly one natural follow-up question.
+- Reply with 1–3 short Japanese sentences.
+- reply_ja must never contain a question. Every question you ask belongs in follow_up_ja
+  and nowhere else, so that a turn without follow_up_ja is genuinely a turn without a
+  question. Never split one question across both fields, and never ask two.
+- Questions are the exception, not the default. Check the transcript first: if your own
+  previous turn ended with a question, this turn asks nothing at all — follow_up_ja is
+  null and reply_ja simply responds. Two questions in a row is an interrogation.
+- Ask nothing, too, when the learner asked you something (answer it and stop there), when
+  the learner is still developing their own point, or when a plain human reaction is what
+  a person would say.
+- Never repeat a question the learner did not answer. Let it go and follow what they
+  actually said.
 - At session start, introduce the topic naturally and ask an accessible opening question.
 - Avoid lectures, long explanations, repetitive encouragement, gamification, and textbook drills.
 - If the learner writes mainly in Chinese, treat it as help expressing the idea in Japanese, not as a Japanese error.
@@ -88,6 +99,7 @@ Output
 - The exact schema is:
 {"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","reason_zh":"...","category":"grammar"}]},"reply_ja":"...","follow_up_ja":"..."}
 - When correction is unnecessary, use needed=false, corrected_text=null, summary_zh=null, items=[].
+- follow_up_ja is optional: set it to null when this turn should not end with a question.
 """
 
 CHAT_SYSTEM_PROMPT = f"{INTERACTIVE_TEACHING_CORE_PROMPT}\n\n{CHAT_SCENE_PROMPT}"
@@ -137,15 +149,23 @@ class ChatModelTurn(BaseModel):
 
     correction: CorrectionOutput
     reply_ja: str = Field(min_length=1, max_length=2_000)
-    follow_up_ja: str = Field(min_length=1, max_length=1_000)
+    # Optional on purpose: a required question made every single turn end in one, which
+    # turned conversation into interrogation (measured: 18 of 18 replies).
+    follow_up_ja: str | None = Field(default=None, max_length=1_000)
 
-    @field_validator("reply_ja", "follow_up_ja")
+    @field_validator("reply_ja")
     @classmethod
     def strip_text(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError("日语回应与后续问题不能为空。")
+            raise ValueError("日语回应不能为空。")
         return value
+
+    @field_validator("follow_up_ja")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        stripped = (value or "").strip()
+        return stripped or None
 
 
 class ChatOutputError(RuntimeError):
@@ -191,7 +211,54 @@ def chat_messages(
         )
     else:
         messages.append({"role": "user", "content": user_message.strip()})
+        if last_assistant_asked_a_question(history):
+            # The general rule in the system prompt is not enough on its own — the model
+            # reliably asks anyway. A proximate, per-turn instruction steers reply_ja to
+            # stand on its own; `suppress_follow_up` then guarantees it.
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Your previous turn already ended with a question. This turn must ask "
+                        "nothing: set follow_up_ja to null and keep reply_ja free of questions. "
+                        "Simply respond to what the learner said."
+                    ),
+                }
+            )
     return messages
+
+
+def _ends_with_question(text: str) -> bool:
+    """Japanese questions often end in 「〜ますか。」 with a full stop rather than ？,
+    so a punctuation-only check misses most of them and the alternation never fires."""
+    stripped = text.strip().rstrip("。．. \n　")
+    if not stripped:
+        return False
+    if stripped.endswith(("？", "?")):
+        return True
+    return stripped.endswith(("か", "かな", "かしら", "の"))
+
+
+def last_assistant_asked_a_question(history: list[dict]) -> bool:
+    """Whether the most recent assistant turn already put a question to the learner."""
+    for message in reversed(history):
+        if str(message.get("role", "")) != "assistant":
+            continue
+        return _ends_with_question(str(message.get("content", "")))
+    return False
+
+
+def suppress_follow_up(turn: ChatModelTurn, history: list[dict]) -> ChatModelTurn:
+    """Drop a follow-up question when the previous turn already asked one.
+
+    Measured before this rule: 18 of 18 replies ended in a question, because the schema
+    required one. Prompt guidance alone did not change it, so the alternation is enforced
+    here. `reply_ja` is a self-contained reaction, so removing the question leaves a
+    natural turn rather than a truncated one.
+    """
+    if turn.follow_up_ja is None or not last_assistant_asked_a_question(history):
+        return turn
+    return turn.model_copy(update={"follow_up_ja": None})
 
 
 def _json_candidates(raw: str) -> list[str]:
@@ -252,6 +319,8 @@ def generate_chat_turn(llm: LLMService, messages: list[dict[str, str]]) -> ChatM
 
 
 def assistant_content(turn: ChatModelTurn) -> str:
+    if not turn.follow_up_ja:
+        return turn.reply_ja
     return f"{turn.reply_ja}\n\n{turn.follow_up_ja}"
 
 

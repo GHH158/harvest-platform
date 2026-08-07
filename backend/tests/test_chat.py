@@ -8,10 +8,12 @@ from app import main
 from app.chat import (
     CHAT_SYSTEM_PROMPT,
     ChatOutputError,
+    assistant_content,
     build_correction_guidance,
     chat_messages,
     generate_chat_turn,
     parse_chat_turn,
+    suppress_follow_up,
     topic_for,
 )
 from app.prompts import INTERACTIVE_TEACHING_CORE_PROMPT
@@ -266,3 +268,113 @@ def test_legacy_chat_failure_does_not_create_a_partial_session(monkeypatch: pyte
 
     assert caught.value.status_code == 502
     assert repository.completed is False
+
+
+def test_reply_without_a_follow_up_question_is_accepted() -> None:
+    # A required follow-up made every turn end in a question: 18 of 18 replies in real
+    # use. The learner never got to simply develop their own point.
+    turn = parse_chat_turn(
+        json.dumps(
+            {
+                "correction": {"needed": False, "corrected_text": None, "summary_zh": None, "items": []},
+                "reply_ja": "「フレーズ」は決まった言い回しのことですよ。",
+                "follow_up_ja": None,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert turn.follow_up_ja is None
+    assert assistant_content(turn) == "「フレーズ」は決まった言い回しのことですよ。"
+
+
+def test_blank_follow_up_is_treated_as_absent() -> None:
+    turn = parse_chat_turn(
+        json.dumps(
+            {
+                "correction": {"needed": False, "corrected_text": None, "summary_zh": None, "items": []},
+                "reply_ja": "なるほどですね。",
+                "follow_up_ja": "   ",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert turn.follow_up_ja is None
+    assert assistant_content(turn) == "なるほどですね。"
+
+
+def test_follow_up_still_renders_when_the_model_asks_one() -> None:
+    turn = parse_chat_turn(model_json())
+
+    assert turn.follow_up_ja == "どんなところが一番よかったですか？"
+    assert assistant_content(turn) == "それはいいですね。\n\nどんなところが一番よかったですか？"
+
+
+def test_follow_up_is_dropped_when_the_previous_turn_already_asked() -> None:
+    # Prompt guidance alone did not move the model off asking every turn, so the
+    # alternation is enforced in code.
+    history = [
+        {"role": "user", "content": "村上春樹の小説を読みました"},
+        {"role": "assistant", "content": "村上春樹、いいですね。\n\nどの作品を読みましたか？"},
+    ]
+    turn = parse_chat_turn(model_json())
+
+    trimmed = suppress_follow_up(turn, history)
+
+    assert trimmed.follow_up_ja is None
+    assert assistant_content(trimmed) == "それはいいですね。"
+
+
+def test_follow_up_survives_when_the_previous_turn_did_not_ask() -> None:
+    history = [
+        {"role": "user", "content": "村上春樹の小説を読みました"},
+        {"role": "assistant", "content": "村上春樹、いいですね。とても人気があります。"},
+    ]
+    turn = parse_chat_turn(model_json())
+
+    assert suppress_follow_up(turn, history).follow_up_ja == "どんなところが一番よかったですか？"
+
+
+def test_opening_turn_keeps_its_question() -> None:
+    turn = parse_chat_turn(model_json())
+
+    assert suppress_follow_up(turn, []).follow_up_ja is not None
+
+
+def test_per_turn_instruction_is_added_only_after_a_question() -> None:
+    asked = chat_messages(
+        topic="本",
+        history=[{"role": "assistant", "content": "どの作品を読みましたか？"}],
+        guidance="",
+        user_message="村上春樹です",
+    )
+    # Match the per-turn nudge specifically; the system prompt mentions the field too.
+    marker = "Your previous turn already ended with a question"
+    assert any(marker in m["content"] for m in asked)
+
+    not_asked = chat_messages(
+        topic="本",
+        history=[{"role": "assistant", "content": "村上春樹、いいですね。"}],
+        guidance="",
+        user_message="村上春樹です",
+    )
+    assert not any(marker in m["content"] for m in not_asked)
+
+
+@pytest.mark.parametrize(
+    ("text", "is_question"),
+    [
+        ("どの作品を読みましたか。", True),   # Japanese questions often end in 。 not ？
+        ("どんなところが一番よかったですか？", True),
+        ("次は何を読もうかな", True),
+        ("村上春樹の小説、いいですね。", False),
+        ("次の本が決まったら、ぜひ教えてください。", False),
+        ("「小説」は物語やストーリーのことです。", False),
+    ],
+)
+def test_question_detection_is_not_punctuation_only(text: str, is_question: bool) -> None:
+    history = [{"role": "assistant", "content": text}]
+    turn = parse_chat_turn(model_json())
+
+    assert (suppress_follow_up(turn, history).follow_up_ja is None) is is_question

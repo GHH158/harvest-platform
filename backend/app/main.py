@@ -28,6 +28,7 @@ from .chat import (
     chat_messages,
     correction_payload,
     generate_chat_turn,
+    suppress_follow_up,
     topic_for,
 )
 from .companion import build_companion_messages
@@ -810,11 +811,12 @@ def _chat_turn(*, topic: str, history: list[dict], guidance: str, user_message: 
         user_message=user_message,
     )
     try:
-        return generate_chat_turn(llm_service(), messages)
+        turn = generate_chat_turn(llm_service(), messages)
     except ChatOutputError as error:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
     except Exception as error:
         raise _llm_error(error) from error
+    return suppress_follow_up(turn, history)
 
 
 @app.get("/chat/topics")

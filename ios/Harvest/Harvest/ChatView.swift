@@ -473,7 +473,7 @@ struct ChatView: View {
                 Button {
                     lookupFromClipboard()
                 } label: {
-                    Label("查剪贴板中的词", systemImage: "doc.on.clipboard")
+                    Label("查词组或剪贴板", systemImage: "doc.on.clipboard")
                 }
                 if store.activeSession != nil {
                     Button {

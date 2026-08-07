@@ -11,7 +11,7 @@ struct WordPickSheet: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 18) {
-                Text("先在消息里选中日语并复制，再点查词会更快。也可以在这里直接输入。")
+                Text("在正文或消息里点一下日语词就能直接查。这里适合查点不中的词组，或者不在当前页面的词。")
                     .font(.footnote)
                     .foregroundStyle(DesignTokens.muted)
                     .lineSpacing(4)
