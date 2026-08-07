@@ -1,6 +1,23 @@
 import NaturalLanguage
 import SwiftUI
 
+/// Navigation payloads instead of inline destinations.
+///
+/// `NavigationLink { CompanionView(…) }` builds its destination eagerly, so every word
+/// in the text constructed one — on every re-render, which during playback is ten times
+/// a second. Worse, mixing that form with `navigationDestination(for:)` in the same
+/// stack is also discouraged. Building them by value means a destination is created
+/// only when a link is actually followed.
+struct CompanionRequest: Hashable {
+    let materialID: Int
+    let segment: Segment
+    let focusText: String?
+}
+
+struct ShadowingRequest: Hashable {
+    let segment: Segment
+}
+
 struct ReaderView: View {
     @EnvironmentObject private var configuration: AppConfiguration
     @EnvironmentObject private var offlineLibrary: OfflineLibrary
@@ -18,6 +35,10 @@ struct ReaderView: View {
     /// of the live player: leaving for 陪读 rebuilds the view, and the replacement player
     /// reports 0 before its item loads — writing that back erased the resume point.
     @State private var lastObservedPositionMs = 0
+    /// Word segmentation per sentence, computed once per material.
+    /// It used to run inside the sentence view's initialiser, so every playback tick
+    /// (ten per second) re-tokenised every sentence on screen.
+    @State private var readingUnits: [Int: [JapaneseReadingUnit]] = [:]
     private let startsOffline: Bool
 
     init(materialID: Int) {
@@ -53,7 +74,20 @@ struct ReaderView: View {
         .navigationTitle(material?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
+        // Destinations are built here, once, only when a link is actually followed.
+        .navigationDestination(for: CompanionRequest.self) { request in
+            CompanionView(
+                materialID: request.materialID,
+                segment: request.segment,
+                focusText: request.focusText
+            )
+        }
+        .navigationDestination(for: ShadowingRequest.self) { request in
+            ShadowingView(segment: request.segment)
+        }
         .task { if !startsOffline { await load() } }
+        .onChange(of: material?.id) { _, _ in rebuildReadingUnits() }
+        .onChange(of: material?.tokens.count) { _, _ in rebuildReadingUnits() }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(4))
@@ -104,14 +138,19 @@ struct ReaderView: View {
                             .foregroundStyle(DesignTokens.accent)
                     }
                     ForEach(material.segments) { segment in
+                        let units = readingUnits[segment.id] ?? []
+                        let current = isCurrent(segment)
                         ReadingSentenceView(
                             materialID: material.id,
                             segment: segment,
-                            tokens: tokens(for: segment, in: material),
-                            playbackPositionMs: player.positionMs,
-                            isCurrent: isCurrent(segment),
+                            units: units,
+                            activeUnitID: current
+                                ? activeReadingUnitID(in: units, at: player.positionMs)
+                                : nil,
+                            isCurrent: current,
                             onSelect: { player.seek(to: segment.startMs) }
                         )
+                        .equatable()
                         .id(segment.id)
                     }
                 }
@@ -290,6 +329,22 @@ struct ReaderView: View {
 
     private func tokens(for segment: Segment, in material: MaterialDetail) -> [Token] {
         material.tokens.filter { $0.segmentID == segment.id }
+    }
+
+    /// Tokenises every sentence once, when the material (or its ASR tokens) change.
+    private func rebuildReadingUnits() {
+        guard let material else {
+            readingUnits = [:]
+            return
+        }
+        var built: [Int: [JapaneseReadingUnit]] = [:]
+        for segment in material.segments {
+            built[segment.id] = japaneseReadingUnits(
+                text: segment.textJA,
+                tokens: tokens(for: segment, in: material)
+            )
+        }
+        readingUnits = built
     }
 
     @MainActor
@@ -472,9 +527,13 @@ struct ReadingSentenceView: View, Equatable {
             ReadingFlowLayout(horizontalSpacing: 2, verticalSpacing: 9) {
                 ForEach(units) { unit in
                     if unit.isWord {
-                        NavigationLink {
-                            CompanionView(materialID: materialID, segment: segment, focusText: unit.text)
-                        } label: {
+                        NavigationLink(
+                            value: CompanionRequest(
+                                materialID: materialID,
+                                segment: segment,
+                                focusText: unit.text
+                            )
+                        ) {
                             ReadingWordLabel(
                                 unit: unit,
                                 isActive: unit.id == activeUnitID
@@ -681,9 +740,11 @@ private struct ReadingControlBar: View {
 
     @ViewBuilder
     private var askButton: some View {
-        NavigationLink {
-            if let currentSegment { CompanionView(materialID: materialID, segment: currentSegment) }
-        } label: {
+        NavigationLink(
+            value: currentSegment.map {
+                CompanionRequest(materialID: materialID, segment: $0, focusText: nil)
+            }
+        ) {
             Label("问这句", systemImage: "questionmark.bubble")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(DesignTokens.accent)
@@ -697,9 +758,7 @@ private struct ReadingControlBar: View {
     }
 
     private var shadowButton: some View {
-        NavigationLink {
-            if let currentSegment { ShadowingView(segment: currentSegment) }
-        } label: {
+        NavigationLink(value: currentSegment.map(ShadowingRequest.init(segment:))) {
             Image(systemName: "waveform")
                 .font(.body.weight(.semibold))
                 .foregroundStyle(DesignTokens.ink)

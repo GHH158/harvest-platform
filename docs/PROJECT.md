@@ -1254,25 +1254,13 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-06 | 修正 §5.8 与实现的漂移:文档中的共同内核仍写着「日语例句或生词在读音确有帮助时附平假名」,而运行时提示词早已改为「不要为日语添加括号注音或平假名旁注,读音由界面假名标注显示」,两者指令相反且此前无任何变更记录。现按运行时版本同步文档(行内括号注音会与界面 ruby 标注重复冲突)。教训:改提示词必须同步回写 §5.8 |
 | 2026-08-07 | 修复离线下载的路径百分号编码缺陷:`URL.path()` 默认对路径做百分号编码,iOS 自带的 `Library/Application Support` 因此变成 `Application%20Support`。文件本身下载正确(写入走 URL API),但所有 `fileExists` / `attributesOfItem` 的字符串路径检查全部落空——下载按钮永远停在未下载状态、断点续传每次从头开始、离线播放静默回退到网络。改为统一使用 `path(percentEncoded: false)`(新增 `URL.filePath`),并让读取旧 manifest 时自动解码修复。此前所有离线测试都用不含空格的临时目录,因此从未暴露;新增的回归测试改用带空格的目录 |
 | 2026-08-07 | 离线清单改存相对路径:此前 `manifest.json` 记录绝对路径,而 App 容器路径可能在重装/更新后改变,已下载文件会整体失联(实测重装后容器 UUID 从 `28B0EE47` 变为 `62383667`)。现在内存中仍是绝对路径(下游逻辑不变),写盘时转为相对于离线根目录,读盘时再拼回当前根目录;旧的绝对路径若已失效,则按 `material-<id>/…` 后缀重新锚定到当前根目录,不需要用户重新下载 |
+| 2026-08-07 | 阅读页去掉播放期间的重复开销(原 §11.1,已完成并删除该条):词面导航由 `NavigationLink { CompanionView(…) }` 改为值驱动(`CompanionRequest` / `ShadowingRequest` + `navigationDestination(for:)`),destination 只在真正跳转时构造,不再每个词都急切建一个;分词结果按素材缓存,不再在句子视图的构造器里每帧重跑 `japaneseReadingUnits`;调用点补上 `.equatable()`,让已有的 `ReadingSentenceView` Equatable 实现真正生效——此前它比较的是 `activeUnitID` 而非原始播放位置,但因为没有 `.equatable()` 而从未被使用 |
 
 ---
 
 ## 11. 待处理事项
 
 已经确认存在、但当前刻意不做的事。写在这里是为了不靠记忆维持,也避免下次重新讨论一遍。修完的条目移入 §10 并从本节删除。
-
-### 11.1 阅读页播放时重复构建导航目标
-
-**现象**:阅读正文里每个词都是 `NavigationLink { CompanionView(...) } label: {...}`。这种写法会**立即构造** destination,而 `ReadingSentenceView` 接收 `playbackPositionMs`,播放时每 100 ms 变一次并触发整页重算——于是每秒要构造上千个 `CompanionView` 实例。
-
-**当前影响**:未观察到可见卡顿,短材料感觉不出来;材料越长、词越多越明显。因此暂不处理。
-
-**建议方案**(两步,第二步才是根治):
-
-1. 改用值驱动导航:定义 `struct WordQuestion: Hashable { segmentID; text }`,词面写成 `NavigationLink(value:)`,在 ReaderView 层挂一个 `.navigationDestination(for: WordQuestion.self)`。destination 只在真正跳转时构造。
-2. 让句子视图不随播放位置整体失效:不要把原始 `playbackPositionMs` 传进每个句子,改为在父层算好该句的 `activeUnitID` 再传入,并让句子视图 `Equatable`。这样只有"当前词发生变化"的那一句会重绘,其余句子跳过。
-
-只做第 1 步能消除重复构造 destination;第 2 步才把每 100 ms 的整页重算也一并去掉。
 
 ### 11.2 跟读评分实际几乎未被使用
 
