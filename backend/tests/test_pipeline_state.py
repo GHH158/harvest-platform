@@ -28,6 +28,7 @@ class PipelineRepository:
         self.video_segments: list[dict[str, Any]] | None = None
         self.video_ready: list[int] = []
         self.translation_batches: list[tuple[int, int]] = []
+        self.already_translated: set[int] = set()
         self.segment_translations: list[str] | None = None
         self.reading_completion: dict[str, Any] | None = None
         self.reading_segments: list[dict[str, Any]] = []
@@ -97,12 +98,17 @@ class PipelineRepository:
     def save_segment_translations(
         self, material_id: int, translations: list[str], *, offset: int = 0
     ) -> None:
-        if offset == 0:
-            self.segment_translations = list(translations)
-        else:
-            assert self.segment_translations is not None
-            self.segment_translations.extend(translations)
         self.translation_batches.append((offset, len(translations)))
+        stored = self.segment_translations or []
+        needed = offset + len(translations)
+        if len(stored) < needed:
+            stored.extend([""] * (needed - len(stored)))
+        for position, translation in enumerate(translations):
+            stored[offset + position] = translation
+        self.segment_translations = stored
+
+    def translated_segment_indices(self, material_id: int) -> set[int]:
+        return self.already_translated
 
     def mark_video_ready(self, material_id: int) -> None:
         self.video_ready.append(material_id)
@@ -257,6 +263,38 @@ def test_batch_failure_keeps_the_lines_already_translated() -> None:
     # Batches 1–2 survived; the material was never touched.
     assert repository.translation_batches == [(0, 40), (40, 40)]
     assert repository.video_ready == []
+
+
+def test_retry_skips_batches_that_already_landed() -> None:
+    # Batches are saved atomically, so a stored index means its whole batch succeeded.
+    # Re-running after a late failure must not pay for those lines a second time.
+    sentences = [f"文{i}。" for i in range(137)]
+    job = Job(id=1, kind="translate_video", material_id=7, payload={"sentences": sentences}, attempts=2)
+    repository = PipelineRepository([job])
+    repository.already_translated = set(range(0, 80))  # first two batches survived
+    worker = Worker(repository, Settings())  # type: ignore[arg-type]
+    llm = BatchCountingLLM()
+    worker.llm = llm  # type: ignore[assignment]
+
+    assert worker.run_one() is True
+
+    assert repository.failed == []
+    # Only the two unfinished batches were sent.
+    assert llm.batch_sizes == [40, 17]
+    assert [offset for offset, _ in repository.translation_batches] == [80, 120]
+
+
+def test_retry_with_nothing_stored_translates_everything() -> None:
+    sentences = [f"文{i}。" for i in range(50)]
+    job = Job(id=1, kind="translate_video", material_id=7, payload={"sentences": sentences}, attempts=2)
+    repository = PipelineRepository([job])
+    worker = Worker(repository, Settings())  # type: ignore[arg-type]
+    llm = BatchCountingLLM()
+    worker.llm = llm  # type: ignore[assignment]
+
+    assert worker.run_one() is True
+
+    assert llm.batch_sizes == [40, 10]
 
 
 def test_failed_asr_only_fails_enhancement_job() -> None:

@@ -194,9 +194,16 @@ class Worker:
         once a material gets long — measured: 22 and 46 sentences succeeded, 137 timed
         out twice. Batching keeps each request short, and saving per batch means a late
         failure leaves the earlier lines translated instead of losing everything.
+
+        A retry resumes: batches already stored are skipped rather than paid for twice.
         """
+        already_translated = self.repository.translated_segment_indices(material_id)
         for start in range(0, len(sentences), TRANSLATION_BATCH_SIZE):
             batch = sentences[start : start + TRANSLATION_BATCH_SIZE]
+            batch_indices = range(start, start + len(batch))
+            if all(index in already_translated for index in batch_indices):
+                print(f"material={material_id} 跳过已翻译的第 {start}–{start + len(batch) - 1} 句。", flush=True)
+                continue
             answer = self.llm.reply(
                 [
                     {"role": "system", "content": SUBTITLE_TRANSLATION_SYSTEM_PROMPT},

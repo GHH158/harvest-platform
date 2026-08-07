@@ -1172,6 +1172,23 @@ class Repository:
                     {"material_id": material_id, "idx": offset + position, "text_zh": translation},
                 )
 
+    def translated_segment_indices(self, material_id: int) -> set[int]:
+        """Segment indices that already carry a Chinese line.
+
+        Lets a retried translation skip the batches that already landed instead of
+        paying for them again — batches are saved atomically, so a stored index means
+        its whole batch succeeded."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT idx FROM segment
+                       WHERE material_id = :material_id
+                         AND text_zh IS NOT NULL AND text_zh <> ''"""
+                ),
+                {"material_id": material_id},
+            ).scalars().all()
+        return {int(value) for value in rows}
+
     def mark_video_ready(self, material_id: int) -> None:
         """A video is consumable once its Japanese subtitles exist (§4.3): it plays,
         highlights per word and opens the companion. The Chinese line is optional."""
