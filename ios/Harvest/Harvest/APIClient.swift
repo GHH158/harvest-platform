@@ -361,7 +361,7 @@ private func makeMultipartFile(
     fields: [String: String]
 ) throws -> URL {
     let destination = FileManager.default.temporaryDirectory.appending(path: "upload-\(UUID().uuidString).multipart")
-    FileManager.default.createFile(atPath: destination.path(), contents: nil)
+    FileManager.default.createFile(atPath: destination.filePath, contents: nil)
     let output = try FileHandle(forWritingTo: destination)
     do {
         for (name, value) in fields {

@@ -1,6 +1,26 @@
 import Foundation
 import Network
 
+extension URL {
+    /// Real filesystem path for `FileManager` and for what we persist.
+    ///
+    /// `URL.path()` percent-encodes by default, so iOS's own "Application Support"
+    /// became "Application%20Support". Downloads still landed correctly (they go
+    /// through URL-based APIs), but every `fileExists`/`attributesOfItem` check on
+    /// the encoded string failed — the download button never left its initial state,
+    /// resumable downloads always restarted, and offline playback silently fell back
+    /// to the network.
+    var filePath: String { path(percentEncoded: false) }
+}
+
+/// Repairs paths persisted before `filePath` existed: they may still carry the
+/// percent-encoded form, which no longer matches anything on disk.
+func normalizedStoredPath(_ path: String) -> String {
+    if FileManager.default.fileExists(atPath: path) { return path }
+    guard let decoded = path.removingPercentEncoding, decoded != path else { return path }
+    return decoded
+}
+
 struct OfflineEntry: Codable, Identifiable {
     let material: MaterialDetail
     let localAudioPath: String?
@@ -35,7 +55,9 @@ struct OfflineEntry: Codable, Identifiable {
     }
 
     var id: Int { material.id }
-    var localAudioURL: URL? { localAudioPath.map(URL.init(fileURLWithPath:)) }
+    var localAudioURL: URL? {
+        localAudioPath.map { URL(fileURLWithPath: normalizedStoredPath($0)) }
+    }
     var localVideoSegmentURLs: [URL] { contiguousURLs(videoSegmentPaths ?? []) }
     var localHLSAudioSegmentURLs: [URL] { contiguousURLs(audioSegmentPaths ?? []) }
     var downloadedVideoSegmentCount: Int { existingCount(videoSegmentPaths ?? []) }
@@ -58,20 +80,22 @@ struct OfflineEntry: Codable, Identifiable {
             return !localVideoSegmentURLs.isEmpty || !localHLSAudioSegmentURLs.isEmpty
         }
         guard let localAudioURL else { return false }
-        return FileManager.default.fileExists(atPath: localAudioURL.path())
+        return FileManager.default.fileExists(atPath: localAudioURL.filePath)
     }
 
     private func contiguousURLs(_ paths: [String?]) -> [URL] {
         var urls: [URL] = []
         for path in paths {
-            guard let path, FileManager.default.fileExists(atPath: path) else { break }
-            urls.append(URL(fileURLWithPath: path))
+            guard let path else { break }
+            let resolved = normalizedStoredPath(path)
+            guard FileManager.default.fileExists(atPath: resolved) else { break }
+            urls.append(URL(fileURLWithPath: resolved))
         }
         return urls
     }
 
     private func existingCount(_ paths: [String?]) -> Int {
-        paths.compactMap(\.self).count { FileManager.default.fileExists(atPath: $0) }
+        paths.compactMap(\.self).count { FileManager.default.fileExists(atPath: normalizedStoredPath($0)) }
     }
 }
 
@@ -165,7 +189,7 @@ final class OfflineLibrary: ObservableObject {
     func entry(for materialID: Int) -> OfflineEntry? { entries.first { $0.id == materialID } }
 
     func localAudioURL(for materialID: Int) -> URL? {
-        guard let url = entry(for: materialID)?.localAudioURL, fileManager.fileExists(atPath: url.path()) else {
+        guard let url = entry(for: materialID)?.localAudioURL, fileManager.fileExists(atPath: url.filePath) else {
             return nil
         }
         return url
@@ -234,14 +258,14 @@ final class OfflineLibrary: ObservableObject {
         guard let root = try? rootDirectory() else { return 0 }
         let before = directoryBytes(root)
         var referenced = Set<String>()
-        if let manifest = try? manifestURL() { referenced.insert(manifest.standardizedFileURL.path()) }
+        if let manifest = try? manifestURL() { referenced.insert(manifest.standardizedFileURL.filePath) }
         for entry in entries {
-            if let path = entry.localAudioPath { referenced.insert(URL(fileURLWithPath: path).standardizedFileURL.path()) }
+            if let path = entry.localAudioPath { referenced.insert(URL(fileURLWithPath: path).standardizedFileURL.filePath) }
             for path in (entry.videoSegmentPaths ?? []).compactMap(\.self) {
-                referenced.insert(URL(fileURLWithPath: path).standardizedFileURL.path())
+                referenced.insert(URL(fileURLWithPath: path).standardizedFileURL.filePath)
             }
             for path in (entry.audioSegmentPaths ?? []).compactMap(\.self) {
-                referenced.insert(URL(fileURLWithPath: path).standardizedFileURL.path())
+                referenced.insert(URL(fileURLWithPath: path).standardizedFileURL.filePath)
             }
         }
         if let enumerator = fileManager.enumerator(
@@ -251,7 +275,7 @@ final class OfflineLibrary: ObservableObject {
         ) {
             for case let url as URL in enumerator {
                 let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
-                if isFile, !referenced.contains(url.standardizedFileURL.path()) {
+                if isFile, !referenced.contains(url.standardizedFileURL.filePath) {
                     try? fileManager.removeItem(at: url)
                 }
             }
@@ -263,10 +287,10 @@ final class OfflineLibrary: ObservableObject {
         guard let remoteURL = material.audioURL else { throw OfflineLibraryError.noAudio }
         let directory = try directory(for: material.id)
         let destination = directory.appending(path: "reading.mp3")
-        let attributes = try? fileManager.attributesOfItem(atPath: destination.path())
+        let attributes = try? fileManager.attributesOfItem(atPath: destination.filePath)
         let existingSize = (attributes?[.size] as? NSNumber)?.intValue ?? 0
         try await downloadResumable(remoteURL, to: destination, resumeOffset: existingSize)
-        upsert(OfflineEntry(material: material, localAudioPath: destination.path()))
+        upsert(OfflineEntry(material: material, localAudioPath: destination.filePath))
         try persist()
     }
 
@@ -299,7 +323,7 @@ final class OfflineLibrary: ObservableObject {
             let segment = mediaPlaylist.segments[index]
             let destination = segmentDestination(index: index, remoteURL: segment.url, directory: mediaDirectory)
             try await download(segment.url, to: destination)
-            paths[index] = destination.path()
+            paths[index] = destination.filePath
             try publishVideoEntry(material, media: media, paths: paths, durations: durations, total: mediaPlaylist.segments.count)
         }
     }
@@ -316,7 +340,7 @@ final class OfflineLibrary: ObservableObject {
     private func existingPaths(for segments: [HLSSegment], in directory: URL) -> [String?] {
         segments.indices.map { index in
             let destination = segmentDestination(index: index, remoteURL: segments[index].url, directory: directory)
-            return fileManager.fileExists(atPath: destination.path()) ? destination.path() : nil
+            return fileManager.fileExists(atPath: destination.filePath) ? destination.filePath : nil
         }
     }
 
@@ -349,8 +373,8 @@ final class OfflineLibrary: ObservableObject {
         case 200:
             try data.write(to: destination, options: .atomic)
         case 206:
-            if !fileManager.fileExists(atPath: destination.path()) {
-                fileManager.createFile(atPath: destination.path(), contents: nil)
+            if !fileManager.fileExists(atPath: destination.filePath) {
+                fileManager.createFile(atPath: destination.filePath, contents: nil)
             }
             let handle = try FileHandle(forWritingTo: destination)
             try handle.seekToEnd()

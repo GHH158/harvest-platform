@@ -707,4 +707,48 @@ struct HarvestTests {
         }
         """.data(using: .utf8)!
     }
+
+    @MainActor @Test func downloadedReadingIsRecognisedInsideAPathWithSpaces() async throws {
+        // iOS stores this under "Library/Application Support", and `URL.path()`
+        // percent-encodes by default: the file landed correctly but every
+        // fileExists check on "Application%20Support" failed, so the download
+        // button stayed on its initial icon and playback silently used the network.
+        // Every existing offline test used a UUID directory with no space, which is
+        // exactly why this survived.
+        resetStub()
+        let audioURL = URL(string: "https://media.example/reading.mp3")!
+        StubURLProtocol.responses[audioURL] = Data("audio".utf8)
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "Application Support \(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let library = OfflineLibrary(downloadSession: stubSession(), rootDirectory: root)
+        let materialData = """
+        {"id":7,"kind":"reading","title":"読み物","status":"ready","error_message":null,"duration_ms":8000,"audio_url":"https://media.example/reading.mp3","video_url":null,"segments":[],"tokens":[]}
+        """.data(using: .utf8)!
+        let material = try JSONDecoder().decode(MaterialDetail.self, from: materialData)
+
+        try await library.download(material)
+
+        let stored = try #require(library.entry(for: 7)?.localAudioPath)
+        #expect(!stored.contains("%20"))
+        #expect(library.localAudioURL(for: 7) != nil)
+        #expect(library.entry(for: 7)?.hasPlayableMedia == true)
+    }
+
+    @Test func legacyPercentEncodedPathsStillResolve() throws {
+        // Manifests written before the fix carry the encoded form; they must keep
+        // working rather than silently presenting as "not downloaded".
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "Application Support \(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "reading.mp3")
+        try Data("audio".utf8).write(to: file)
+
+        let encoded = file.path(percentEncoded: true)
+        #expect(encoded.contains("%20"))
+        #expect(!FileManager.default.fileExists(atPath: encoded))
+        #expect(FileManager.default.fileExists(atPath: normalizedStoredPath(encoded)))
+        #expect(normalizedStoredPath(file.filePath) == file.filePath)
+    }
 }
