@@ -58,3 +58,15 @@ def test_shared_core_reaches_every_teaching_entrance() -> None:
 
     for prompt in (COMPANION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, VOICE_TEACHER_SYSTEM_PROMPT):
         assert "汉字看得懂、用法却不同" in prompt
+
+
+def test_shared_core_forbids_decorative_symbols() -> None:
+    # §1.5 asks for restraint, and the companion page already styles headings with an
+    # accent bar — emoji on top of that is stacked decoration, not hierarchy.
+    assert "不使用 emoji 或装饰性符号" in INTERACTIVE_TEACHING_CORE_PROMPT
+
+    from app.chat import CHAT_SYSTEM_PROMPT
+    from app.prompts import VOICE_TEACHER_SYSTEM_PROMPT
+
+    for prompt in (COMPANION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, VOICE_TEACHER_SYSTEM_PROMPT):
+        assert "不使用 emoji" in prompt
