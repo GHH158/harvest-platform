@@ -98,16 +98,19 @@ struct VocabularyReviewView: View {
                         .foregroundStyle(DesignTokens.muted)
                 }
             } else {
-                Text("这个词是什么意思？")
+                // No usable example: ask for the word itself. Showing the word and then
+                // asking the learner to type it back tests nothing.
+                Text("这个意思，日语怎么说？")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(DesignTokens.muted)
-                Text(word.word)
-                    .font(.system(.largeTitle, design: .serif))
+                Text(word.meaning)
+                    .font(.system(.title2, design: .serif))
                     .foregroundStyle(DesignTokens.ink)
+                    .lineSpacing(4)
                 if revealed {
-                    Text(word.meaning)
-                        .font(.subheadline)
-                        .foregroundStyle(DesignTokens.muted)
+                    Text(word.word)
+                        .font(.system(.title3, design: .serif))
+                        .foregroundStyle(DesignTokens.accent)
                 }
             }
         }
@@ -204,11 +207,9 @@ struct VocabularyReviewView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// Blanks the target word out of its example sentence. Falls back to a bare
-    /// word/meaning card when no example was saved with this entry.
     private func clozeSentence(_ word: VocabularyWord) -> String? {
-        guard let example = word.exampleJA, let range = example.range(of: word.word) else { return nil }
-        return example.replacingCharacters(in: range, with: "＿＿＿＿")
+        guard let example = word.exampleJA else { return nil }
+        return Harvest.clozeSentence(word: word.word, example: example)
     }
 
     private func matches(_ input: String, word: VocabularyWord) -> Bool {
@@ -263,4 +264,47 @@ struct VocabularyReviewView: View {
 #Preview {
     VocabularyReviewView()
         .environmentObject(AppConfiguration())
+}
+
+/// Blanks the target word out of its example sentence.
+///
+/// A plain `range(of:)` only works when the example happens to use the dictionary
+/// form, which Japanese examples usually do not: 「付け加える」 appears as 「付け加えた」,
+/// 「美味しい」 as 「美味しかった」. So fall back to the longest prefix that does occur and
+/// swallow the trailing kana carrying the inflection. Returns nil when even that fails,
+/// and the caller shows a meaning-to-word card instead.
+func clozeSentence(word: String, example: String) -> String? {
+    guard let range = clozeRange(of: word, in: example) else { return nil }
+    return example.replacingCharacters(in: range, with: "＿＿＿＿")
+}
+
+func clozeRange(of word: String, in sentence: String) -> Range<String.Index>? {
+    // An exact hit needs no widening — widening it would eat the following particle.
+    if let exact = sentence.range(of: word) { return exact }
+
+    let shortest = word.count > 2 ? 2 : 1
+    var length = word.count - 1
+    while length >= shortest {
+        let stem = String(word.prefix(length))
+        if let found = sentence.range(of: stem) {
+            var end = found.upperBound
+            var widened = 0
+            // Inflections are short, and the copula that may follow them is not part of
+            // the word: 「美味しかったです」 should blank 美味しかった and leave です standing.
+            while end < sentence.endIndex,
+                  widened < 6,
+                  isHiragana(sentence[end]),
+                  !sentence[end...].hasPrefix("です") {
+                end = sentence.index(after: end)
+                widened += 1
+            }
+            return found.lowerBound..<end
+        }
+        length -= 1
+    }
+    return nil
+}
+
+private func isHiragana(_ character: Character) -> Bool {
+    character.unicodeScalars.allSatisfy { (0x3041...0x309F).contains($0.value) }
 }

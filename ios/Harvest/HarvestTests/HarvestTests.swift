@@ -453,14 +453,14 @@ struct HarvestTests {
         // PostgreSQL renders microseconds; ISO8601DateFormatter only takes milliseconds.
         // Failing to parse made the caller treat the server copy as "not newer", so a
         // resume point saved on another device was never picked up.
-        let microseconds = try #require(parsePlaybackDate("2026-08-07T07:41:28.905934+08:00"))
-        let milliseconds = try #require(parsePlaybackDate("2026-08-07T07:41:28.905+08:00"))
+        let microseconds = try #require(parseServerTimestamp("2026-08-07T07:41:28.905934+08:00"))
+        let milliseconds = try #require(parseServerTimestamp("2026-08-07T07:41:28.905+08:00"))
         #expect(abs(microseconds.timeIntervalSince(milliseconds)) < 0.01)
 
-        #expect(parsePlaybackDate("2026-08-05T00:00:00Z") != nil)
-        #expect(parsePlaybackDate("2026-08-07T07:41:28+08:00") != nil)
-        #expect(parsePlaybackDate(nil) == nil)
-        #expect(parsePlaybackDate("not a date") == nil)
+        #expect(parseServerTimestamp("2026-08-05T00:00:00Z") != nil)
+        #expect(parseServerTimestamp("2026-08-07T07:41:28+08:00") != nil)
+        #expect(parseServerTimestamp(nil) == nil)
+        #expect(parseServerTimestamp("not a date") == nil)
     }
 
     @Test func resumePositionSurvivesAnItemThatIsNotReadyYet() {
@@ -807,5 +807,38 @@ struct HarvestTests {
         #expect(path == "material-7/reading.mp3")
         // In memory it is still absolute, so everything downstream keeps working.
         #expect(library.entry(for: 7)?.localAudioPath?.hasPrefix("/") == true)
+    }
+
+    @Test func clozeBlanksInflectedFormsNotJustTheDictionaryForm() {
+        // Real saved data: the example uses 付け加えた while the entry stores 付け加える.
+        // Exact matching failed, so verbs fell through to the fallback card.
+        #expect(
+            clozeSentence(word: "付け加える", example: "説明の後に、重要なポイントを付け加えた。")
+                == "説明の後に、重要なポイントを＿＿＿＿。"
+        )
+        #expect(
+            clozeSentence(word: "美味しい", example: "このケーキ、本当に美味しかったです。")
+                == "このケーキ、本当に＿＿＿＿です。"
+        )
+        #expect(
+            clozeSentence(word: "話す", example: "友達と話しました。")
+                == "友達と＿＿＿＿。"
+        )
+    }
+
+    @Test func clozeKeepsAnExactMatchTight() {
+        // Widening an exact hit would swallow the following particle.
+        #expect(
+            clozeSentence(word: "会議", example: "明日の会議は何時からですか。")
+                == "明日の＿＿＿＿は何時からですか。"
+        )
+        #expect(
+            clozeSentence(word: "食べる", example: "食べるのが好きです。")
+                == "＿＿＿＿のが好きです。"
+        )
+    }
+
+    @Test func clozeGivesUpWhenTheWordIsAbsent() {
+        #expect(clozeSentence(word: "電話", example: "今日はいい天気です。") == nil)
     }
 }

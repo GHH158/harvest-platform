@@ -27,7 +27,10 @@ struct VocabularyView: View {
                     message: "阅读、陪读或聊天时点一下不认识的日语词，在查词卡片里选「加入生词表」"
                 )
             } else {
-                wordList
+                VStack(spacing: 0) {
+                    if !dueWords.isEmpty { dueBanner }
+                    wordList
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -64,6 +67,47 @@ struct VocabularyView: View {
                     .background(DesignTokens.surface.opacity(0.96))
             }
         }
+    }
+
+    /// Words the backend considers due. An unparseable timestamp counts as due, which
+    /// matches the server storing `now()` for a freshly saved word.
+    private var dueWords: [VocabularyWord] {
+        let now = Date()
+        return words.filter { word in
+            guard let due = parseServerTimestamp(word.nextReviewAt) else { return true }
+            return due <= now
+        }
+    }
+
+    /// Spaced repetition only works if you can tell something is waiting. Plain state,
+    /// no streak or score — §1.4 rules out gamification, not showing what is there.
+    private var dueBanner: some View {
+        Button {
+            showingReview = true
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "rectangle.on.rectangle")
+                    .foregroundStyle(DesignTokens.accent)
+                Text("\(dueWords.count) 个词到期")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(DesignTokens.ink)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(DesignTokens.muted)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(DesignTokens.accentWash, in: RoundedRectangle(cornerRadius: 14))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(DesignTokens.accent.opacity(0.18), lineWidth: 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, DesignTokens.pageInset)
+        .padding(.top, 12)
+        .accessibilityLabel("\(dueWords.count) 个词到期，去复习")
     }
 
     private var wordList: some View {

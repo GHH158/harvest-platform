@@ -37,7 +37,7 @@ struct PlaybackProgressStore {
 /// only accepts up to milliseconds, so the raw string fails both parsers and the
 /// caller silently concludes the server copy is not newer — which kept every resume
 /// point pinned to whatever was cached locally. Trim the fraction to 3 digits first.
-func parsePlaybackDate(_ value: String?) -> Date? {
+func parseServerTimestamp(_ value: String?) -> Date? {
     guard let value else { return nil }
     let withFractions = ISO8601DateFormatter()
     withFractions.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -844,7 +844,7 @@ struct VideoLearningView: View {
 
         guard let endpoint = configuration.endpoint,
               let remote = try? await APIClient(baseURL: endpoint).playbackState(materialID: material.id) else { return }
-        let remoteDate = parsePlaybackDate(remote.updatedAt)
+        let remoteDate = parseServerTimestamp(remote.updatedAt)
         if local == nil || (remoteDate != nil && remoteDate! > local!.updatedAt) {
             let position = normalizedResumePosition(remote.positionMs, durationMs: material.durationMs)
             store.save(materialID: material.id, positionMs: position, updatedAt: remoteDate ?? Date())

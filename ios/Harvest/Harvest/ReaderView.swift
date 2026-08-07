@@ -246,7 +246,7 @@ struct ReaderView: View {
         guard let endpoint = configuration.endpoint,
               let remote = try? await APIClient(baseURL: endpoint).playbackState(materialID: material.id)
         else { return }
-        let remoteDate = parsePlaybackDate(remote.updatedAt)
+        let remoteDate = parseServerTimestamp(remote.updatedAt)
         guard local == nil || (remoteDate != nil && remoteDate! > local!.updatedAt) else { return }
         let position = normalizedResumePosition(remote.positionMs, durationMs: durationMs)
         store.save(materialID: material.id, positionMs: position, updatedAt: remoteDate ?? Date())
