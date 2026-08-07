@@ -1255,6 +1255,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-07 | 修复离线下载的路径百分号编码缺陷:`URL.path()` 默认对路径做百分号编码,iOS 自带的 `Library/Application Support` 因此变成 `Application%20Support`。文件本身下载正确(写入走 URL API),但所有 `fileExists` / `attributesOfItem` 的字符串路径检查全部落空——下载按钮永远停在未下载状态、断点续传每次从头开始、离线播放静默回退到网络。改为统一使用 `path(percentEncoded: false)`(新增 `URL.filePath`),并让读取旧 manifest 时自动解码修复。此前所有离线测试都用不含空格的临时目录,因此从未暴露;新增的回归测试改用带空格的目录 |
 | 2026-08-07 | 离线清单改存相对路径:此前 `manifest.json` 记录绝对路径,而 App 容器路径可能在重装/更新后改变,已下载文件会整体失联(实测重装后容器 UUID 从 `28B0EE47` 变为 `62383667`)。现在内存中仍是绝对路径(下游逻辑不变),写盘时转为相对于离线根目录,读盘时再拼回当前根目录;旧的绝对路径若已失效,则按 `material-<id>/…` 后缀重新锚定到当前根目录,不需要用户重新下载 |
 | 2026-08-07 | 阅读页去掉播放期间的重复开销(原 §11.1,已完成并删除该条):词面导航由 `NavigationLink { CompanionView(…) }` 改为值驱动(`CompanionRequest` / `ShadowingRequest` + `navigationDestination(for:)`),destination 只在真正跳转时构造,不再每个词都急切建一个;分词结果按素材缓存,不再在句子视图的构造器里每帧重跑 `japaneseReadingUnits`;调用点补上 `.equatable()`,让已有的 `ReadingSentenceView` Equatable 实现真正生效——此前它比较的是 `activeUnitID` 而非原始播放位置,但因为没有 `.equatable()` 而从未被使用 |
+| 2026-08-07 | 阅读页从陪读返回后不再停在顶部:重新出现以及续读位置恢复完成时,主动滚到当前句。原先只有「当前句发生变化」才滚动,而返回时位置被恢复成同一个值、当前句 id 不变,于是不触发。冷启动之所以正常,是因为当前句从无到有算作变化 |
 
 ---
 

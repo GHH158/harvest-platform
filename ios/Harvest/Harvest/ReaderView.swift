@@ -39,6 +39,10 @@ struct ReaderView: View {
     /// It used to run inside the sentence view's initialiser, so every playback tick
     /// (ten per second) re-tokenised every sentence on screen.
     @State private var readingUnits: [Int: [JapaneseReadingUnit]] = [:]
+    /// Bumped once the resume position is known, so the reader can scroll to the
+    /// sentence being listened to. Coming back from 陪读 restores the same position, so
+    /// the current sentence never *changes* — without this the view sits at the top.
+    @State private var scrollRequests = 0
     private let startsOffline: Bool
 
     init(materialID: Int) {
@@ -164,6 +168,10 @@ struct ReaderView: View {
                     scrollProxy.scrollTo(currentID, anchor: .center)
                 }
             }
+            .onAppear { scrollToCurrent(material, using: scrollProxy, animated: false) }
+            .onChange(of: scrollRequests) { _, _ in
+                scrollToCurrent(material, using: scrollProxy, animated: false)
+            }
             .safeAreaInset(edge: .bottom) {
                 ReadingControlBar(
                     player: player,
@@ -179,6 +187,7 @@ struct ReaderView: View {
         .task(id: playbackURL(for: material)) {
             if let audioURL = playbackURL(for: material) { await player.prepare(url: audioURL) }
             await restorePlaybackPosition(for: material)
+            scrollRequests += 1
         }
         .onChange(of: player.positionMs) { _, newPosition in
             savePlaybackPositionIfNeeded(newPosition, in: material)
@@ -325,6 +334,19 @@ struct ReaderView: View {
         else { return }
         let nextIndex = min(material.segments.count - 1, index + 1)
         player.seek(to: material.segments[nextIndex].startMs)
+    }
+
+    private func scrollToCurrent(
+        _ material: MaterialDetail,
+        using proxy: ScrollViewProxy,
+        animated: Bool
+    ) {
+        guard let target = resolvedCurrentSegment(in: material) else { return }
+        if animated {
+            withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(target.id, anchor: .center) }
+        } else {
+            proxy.scrollTo(target.id, anchor: .center)
+        }
     }
 
     private func tokens(for segment: Segment, in material: MaterialDetail) -> [Token] {
