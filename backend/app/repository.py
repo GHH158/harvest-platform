@@ -377,11 +377,27 @@ class Repository:
         return [dict(row) for row in rows]
 
     def delete_chat_session(self, session_id: str) -> bool:
+        touched_keys: list[str] = []
         with self.engine.begin() as connection:
+            touched_keys = [
+                str(value)
+                for value in connection.execute(
+                    text(
+                        """SELECT DISTINCT ci.grammar_key
+                           FROM chat_correction_item ci
+                           JOIN chat_correction c ON c.id = ci.correction_id
+                           WHERE c.session_id = :session_id AND ci.grammar_key IS NOT NULL"""
+                    ),
+                    {"session_id": session_id},
+                ).scalars()
+            ]
             deleted = connection.execute(
                 text("DELETE FROM chat_session WHERE id = :session_id RETURNING id"),
                 {"session_id": session_id},
             ).scalar_one_or_none()
+        if deleted is not None:
+            for key in touched_keys:
+                self.reconcile_grammar_projection(key)
         return deleted is not None
 
     def add_chat_message(self, session_id: str, role: str, content: str) -> dict[str, Any]:
@@ -501,7 +517,13 @@ class Repository:
         # Registered after the turn's transaction commits: a failure to record the
         # skeleton must never lose the correction itself.
         for key, original in touched_grammar_keys:
-            self.mark_grammar_encounter(key, status="encountered", source="correction", note=original)
+            self.mark_grammar_encounter(
+                key,
+                status="encountered",
+                source="correction",
+                note=original,
+                invalidate_explanation=True,
+            )
         return dict(user), stored_correction, dict(assistant)
 
     def chat_corrections(
@@ -584,11 +606,25 @@ class Repository:
         return result
 
     def delete_chat_correction(self, correction_id: int) -> bool:
+        touched_keys: list[str] = []
         with self.engine.begin() as connection:
+            touched_keys = [
+                str(value)
+                for value in connection.execute(
+                    text(
+                        """SELECT DISTINCT grammar_key FROM chat_correction_item
+                           WHERE correction_id = :correction_id AND grammar_key IS NOT NULL"""
+                    ),
+                    {"correction_id": correction_id},
+                ).scalars()
+            ]
             deleted = connection.execute(
                 text("DELETE FROM chat_correction WHERE id = :correction_id RETURNING id"),
                 {"correction_id": correction_id},
             ).scalar_one_or_none()
+        if deleted is not None:
+            for key in touched_keys:
+                self.reconcile_grammar_projection(key)
         return deleted is not None
 
     def recent_correction_guidance(self, *, limit: int = 30, max_characters: int = 600) -> str:
@@ -1243,95 +1279,384 @@ class Repository:
                     row,
                 )
 
-    def list_grammar_points(self) -> list[dict[str, Any]]:
-        """The whole skeleton with the learner's state. A missing encounter row
-        means 未接触 — absence is the third state, not a stored value."""
+    def _grammar_rows(self, key: str | None = None) -> list[dict[str, Any]]:
+        where = "WHERE p.key = :key" if key is not None else ""
         with self.engine.connect() as connection:
             rows = connection.execute(
                 text(
-                    """SELECT p.id, p.key, p.title_ja, p.title_zh, p.level, p.category,
-                              e.status, e.first_source, e.note, e.updated_at,
-                              (x.point_id IS NOT NULL) AS has_explanation
-                       FROM grammar_point p
-                       LEFT JOIN grammar_encounter e ON e.point_id = p.id
-                       LEFT JOIN grammar_explanation x ON x.point_id = p.id
-                       ORDER BY p.level, p.sort_order, p.id"""
-                )
+                    f"""SELECT p.id, p.key, p.title_ja, p.title_zh, p.level, p.category, p.sort_order,
+                               e.status, e.status_source, e.first_source, e.last_source, e.note,
+                               e.last_evidence_at, e.browsed_at, e.status_changed_at,
+                               e.created_at AS encountered_at,
+                               e.updated_at,
+                               x.content AS explanation,
+                               x.prompt_version AS explanation_prompt_version,
+                               x.evidence_fingerprint AS explanation_evidence_fingerprint,
+                               x.evidence_refs AS explanation_evidence_refs,
+                               x.updated_at AS explanation_updated_at,
+                               COALESCE(m.mistake_count, 0) AS mistake_count,
+                               m.latest_mistake, m.latest_mistake_at,
+                               COALESCE(q.question_count, 0) AS companion_question_count,
+                               q.latest_question, q.latest_question_at
+                        FROM grammar_point p
+                        LEFT JOIN grammar_encounter e ON e.point_id = p.id
+                        LEFT JOIN grammar_explanation x ON x.point_id = p.id
+                        LEFT JOIN LATERAL (
+                            SELECT count(*)::int AS mistake_count,
+                                   (array_agg(ci.original_fragment ORDER BY ci.id DESC))[1] AS latest_mistake,
+                                   max(c.created_at) AS latest_mistake_at
+                            FROM chat_correction_item ci
+                            JOIN chat_correction c ON c.id = ci.correction_id
+                            WHERE ci.grammar_key = p.key
+                        ) m ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT count(*)::int AS question_count,
+                                   (array_agg(cm.content ORDER BY cm.id DESC))[1] AS latest_question,
+                                   max(cm.created_at) AS latest_question_at
+                            FROM companion_grammar_evidence ge
+                            JOIN companion_message cm ON cm.id = ge.message_id
+                            WHERE ge.point_id = p.id
+                        ) q ON TRUE
+                        {where}
+                        ORDER BY p.level, p.sort_order, p.id"""
+                ),
+                {"key": key} if key is not None else {},
             ).mappings().all()
-        return [dict(row) for row in rows]
+        return [self._grammar_row(dict(row)) for row in rows]
+
+    @staticmethod
+    def _grammar_row(data: dict[str, Any]) -> dict[str, Any]:
+        mistake_count = int(data.get("mistake_count") or 0)
+        question_count = int(data.get("companion_question_count") or 0)
+        data["mistake_count"] = mistake_count
+        data["companion_question_count"] = question_count
+        data["has_mistake"] = mistake_count > 0
+        data["has_companion_question"] = question_count > 0
+        data["has_explanation"] = bool(data.get("explanation"))
+
+        evidence: list[tuple[Any, str]] = []
+        if data.get("latest_mistake_at") is not None:
+            evidence.append((data["latest_mistake_at"], "correction"))
+        if data.get("latest_question_at") is not None:
+            evidence.append((data["latest_question_at"], "companion"))
+        evidence.sort(key=lambda item: item[0], reverse=True)
+        latest_evidence_at = evidence[0][0] if evidence else None
+        latest_evidence_source = evidence[0][1] if evidence else None
+        data["latest_learning_evidence_at"] = latest_evidence_at
+        data["latest_learning_evidence_source"] = latest_evidence_source
+
+        status = data.get("status")
+        status_changed_at = data.get("status_changed_at")
+        needs_attention = status == "encountered"
+        if status == "understood" and latest_evidence_at is not None and status_changed_at is not None:
+            needs_attention = latest_evidence_at > status_changed_at
+        data["needs_attention"] = needs_attention
+
+        if status is None:
+            reason = "还没有来自真实学习行为的记录。"
+        elif status == "understood" and needs_attention:
+            location = "聊天纠错" if latest_evidence_source == "correction" else "阅读陪读"
+            reason = f"你曾标记为已弄懂，后来又在{location}中遇到了这个点。"
+        elif status == "understood":
+            reason = "你已将这个点标记为已弄懂。"
+        elif data.get("status_source") == "manual":
+            reason = "你已将这个点重新标记为需要留意。"
+        elif data.get("last_source") == "correction" or mistake_count:
+            reason = "因为你在聊天纠错中写错过这个点。"
+        elif data.get("last_source") == "companion" or question_count:
+            reason = "因为你在阅读陪读中主动问过这个点。"
+        else:
+            reason = "因为你主动打开过这条讲解。"
+        data["state_reason"] = reason
+        return data
+
+    def list_grammar_points(self) -> list[dict[str, Any]]:
+        """The skeleton is a projection: unresolved recent evidence comes first,
+        then settled history, then untouched catalogue entries."""
+        rows = self._grammar_rows()
+
+        def sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, float, int]:
+            index, row = item
+            if row["needs_attention"]:
+                group = 0
+            elif row.get("status") == "understood":
+                group = 1
+            else:
+                group = 2
+            value = row.get("latest_learning_evidence_at") or row.get("last_evidence_at")
+            timestamp = value.timestamp() if hasattr(value, "timestamp") else 0.0
+            return group, -timestamp, index
+
+        return [row for _, row in sorted(enumerate(rows), key=sort_key)]
 
     def get_grammar_point(self, key: str) -> dict[str, Any] | None:
-        with self.engine.connect() as connection:
-            row = connection.execute(
-                text(
-                    """SELECT p.*, e.status, e.note, x.content AS explanation
-                       FROM grammar_point p
-                       LEFT JOIN grammar_encounter e ON e.point_id = p.id
-                       LEFT JOIN grammar_explanation x ON x.point_id = p.id
-                       WHERE p.key = :key"""
-                ),
-                {"key": key},
-            ).mappings().one_or_none()
-        return dict(row) if row else None
+        rows = self._grammar_rows(key)
+        return rows[0] if rows else None
 
     def mark_grammar_encounter(
-        self, key: str, *, status: str, source: str | None = None, note: str | None = None
+        self,
+        key: str,
+        *,
+        status: str,
+        source: str | None = None,
+        note: str | None = None,
+        manual: bool = False,
+        invalidate_explanation: bool = False,
     ) -> dict[str, Any] | None:
-        """Records or upgrades the learner's relationship with a point.
+        """Records evidence or an explicit learner decision.
 
-        Never downgrades: once something is 已弄懂, a later automatic 已撞见 from a
-        correction must not silently undo that."""
+        Automatic evidence never downgrades an explicit understood state. A manual
+        action may move either way, because the learner remains the authority on
+        whether something currently needs attention.
+        """
         with self.engine.begin() as connection:
-            point = connection.execute(
+            point_id = connection.execute(
                 text("SELECT id FROM grammar_point WHERE key = :key"), {"key": key}
-            ).mappings().one_or_none()
-            if point is None:
+            ).scalar_one_or_none()
+            if point_id is None:
                 return None
-            connection.execute(
-                text(
-                    """INSERT INTO grammar_encounter (point_id, status, first_source, note)
-                       VALUES (:point_id, :status, :source, :note)
-                       ON CONFLICT (point_id) DO UPDATE SET
-                         status = CASE
-                             WHEN grammar_encounter.status = 'understood' THEN grammar_encounter.status
-                             ELSE EXCLUDED.status
-                         END,
-                         note = COALESCE(EXCLUDED.note, grammar_encounter.note)"""
-                ),
-                {"point_id": point["id"], "status": status, "source": source, "note": note},
-            )
+            existing = connection.execute(
+                text("SELECT * FROM grammar_encounter WHERE point_id = :point_id"),
+                {"point_id": point_id},
+            ).mappings().one_or_none()
+            status_source = "manual" if manual else "automatic"
+            if existing is None:
+                connection.execute(
+                    text(
+                        """INSERT INTO grammar_encounter
+                           (point_id, status, status_source, first_source, last_source, note, browsed_at)
+                           VALUES (:point_id, :status, :status_source, :source, :source, :note,
+                                   CASE WHEN :source = 'browse' THEN now() END)"""
+                    ),
+                    {
+                        "point_id": point_id,
+                        "status": status,
+                        "status_source": status_source,
+                        "source": source,
+                        "note": note,
+                    },
+                )
+            else:
+                current_status = str(existing["status"])
+                final_status = status if manual or current_status != "understood" else current_status
+                final_status_source = status_source if manual else str(existing["status_source"])
+                status_changed = manual or final_status != current_status
+                connection.execute(
+                    text(
+                        """UPDATE grammar_encounter SET
+                               status = :status,
+                               status_source = :status_source,
+                               last_source = COALESCE(:source, last_source),
+                               note = COALESCE(:note, note),
+                               last_evidence_at = CASE WHEN :source IS NOT NULL THEN now() ELSE last_evidence_at END,
+                               browsed_at = CASE
+                                   WHEN :source = 'browse' THEN COALESCE(browsed_at, now()) ELSE browsed_at
+                               END,
+                               status_changed_at = CASE
+                                   WHEN :status_changed THEN now() ELSE status_changed_at
+                               END
+                           WHERE point_id = :point_id"""
+                    ),
+                    {
+                        "point_id": point_id,
+                        "status": final_status,
+                        "status_source": final_status_source,
+                        "source": source,
+                        "note": note,
+                        "status_changed": status_changed,
+                    },
+                )
+            if invalidate_explanation:
+                connection.execute(
+                    text("DELETE FROM grammar_explanation WHERE point_id = :point_id"),
+                    {"point_id": point_id},
+                )
         return self.get_grammar_point(key)
 
-    def save_grammar_explanation(self, key: str, content: str) -> None:
+    def record_companion_grammar_evidence(self, message_id: int, keys: list[str]) -> list[str]:
+        """Links an explicit learner question to known points, idempotently."""
+        inserted_keys: list[str] = []
         with self.engine.begin() as connection:
-            point = connection.execute(
+            role = connection.execute(
+                text("SELECT role FROM companion_message WHERE id = :message_id"),
+                {"message_id": message_id},
+            ).scalar_one_or_none()
+            if role != "user":
+                return []
+            for key in dict.fromkeys(keys):
+                point_id = connection.execute(
+                    text("SELECT id FROM grammar_point WHERE key = :key"), {"key": key}
+                ).scalar_one_or_none()
+                if point_id is None:
+                    continue
+                inserted = connection.execute(
+                    text(
+                        """INSERT INTO companion_grammar_evidence (message_id, point_id)
+                           VALUES (:message_id, :point_id)
+                           ON CONFLICT DO NOTHING RETURNING point_id"""
+                    ),
+                    {"message_id": message_id, "point_id": point_id},
+                ).scalar_one_or_none()
+                if inserted is not None:
+                    inserted_keys.append(key)
+        for key in inserted_keys:
+            self.mark_grammar_encounter(
+                key,
+                status="encountered",
+                source="companion",
+                invalidate_explanation=True,
+            )
+        return inserted_keys
+
+    def invalidate_grammar_explanation(self, key: str) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    """DELETE FROM grammar_explanation x USING grammar_point p
+                       WHERE x.point_id = p.id AND p.key = :key"""
+                ),
+                {"key": key},
+            )
+
+    def save_grammar_explanation(
+        self,
+        key: str,
+        content: str,
+        *,
+        prompt_version: str,
+        evidence_fingerprint: str,
+        evidence_refs: list[dict[str, Any]],
+    ) -> None:
+        with self.engine.begin() as connection:
+            point_id = connection.execute(
                 text("SELECT id FROM grammar_point WHERE key = :key"), {"key": key}
-            ).mappings().one_or_none()
-            if point is None:
+            ).scalar_one_or_none()
+            if point_id is None:
                 return
             connection.execute(
                 text(
-                    """INSERT INTO grammar_explanation (point_id, content)
-                       VALUES (:point_id, :content)
-                       ON CONFLICT (point_id) DO UPDATE SET content = EXCLUDED.content"""
+                    """INSERT INTO grammar_explanation
+                       (point_id, content, prompt_version, evidence_fingerprint, evidence_refs)
+                       VALUES (:point_id, :content, :prompt_version, :evidence_fingerprint,
+                               CAST(:evidence_refs AS JSONB))
+                       ON CONFLICT (point_id) DO UPDATE SET
+                         content = EXCLUDED.content,
+                         prompt_version = EXCLUDED.prompt_version,
+                         evidence_fingerprint = EXCLUDED.evidence_fingerprint,
+                         evidence_refs = EXCLUDED.evidence_refs"""
                 ),
-                {"point_id": point["id"], "content": content},
+                {
+                    "point_id": point_id,
+                    "content": content,
+                    "prompt_version": prompt_version,
+                    "evidence_fingerprint": evidence_fingerprint,
+                    "evidence_refs": json.dumps(evidence_refs, ensure_ascii=False),
+                },
             )
 
     def corrections_touching(self, key: str, limit: int = 3) -> list[dict[str, Any]]:
-        """The learner's own mistakes on this point, so §12.3 can open with their
-        sentence instead of an invented example."""
+        """Recent real mistakes for personalised explanation and cache provenance."""
         with self.engine.connect() as connection:
             rows = connection.execute(
                 text(
-                    """SELECT ci.original_fragment, ci.replacement, ci.reason_zh
+                    """SELECT ci.id, ci.original_fragment, ci.replacement, ci.reason_zh, c.created_at
                        FROM chat_correction_item ci
+                       JOIN chat_correction c ON c.id = ci.correction_id
                        WHERE ci.grammar_key = :key
                        ORDER BY ci.id DESC LIMIT :limit"""
                 ),
                 {"key": key, "limit": limit},
             ).mappings().all()
         return [dict(row) for row in rows]
+
+    def companion_questions_touching(self, key: str, limit: int = 3) -> list[dict[str, Any]]:
+        """Recent explicit companion questions, which are encounters but not mistakes."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT cm.id, cm.content AS question, cm.created_at, s.text_ja AS context_ja
+                       FROM companion_grammar_evidence ge
+                       JOIN grammar_point p ON p.id = ge.point_id
+                       JOIN companion_message cm ON cm.id = ge.message_id
+                       LEFT JOIN segment s ON s.id = cm.segment_id
+                       WHERE p.key = :key
+                       ORDER BY cm.id DESC LIMIT :limit"""
+                ),
+                {"key": key, "limit": limit},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def grammar_evidence(self, key: str, limit_each: int = 3) -> list[dict[str, Any]]:
+        evidence = [
+            {"kind": "correction", **item} for item in self.corrections_touching(key, limit=limit_each)
+        ]
+        evidence.extend(
+            {"kind": "companion_question", **item}
+            for item in self.companion_questions_touching(key, limit=limit_each)
+        )
+        return sorted(evidence, key=lambda item: item["created_at"], reverse=True)
+
+    def reconcile_grammar_projection(self, key: str) -> dict[str, Any] | None:
+        """Rebuilds the projection after source evidence is deleted.
+
+        Manual decisions and an explicit browse survive. Purely automatic rows with
+        no remaining source evidence disappear, restoring the untouched state.
+        """
+        point = self.get_grammar_point(key)
+        if point is None:
+            return None
+        has_evidence = bool(point["mistake_count"] or point["companion_question_count"])
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM grammar_explanation WHERE point_id = :point_id"),
+                {"point_id": point["id"]},
+            )
+            if not has_evidence:
+                if (
+                    point.get("status_source") == "automatic"
+                    and point.get("browsed_at") is None
+                    and point.get("first_source") in {"correction", "companion"}
+                ):
+                    connection.execute(
+                        text("DELETE FROM grammar_encounter WHERE point_id = :point_id"),
+                        {"point_id": point["id"]},
+                    )
+                else:
+                    connection.execute(
+                        text(
+                            """UPDATE grammar_encounter SET note = NULL,
+                               last_source = CASE
+                                   WHEN browsed_at IS NOT NULL THEN 'browse'
+                                   WHEN last_source IN ('correction', 'companion') THEN first_source
+                                   ELSE last_source
+                               END
+                               WHERE point_id = :point_id"""
+                        ),
+                        {"point_id": point["id"]},
+                    )
+            else:
+                latest_source = point["latest_learning_evidence_source"]
+                latest_at = point["latest_learning_evidence_at"]
+                connection.execute(
+                    text(
+                        """INSERT INTO grammar_encounter
+                           (point_id, status, status_source, first_source, last_source, note,
+                            last_evidence_at)
+                           VALUES (:point_id, 'encountered', 'automatic', :last_source, :last_source,
+                                   :note, :last_evidence_at)
+                           ON CONFLICT (point_id) DO UPDATE SET
+                             last_source = EXCLUDED.last_source,
+                             note = EXCLUDED.note,
+                             last_evidence_at = EXCLUDED.last_evidence_at"""
+                    ),
+                    {
+                        "point_id": point["id"],
+                        "last_source": latest_source,
+                        "note": point.get("latest_mistake"),
+                        "last_evidence_at": latest_at,
+                    },
+                )
+        return self.get_grammar_point(key)
 
     # ── vocabulary ──────────────────────────────────────────────
 

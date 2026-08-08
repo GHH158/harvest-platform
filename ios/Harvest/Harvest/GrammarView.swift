@@ -17,10 +17,10 @@ struct GrammarView: View {
         configuration.endpoint.map { APIClient(baseURL: $0) }
     }
 
-    /// Points you have met, newest state first. This is the part that grows.
     private var met: [GrammarPoint] { points.filter { $0.status != nil } }
-    private var understood: [GrammarPoint] { points.filter(\.isUnderstood) }
-    private var encountered: [GrammarPoint] { points.filter(\.isEncountered) }
+    /// Server order is projection-aware: recent unresolved/re-encountered evidence first.
+    private var attention: [GrammarPoint] { points.filter(\.requiresAttention) }
+    private var understood: [GrammarPoint] { points.filter(\.isSettled) }
     private var untouched: [GrammarPoint] { points.filter { $0.status == nil } }
 
     var body: some View {
@@ -69,11 +69,11 @@ struct GrammarView: View {
                         .listRowBackground(DesignTokens.canvas)
                 }
             }
+            if !attention.isEmpty {
+                section("需要留意", attention)
+            }
             if !understood.isEmpty {
                 section("已弄懂", understood)
-            }
-            if !encountered.isEmpty {
-                section("已撞见", encountered)
             }
             Section {
                 DisclosureGroup(isExpanded: $showsUntouched) {
@@ -107,7 +107,7 @@ struct GrammarView: View {
                     Text(point.titleJA)
                         .font(.system(.body, design: .serif))
                         .foregroundStyle(DesignTokens.ink)
-                    if point.isUnderstood {
+                    if point.isSettled {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.caption)
                             .foregroundStyle(Color.green)
@@ -125,8 +125,13 @@ struct GrammarView: View {
                     .foregroundStyle(DesignTokens.muted)
                 // The learner's own sentence is the whole point of the skeleton:
                 // it says "you met this here", not "lesson 12".
-                if let note = point.note, !note.isEmpty, point.cameFromMistake {
-                    Text("你写过：\(note)")
+                if let mistake = point.mistakeText, !mistake.isEmpty, point.cameFromMistake {
+                    Text("你写过：\(mistake)")
+                        .font(.caption)
+                        .foregroundStyle(DesignTokens.accent)
+                        .lineLimit(1)
+                } else if let question = point.latestQuestion, !question.isEmpty {
+                    Text("你问过：\(question)")
                         .font(.caption)
                         .foregroundStyle(DesignTokens.accent)
                         .lineLimit(1)
@@ -214,10 +219,21 @@ struct GrammarDetailView: View {
             }
             .font(.caption)
             .foregroundStyle(DesignTokens.muted)
-            if let note = current.note, !note.isEmpty, current.cameFromMistake {
-                Text("你在这里写过「\(note)」")
+            if let mistake = current.mistakeText, !mistake.isEmpty, current.cameFromMistake {
+                Text("你在这里写过「\(mistake)」")
                     .font(.footnote)
                     .foregroundStyle(DesignTokens.accent)
+                    .padding(.top, 2)
+            } else if let question = current.latestQuestion, !question.isEmpty {
+                Text("你曾在陪读中问过「\(question)」")
+                    .font(.footnote)
+                    .foregroundStyle(DesignTokens.accent)
+                    .padding(.top, 2)
+            }
+            if let reason = current.stateReason, current.status != nil {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(DesignTokens.muted)
                     .padding(.top, 2)
             }
         }
@@ -225,17 +241,38 @@ struct GrammarDetailView: View {
 
     @ViewBuilder
     private var statusButton: some View {
-        if current.isUnderstood {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.green)
-                Text("已弄懂")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.green)
+        if current.requiresAttention {
+            Button {
+                Task { await setStatus("understood") }
+            } label: {
+                HStack(spacing: 6) {
+                    if isUpdating { ProgressView().controlSize(.small).tint(.white) }
+                    Text(isUpdating ? "正在保存…" : "标记为已弄懂")
+                }
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .disabled(isUpdating)
+            .padding(.top, 6)
+        } else if current.isUnderstood {
+            HStack(spacing: 10) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.green)
+                    Text("已弄懂")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.green)
+                }
+                Spacer()
+                Button("重新标为需要留意") {
+                    Task { await setStatus("encountered") }
+                }
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(DesignTokens.accent)
+                .disabled(isUpdating)
             }
             .padding(.top, 6)
         } else {
             Button {
-                Task { await mark() }
+                Task { await setStatus("understood") }
             } label: {
                 HStack(spacing: 6) {
                     if isUpdating { ProgressView().controlSize(.small).tint(.white) }
@@ -266,26 +303,12 @@ struct GrammarDetailView: View {
     }
 
     @MainActor
-    private func mark() async {
+    private func setStatus(_ status: String) async {
         guard let client else { return }
         isUpdating = true
         defer { isUpdating = false }
         do {
-            let updated = try await client.setGrammarStatus(key: point.key, status: "understood")
-            // Keep the explanation we already have; the status call does not return it.
-            loaded = GrammarPoint(
-                id: updated.id,
-                key: updated.key,
-                titleJA: updated.titleJA,
-                titleZH: updated.titleZH,
-                level: updated.level,
-                category: updated.category,
-                status: updated.status,
-                firstSource: updated.firstSource,
-                note: updated.note,
-                hasExplanation: current.hasExplanation,
-                explanation: current.explanation
-            )
+            loaded = try await client.setGrammarStatus(key: point.key, status: status)
         } catch {
             errorMessage = error.localizedDescription
         }

@@ -441,6 +441,41 @@ struct HarvestTests {
         #expect(natural.correction == nil)
     }
 
+    @Test func grammarProjectionSeparatesFirstContactFromLaterEvidence() throws {
+        let points = try JSONDecoder().decode([GrammarPoint].self, from: """
+        [
+          {"id":1,"key":"verb-te","title_ja":"～て","title_zh":"て形与连接","level":"N5","category":"动词变形","status":"understood","status_source":"manual","first_source":"browse","last_source":"correction","note":"読むています","has_mistake":true,"mistake_count":2,"latest_mistake":"読むています","has_companion_question":false,"companion_question_count":0,"latest_question":null,"needs_attention":true,"state_reason":"你曾标记为已弄懂，后来又在聊天纠错中遇到了这个点。","latest_learning_evidence_at":"2026-08-08T20:00:00Z","has_explanation":false,"explanation":null},
+          {"id":2,"key":"i-adj-past","title_ja":"～かった","title_zh":"い形过去","level":"N5","category":"形容词","status":"understood","status_source":"manual","first_source":"correction","last_source":"manual","note":"美味しいでした","has_mistake":true,"mistake_count":1,"latest_mistake":"美味しいでした","has_companion_question":false,"companion_question_count":0,"latest_question":null,"needs_attention":false,"state_reason":"你已将这个点标记为已弄懂。","latest_learning_evidence_at":"2026-08-08T18:00:00Z","has_explanation":true,"explanation":"讲解"}
+        ]
+        """.data(using: .utf8)!)
+
+        #expect(points[0].firstSource == "browse")
+        #expect(points[0].cameFromMistake)
+        #expect(points[0].mistakeText == "読むています")
+        #expect(points[0].requiresAttention)
+        #expect(!points[0].isSettled)
+        #expect(points[1].isSettled)
+    }
+
+    @Test func grammarStatusCanBeExplicitlyReturnedToNeedsAttention() async throws {
+        resetStub()
+        let baseURL = URL(string: "https://harvest.example")!
+        let url = baseURL.appending(path: "grammar/verb-te/status")
+        StubURLProtocol.responses[url] = """
+        {"id":1,"key":"verb-te","title_ja":"～て","title_zh":"て形与连接","level":"N5","category":"动词变形","status":"encountered","status_source":"manual","first_source":"correction","last_source":"manual","note":"読むています","has_mistake":true,"mistake_count":1,"latest_mistake":"読むています","has_companion_question":false,"companion_question_count":0,"latest_question":null,"needs_attention":true,"state_reason":"你已将这个点重新标记为需要留意。","latest_learning_evidence_at":"2026-08-08T20:00:00Z","has_explanation":true,"explanation":"讲解"}
+        """.data(using: .utf8)!
+        let client = APIClient(baseURL: baseURL, session: stubSession())
+
+        let updated = try await client.setGrammarStatus(key: "verb-te", status: "encountered")
+        let body = try #require(StubURLProtocol.requestedBodies.last.flatMap { $0 })
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: String])
+
+        #expect(updated.requiresAttention)
+        #expect(updated.statusSource == "manual")
+        #expect(json["status"] == "encountered")
+        #expect(StubURLProtocol.requestedRequests.last?.httpMethod == "POST")
+    }
+
     @Test func topicDeckShowsEveryTopicBeforeRepeatingAndAvoidsImmediateRepeat() {
         let topics = (0..<16).map {
             ChatTopic(id: "topic-\($0)", category: "分类", titleJA: "テーマ\($0)", hintZH: "主题\($0)")

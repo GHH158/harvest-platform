@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -31,7 +33,7 @@ from .chat import (
     suppress_follow_up,
     topic_for,
 )
-from .companion import build_companion_messages
+from .companion import build_companion_messages, generate_companion_turn
 from .config import ROOT_DIR, get_settings
 from .db import apply_schema, make_engine
 from .furigana import ruby_segments
@@ -40,6 +42,8 @@ from .omni import relay_voice_teacher
 from .repository import Repository
 from .storage import ObjectStorage
 from .voice import validate_video_voice_clip, voice_separation_available
+
+logger = logging.getLogger(__name__)
 
 
 class MaterialCreate(BaseModel):
@@ -222,6 +226,7 @@ async def lifespan(_: FastAPI):
         apply_schema(engine)
         _engine = engine
         _repository = Repository(engine)
+        _repository.sync_grammar_catalogue()
         _llm_service = llm
         yield
     finally:
@@ -792,14 +797,22 @@ def post_companion(payload: CompanionRequest) -> dict:
     history = repo.companion_messages(payload.material_id)[-12:-1]
     messages = build_companion_messages(context=context, history=history, question=payload.question)
     try:
-        answer = llm_service().reply(
-            messages,
-            enable_thinking=False,
-            max_tokens=1_200,
-        )
+        turn = generate_companion_turn(llm_service(), messages)
     except Exception as error:
         raise _llm_error(error) from error
-    assistant = repo.add_companion_message(payload.material_id, payload.segment_id, "assistant", answer)
+    assistant = repo.add_companion_message(
+        payload.material_id,
+        payload.segment_id,
+        "assistant",
+        turn.answer_markdown,
+    )
+    if turn.grammar_keys:
+        try:
+            repo.record_companion_grammar_evidence(int(user["id"]), turn.grammar_keys)
+        except Exception:
+            # Personalisation is supplementary: a failed evidence projection must not
+            # make a successful teaching answer look failed to the learner.
+            logger.exception("Failed to record companion grammar evidence")
     return {"user": user, "assistant": assistant}
 
 
@@ -1106,6 +1119,13 @@ _GRAMMAR_SYSTEM = (
     "- 用 Markdown，但不使用 emoji 或装饰性符号；不写标题编号，不堆砌术语\n"
     "- 不确定的地方直说，不编造规则"
 )
+GRAMMAR_EXPLANATION_PROMPT_VERSION = "grammar-explanation-v2"
+
+
+def _grammar_evidence_fingerprint(evidence: list[dict]) -> tuple[str, list[dict[str, int | str]]]:
+    references = [{"kind": str(item["kind"]), "id": int(item["id"])} for item in evidence]
+    encoded = json.dumps(references, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest(), references
 
 
 class GrammarStatusUpdate(BaseModel):
@@ -1125,17 +1145,34 @@ def get_grammar(key: str, refresh: bool = False) -> dict:
     point = repo.get_grammar_point(key)
     if point is None:
         raise HTTPException(status_code=404, detail="没有这个语法点。")
-    if point.get("explanation") and not refresh:
+    evidence = repo.grammar_evidence(key)
+    evidence_fingerprint, evidence_refs = _grammar_evidence_fingerprint(evidence)
+    cache_is_current = (
+        point.get("explanation")
+        and point.get("explanation_prompt_version") == GRAMMAR_EXPLANATION_PROMPT_VERSION
+        and point.get("explanation_evidence_fingerprint") == evidence_fingerprint
+    )
+    if cache_is_current and not refresh:
+        if point.get("status") is None:
+            return repo.mark_grammar_encounter(key, status="encountered", source="browse") or point
         return point
 
-    mistakes = repo.corrections_touching(key)
     prompt = f"语法点：{point['title_ja']}（{point['title_zh']}，{point['level']}）"
+    mistakes = [item for item in evidence if item["kind"] == "correction"]
     if mistakes:
         lines = "\n".join(
             f"- 原句「{m['original_fragment']}」→ 修正「{m['replacement']}」（{m['reason_zh']}）"
             for m in mistakes
         )
         prompt += f"\n\n学习者在这个点上实际写错过：\n{lines}"
+    questions = [item for item in evidence if item["kind"] == "companion_question"]
+    if questions:
+        lines = "\n".join(
+            f"- 问题「{item['question']}」"
+            + (f"，当时读到「{item['context_ja']}」" if item.get("context_ja") else "")
+            for item in questions
+        )
+        prompt += f"\n\n学习者曾在阅读陪读中明确问过：\n{lines}"
     try:
         content = llm_service().reply(
             [{"role": "system", "content": _GRAMMAR_SYSTEM}, {"role": "user", "content": prompt}],
@@ -1144,7 +1181,13 @@ def get_grammar(key: str, refresh: bool = False) -> dict:
         )
     except Exception as error:
         raise _llm_error(error) from error
-    repo.save_grammar_explanation(key, content)
+    repo.save_grammar_explanation(
+        key,
+        content,
+        prompt_version=GRAMMAR_EXPLANATION_PROMPT_VERSION,
+        evidence_fingerprint=evidence_fingerprint,
+        evidence_refs=evidence_refs,
+    )
     # Reading an explanation counts as having met the point.
     repo.mark_grammar_encounter(key, status="encountered", source="browse")
     return repo.get_grammar_point(key) or point
@@ -1152,7 +1195,12 @@ def get_grammar(key: str, refresh: bool = False) -> dict:
 
 @app.post("/grammar/{key}/status")
 def set_grammar_status(key: str, payload: GrammarStatusUpdate) -> dict:
-    updated = repository().mark_grammar_encounter(key, status=payload.status, source="browse")
+    updated = repository().mark_grammar_encounter(
+        key,
+        status=payload.status,
+        source="manual",
+        manual=True,
+    )
     if updated is None:
         raise HTTPException(status_code=404, detail="没有这个语法点。")
     return updated

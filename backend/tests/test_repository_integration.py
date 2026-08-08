@@ -634,3 +634,352 @@ def test_video_playback_state_upserts_and_cascades_with_material() -> None:
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
         engine.dispose()
+
+
+@pytest.mark.integration
+def test_grammar_projection_preserves_learner_decisions_and_tracks_real_evidence() -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    grammar_key = f"test-m0-{uuid.uuid4().hex}"
+    session_id = f"test-{uuid.uuid4()}"
+    material_id: int | None = None
+    correction_ids: list[int] = []
+    with engine.begin() as connection:
+        point_id = connection.execute(
+            text(
+                """INSERT INTO grammar_point
+                   (key, title_ja, title_zh, level, category, sort_order)
+                   VALUES (:key, '～ておく', '预先做好', 'N4', '动词变形', 999999)
+                   RETURNING id"""
+            ),
+            {"key": grammar_key},
+        ).scalar_one()
+
+    try:
+        browsed = repository.mark_grammar_encounter(
+            grammar_key,
+            status="encountered",
+            source="browse",
+        )
+        assert browsed is not None
+        assert browsed["first_source"] == "browse"
+        assert browsed["last_source"] == "browse"
+        assert browsed["has_mistake"] is False
+
+        repository.save_grammar_explanation(
+            grammar_key,
+            "浏览后生成的讲解",
+            prompt_version="grammar-explanation-v2",
+            evidence_fingerprint="empty-evidence",
+            evidence_refs=[],
+        )
+        assert repository.get_grammar_point(grammar_key)["explanation"] == "浏览后生成的讲解"
+
+        repository.create_chat_session(
+            session_id=session_id,
+            topic="M0 语法证据",
+            starter_id=None,
+            assistant_content="始めましょう。",
+        )
+        _, first_correction, _ = repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="旅行の前に切符を買うておきます。",
+            assistant_content="準備が早いですね。",
+            correction={
+                "corrected_text": "旅行の前に切符を買っておきます。",
+                "summary_zh": "使用正确的て形连接～ておく。",
+                "items": [
+                    {
+                        "original": "買うておきます",
+                        "replacement": "買っておきます",
+                        "reason_zh": "五段动词「買う」的て形是「買って」。",
+                        "category": "grammar",
+                        "grammar_key": grammar_key,
+                    }
+                ],
+            },
+        )
+        assert first_correction is not None
+        correction_ids.append(int(first_correction["id"]))
+
+        after_first_mistake = repository.get_grammar_point(grammar_key)
+        assert after_first_mistake is not None
+        assert after_first_mistake["first_source"] == "browse"
+        assert after_first_mistake["last_source"] == "correction"
+        assert after_first_mistake["has_mistake"] is True
+        assert after_first_mistake["mistake_count"] == 1
+        assert after_first_mistake["latest_mistake"] == "買うておきます"
+        assert after_first_mistake["explanation"] is None
+
+        understood = repository.mark_grammar_encounter(
+            grammar_key,
+            status="understood",
+            source="manual",
+            manual=True,
+        )
+        assert understood is not None
+        assert understood["status"] == "understood"
+        assert understood["status_source"] == "manual"
+        assert understood["needs_attention"] is False
+
+        _, second_correction, _ = repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="明日の会議を調べるておきます。",
+            assistant_content="それなら安心ですね。",
+            correction={
+                "corrected_text": "明日の会議を調べておきます。",
+                "summary_zh": "辞书形不能直接接～ておく。",
+                "items": [
+                    {
+                        "original": "調べるておきます",
+                        "replacement": "調べておきます",
+                        "reason_zh": "先变成て形再接「おく」。",
+                        "category": "grammar",
+                        "grammar_key": grammar_key,
+                    }
+                ],
+            },
+        )
+        assert second_correction is not None
+        correction_ids.append(int(second_correction["id"]))
+
+        after_new_mistake = repository.get_grammar_point(grammar_key)
+        assert after_new_mistake is not None
+        assert after_new_mistake["status"] == "understood"
+        assert after_new_mistake["status_source"] == "manual"
+        assert after_new_mistake["needs_attention"] is True
+        assert after_new_mistake["latest_mistake"] == "調べるておきます"
+
+        needs_review = repository.mark_grammar_encounter(
+            grammar_key,
+            status="encountered",
+            source="manual",
+            manual=True,
+        )
+        assert needs_review is not None
+        assert needs_review["status"] == "encountered"
+        assert needs_review["status_source"] == "manual"
+        assert needs_review["first_source"] == "browse"
+
+        repository.save_grammar_explanation(
+            grammar_key,
+            "纠错后的讲解",
+            prompt_version="grammar-explanation-v2",
+            evidence_fingerprint="correction-evidence",
+            evidence_refs=[{"kind": "correction", "id": correction_ids[-1]}],
+        )
+        material_id, _ = repository.create_material_with_job(
+            title="M0 陪读证据",
+            source_type="paste",
+            source_ref=None,
+            job_kind="tts",
+            payload={"text": "旅行の前に予約しておきます。"},
+        )
+        question = repository.add_companion_message(
+            material_id,
+            None,
+            "user",
+            "这里为什么要用「ておく」？",
+        )
+        assert repository.record_companion_grammar_evidence(
+            int(question["id"]), [grammar_key, "unknown-key", grammar_key]
+        ) == [grammar_key]
+
+        after_question = repository.get_grammar_point(grammar_key)
+        assert after_question is not None
+        assert after_question["has_companion_question"] is True
+        assert after_question["companion_question_count"] == 1
+        assert after_question["latest_question"] == "这里为什么要用「ておく」？"
+        assert after_question["mistake_count"] == 2
+        assert after_question["explanation"] is None
+
+        evidence = repository.grammar_evidence(grammar_key)
+        assert {item["kind"] for item in evidence} == {"correction", "companion_question"}
+        evidence_refs = [{"kind": str(item["kind"]), "id": int(item["id"])} for item in evidence]
+        repository.save_grammar_explanation(
+            grammar_key,
+            "带证据来源的讲解",
+            prompt_version="grammar-explanation-v2",
+            evidence_fingerprint="fingerprint-v2",
+            evidence_refs=evidence_refs,
+        )
+        cached = repository.get_grammar_point(grammar_key)
+        assert cached is not None
+        assert cached["explanation_prompt_version"] == "grammar-explanation-v2"
+        assert cached["explanation_evidence_fingerprint"] == "fingerprint-v2"
+        assert cached["explanation_evidence_refs"] == evidence_refs
+
+        for correction_id in correction_ids:
+            assert repository.delete_chat_correction(correction_id) is True
+        without_mistakes = repository.get_grammar_point(grammar_key)
+        assert without_mistakes is not None
+        assert without_mistakes["has_mistake"] is False
+        assert without_mistakes["has_companion_question"] is True
+        assert without_mistakes["status"] == "encountered"
+        assert without_mistakes["status_source"] == "manual"
+        assert without_mistakes["first_source"] == "browse"
+        assert without_mistakes["explanation"] is None
+
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
+        material_id = None
+        reconciled = repository.reconcile_grammar_projection(grammar_key)
+        assert reconciled is not None
+        assert reconciled["has_companion_question"] is False
+        assert reconciled["status"] == "encountered"
+        assert reconciled["status_source"] == "manual"
+        assert reconciled["first_source"] == "browse"
+    finally:
+        with engine.begin() as connection:
+            if material_id is not None:
+                connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM grammar_point WHERE id = :id"), {"id": point_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_deleting_the_only_automatic_grammar_evidence_restores_untouched_state() -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    grammar_key = f"test-m0-{uuid.uuid4().hex}"
+    session_id = f"test-{uuid.uuid4()}"
+    with engine.begin() as connection:
+        point_id = connection.execute(
+            text(
+                """INSERT INTO grammar_point
+                   (key, title_ja, title_zh, level, category, sort_order)
+                   VALUES (:key, '～た', '简体过去', 'N5', '动词变形', 999999)
+                   RETURNING id"""
+            ),
+            {"key": grammar_key},
+        ).scalar_one()
+
+    try:
+        repository.create_chat_session(
+            session_id=session_id,
+            topic="M0 自动投影",
+            starter_id=None,
+            assistant_content="始めましょう。",
+        )
+        _, correction, _ = repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="昨日、映画を見る。",
+            assistant_content="どんな映画でしたか？",
+            correction={
+                "corrected_text": "昨日、映画を見た。",
+                "summary_zh": "过去发生的动作使用过去形。",
+                "items": [
+                    {
+                        "original": "見る",
+                        "replacement": "見た",
+                        "reason_zh": "昨天发生的动作要使用过去形。",
+                        "category": "grammar",
+                        "grammar_key": grammar_key,
+                    }
+                ],
+            },
+        )
+        assert correction is not None
+        projected = repository.get_grammar_point(grammar_key)
+        assert projected is not None
+        assert projected["status"] == "encountered"
+        assert projected["status_source"] == "automatic"
+        assert projected["first_source"] == "correction"
+
+        assert repository.delete_chat_session(session_id) is True
+        untouched = repository.get_grammar_point(grammar_key)
+        assert untouched is not None
+        assert untouched["status"] is None
+        assert untouched["status_source"] is None
+        assert untouched["first_source"] is None
+        assert untouched["has_mistake"] is False
+        assert untouched["needs_attention"] is False
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM grammar_point WHERE id = :id"), {"id": point_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_deleting_a_mistake_does_not_forget_a_later_explicit_browse() -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    grammar_key = f"test-m0-{uuid.uuid4().hex}"
+    session_id = f"test-{uuid.uuid4()}"
+    with engine.begin() as connection:
+        point_id = connection.execute(
+            text(
+                """INSERT INTO grammar_point
+                   (key, title_ja, title_zh, level, category, sort_order)
+                   VALUES (:key, '～た', '简体过去', 'N5', '动词变形', 999999)
+                   RETURNING id"""
+            ),
+            {"key": grammar_key},
+        ).scalar_one()
+
+    try:
+        repository.create_chat_session(
+            session_id=session_id,
+            topic="M0 浏览保留",
+            starter_id=None,
+            assistant_content="始めましょう。",
+        )
+        repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="昨日、映画を見る。",
+            assistant_content="どんな映画でしたか？",
+            correction={
+                "corrected_text": "昨日、映画を見た。",
+                "summary_zh": "过去发生的动作使用过去形。",
+                "items": [
+                    {
+                        "original": "見る",
+                        "replacement": "見た",
+                        "reason_zh": "昨天发生的动作要使用过去形。",
+                        "category": "grammar",
+                        "grammar_key": grammar_key,
+                    }
+                ],
+            },
+        )
+        browsed = repository.mark_grammar_encounter(
+            grammar_key,
+            status="encountered",
+            source="browse",
+        )
+        assert browsed is not None
+        assert browsed["first_source"] == "correction"
+        assert browsed["last_source"] == "browse"
+        assert browsed["browsed_at"] is not None
+
+        assert repository.delete_chat_session(session_id) is True
+        after_delete = repository.get_grammar_point(grammar_key)
+        assert after_delete is not None
+        assert after_delete["status"] == "encountered"
+        assert after_delete["status_source"] == "automatic"
+        assert after_delete["first_source"] == "correction"
+        assert after_delete["last_source"] == "browse"
+        assert after_delete["browsed_at"] is not None
+        assert after_delete["has_mistake"] is False
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM grammar_point WHERE id = :id"), {"id": point_id})
+        engine.dispose()

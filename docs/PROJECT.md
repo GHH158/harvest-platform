@@ -529,9 +529,11 @@ CREATE TABLE chat_correction_item (
     replacement       TEXT NOT NULL,
     reason_zh         TEXT NOT NULL,
     category          TEXT NOT NULL,    -- grammar|word_choice|naturalness|register|orthography
+    grammar_key       TEXT,             -- 可选;关联 grammar_point.key 的稳定目录键
     UNIQUE (correction_id, idx)
 );
 CREATE INDEX idx_chat_correction_item_category ON chat_correction_item(category);
+CREATE INDEX idx_correction_item_grammar ON chat_correction_item(grammar_key);
 
 -- 跟读尝试与评分
 CREATE TABLE shadowing_attempt (
@@ -572,6 +574,57 @@ CREATE TABLE vocabulary (
     next_review_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 语法目录:索引而非教材内容
+CREATE TABLE grammar_point (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    key         TEXT NOT NULL UNIQUE,
+    title_ja    TEXT NOT NULL,
+    title_zh    TEXT NOT NULL,
+    level       TEXT NOT NULL,
+    category    TEXT NOT NULL,
+    sort_order  INT NOT NULL DEFAULT 0
+);
+
+-- 语法状态投影:没有此行即未接触;事实原文仍在来源业务表
+CREATE TABLE grammar_encounter (
+    point_id          BIGINT PRIMARY KEY REFERENCES grammar_point(id) ON DELETE CASCADE,
+    status            TEXT NOT NULL,    -- encountered | understood
+    status_source     TEXT NOT NULL DEFAULT 'automatic', -- automatic | manual
+    first_source      TEXT,             -- 首次来源,创建后不被后来证据覆盖
+    last_source       TEXT,             -- correction | companion | browse | manual
+    note              TEXT,             -- 兼容快照,不是事实唯一来源
+    last_evidence_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    browsed_at        TIMESTAMPTZ,      -- 主动读过讲解;不被后来来源覆盖
+    status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_grammar_encounter_updated BEFORE UPDATE ON grammar_encounter
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 按需生成的讲解缓存;版本或证据指纹不匹配即可丢弃重建
+CREATE TABLE grammar_explanation (
+    point_id             BIGINT PRIMARY KEY REFERENCES grammar_point(id) ON DELETE CASCADE,
+    content              TEXT NOT NULL,
+    prompt_version       TEXT NOT NULL DEFAULT '',
+    evidence_fingerprint TEXT NOT NULL DEFAULT '',
+    evidence_refs        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_grammar_explanation_updated BEFORE UPDATE ON grammar_explanation
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 用户在陪读中明确问到某语法点:是接触证据,但不是错误
+CREATE TABLE companion_grammar_evidence (
+    message_id BIGINT NOT NULL REFERENCES companion_message(id) ON DELETE CASCADE,
+    point_id   BIGINT NOT NULL REFERENCES grammar_point(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (message_id, point_id)
+);
+CREATE INDEX idx_companion_grammar_point
+    ON companion_grammar_evidence(point_id, created_at DESC);
 ```
 
 > **延续上一个项目验证过的约定**:枚举字段一律 TEXT、不加 CHECK 约束(§7.3 已写明);`updated_at` 由触发器统一维护,不要在应用层再手动设置一遍——两套机制并存容易在验收时对不上。
@@ -583,6 +636,7 @@ CREATE TABLE vocabulary (
 - **枚举字段一律用 TEXT,不加 CHECK 约束** —— 新增类型时不用改表结构
 - **`media_asset.purpose` 区分归档与分发**:原始高码率文件留在 Mac(`archive`),转码后的小文件上传 OSS(`delivery`)
 - **`companion_message` 与 `chat_message` 完全分离**,不共享上下文。陪读是"这句什么意思",聊天是"聊聊今天吃了什么",混在一起会四不像
+- **语法事实、投影与缓存分层**:`chat_correction_item` / `companion_message` 是可追溯事实,`grammar_encounter` 是可重算投影,`grammar_explanation` 是可丢弃缓存。删除纠错或聊天会话后必须重算受影响的投影;不得只删列表项而保留幽灵状态
 - **全局聊天按主题创建独立 `chat_session`**,完整消息永久保存;模型每轮只携带当前会话最近 20 条消息,避免跨主题污染和上下文无限增长
 - **个人知识库第一版就是 PostgreSQL 中的完整聊天与结构化纠错**,不引入 pgvector、Embedding 或 RAG。正确且自然的输入只留在聊天历史,不创建 `chat_correction`。**纠错库本身不做复习调度**——`chat_correction` 只供查阅、搜索和新会话的轻量个性化;§5.9 的复习调度只作用于 `vocabulary`,两者不合并
 - **素材库列表 API 是用户状态投影,不是 material 表直出**:`GET /materials` 除时长、来源、创建时间与封面路径外,还要基于当前 job 返回 `progress_percent`、`progress_label`、`eta_minutes`、失败阶段标题、用户可读错误分类、原始错误和 `retryable`;进度是明确的阶段进度,不能伪装成底层云服务未提供的逐字节精度。`POST /materials/{id}/retry` 复用失败 job 的原始 payload 并清空失败状态,不得创建重复 material。
@@ -688,7 +742,7 @@ iPhone:用户点击某个词 / 某一句,或直接提问
 
 所有通用文本 LLM 功能共用 `DASHSCOPE_CHAT_MODEL=qwen3.7-max`,包括材料陪读、全局文字聊天和 worker 的字幕翻译。`LLM_PROVIDER=auto` 时优先消耗百炼 Max 的独立免费额度;Qwen 因额度耗尽或其他 HTTP / 连接错误失败后,只有已配置 `DEEPSEEK_API_KEY` 且 `LLM_FALLBACK_ON_ERROR=true` 才切换 DeepSeek。未配置备用 Key 时必须返回真实错误,不得静默换成较弱的 Qwen 模型。
 
-**学习问答响应约定:**`qwen3.7-max` 属于默认开启深度思考的混合模型,但陪读与日语聊天主要是日常问答、词语解释和短对话,因此这两类请求固定传 `enable_thinking=false`,保留 Max 模型质量但跳过不必要的思维链、延迟和输出 Token;不得通过换回较弱模型解决速度问题。聊天单次输出上限为 1200 Token;自由文本陪读上限为 2000 Token,给复杂词义和语法讲解留出余量。上限只是截断保护,不会要求模型生成到该长度。聊天同时使用 `response_format={"type":"json_object"}` 约束结构化结果,只在仍无法通过本地契约校验时进行一次修复调用。FastAPI 生命周期内复用一个 `httpx.Client` 连接池,关闭应用时释放;不得为每轮请求重新建立 TLS 连接。
+**学习问答响应约定:**`qwen3.7-max` 属于默认开启深度思考的混合模型,但陪读与日语聊天主要是日常问答、词语解释和短对话,因此这两类请求固定传 `enable_thinking=false`,保留 Max 模型质量但跳过不必要的思维链、延迟和输出 Token;不得通过换回较弱模型解决速度问题。聊天与陪读单次输出上限均为 1200 Token。上限只是截断保护,不会要求模型生成到该长度。两者都使用 `response_format={"type":"json_object"}` 约束结构化结果,只在仍无法通过本地契约校验时进行一次修复调用。FastAPI 生命周期内复用一个 `httpx.Client` 连接池,关闭应用时释放;不得为每轮请求重新建立 TLS 连接。
 
 iOS 发出聊天消息后必须立即把本地待发送消息加入对话并清空输入框,同时显示克制的等待状态;成功后用服务端正式消息替换,失败则移除待发送消息并恢复原草稿。陪读继续沿用现有待发送问题与「老师正在整理」反馈。第一版仍采用完整回复后一次展示,不引入 SSE/WebSocket 文本流;若关闭思考后的真实延迟仍不可接受,再单独评估只为自由文本陪读增加流式输出,结构化纠错聊天不得展示未校验的半截 JSON。
 
@@ -736,6 +790,14 @@ iOS 发出聊天消息后必须立即把本地待发送消息加入对话并清�
 陪读请求仍采用完整回复一次返回,不引入 SSE / WebSocket 流式输出,但等待过程必须有连续反馈:用户点击提问或按键盘发送后,iOS 立即收起键盘、显示该问题的临时气泡和「老师正在整理…」进度状态,并禁止重复发送;完整回复到达后用服务端返回的正式 user / assistant 消息替换临时状态并自动滚动到答案。请求失败时移除等待状态、恢复原问题草稿并展示明确错误,不得让用户误以为按钮未生效。
 
 陪读输入框同时支持键盘「发送」、键盘工具栏「完成」和拖动对话区收起键盘。助手消息按 Markdown 语义渲染,至少正确显示标题、段落、粗体、斜体、行内代码、链接、引用、列表和代码块,不得把 `**`、`#`、列表标记或代码围栏直接展示给用户。
+
+模型每轮只返回一次结构化结果,固定契约为:
+
+```json
+{"answer_markdown":"给使用者显示的讲解","grammar_keys":[]}
+```
+
+`grammar_keys` 最多 3 个,且只标注使用者**本轮明确询问**的目录语法点;当前句里只是出现、助手顺手延伸或模型无法可靠判断时必须留空。服务端丢弃未知 key,格式错误只允许修复一次。写入 `companion_grammar_evidence` 的事实是「用户在这条消息中明确问过此点」,不是「用户写错过此点」,更不能把助手回答反写成用户事实。证据登记失败不得把已经成功的陪读回答显示成失败。
 
 ### 5.5 Job 与可消费状态规则
 
@@ -983,6 +1045,30 @@ Output
 - 不做连续天数、正确率排行、激励文案、每日目标数量(§1.4)
 - 不做自动加词:只有用户点了「加入生词表」才入库,查过不等于要背
 - 不把 `chat_correction` 并入复习队列(§4.3)
+
+### 5.10 语法证据、状态投影与讲解缓存
+
+#### API
+
+- `GET /grammar`:同步稳定目录后返回全部语法点。返回值同时包含用户状态、状态来源、首次/最近来源、真实错误数量与最近错句、明确陪读问题、最近学习证据时间、`needs_attention` 与可显示的 `state_reason`
+- `GET /grammar/{key}?refresh=false`:读取当前证据,计算证据指纹;只有 `prompt_version` 与指纹都匹配时才命中讲解缓存。`refresh=true` 强制重建
+- `POST /grammar/{key}/status`:接受 `encountered | understood`,是用户明确判断,允许从已弄懂重新标为需要留意
+
+#### 投影规则
+
+```text
+真实聊天纠错(grammar_key) ─┐
+                            ├─> grammar_encounter 当前投影 ─> 语法页状态与原因
+明确陪读问题(grammar_keys) ─┘
+                      │
+                      └─> 讲解证据引用 + SHA-256 指纹 ─> grammar_explanation 缓存
+```
+
+- `first_source` 只回答第一次从哪里遇到,后来写错不会把 `browse` 覆盖成 `correction`;「是否真实写错、最近错句」始终从纠错事实表派生
+- 自动证据可以把未接触变为 `encountered`,但不能把用户明确的 `understood` 降级。若用户标记已懂后出现更新的错误或明确提问,状态仍是 `understood`,同时 `needs_attention=true`,界面说明后来在哪里再次遇到
+- 用户手动状态优先且可双向修改。删除最后一条纯自动证据后删除无来源的投影,恢复未接触;有手动判断或主动浏览历史时保留该关系并清理失效的来源快照
+- 新增纠错或明确陪读问题立即删除旧讲解;删除单条纠错或整段聊天后重算投影并删除旧讲解。陪读个性化关联与纠错后的语法登记失败都不得回滚已经成功的主路径
+- 讲解使用当前最近纠错和明确陪读问题,分别标为「实际写错过」与「曾明确问过」;保存 `prompt_version`、`evidence_fingerprint` 与 `evidence_refs`,不依赖缓存正文猜测来源
 
 ---
 
@@ -1272,6 +1358,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-07 | 语法骨架接入 iOS:原「生词」标签页改为「积累」,顶部分段切换 生词 / 语法,底部导航不增加。语法页按 已弄懂 / 已撞见 / 还没接触(可折叠)分组,不显示百分比与进度条;来自真实错误的点显示「你写过：<原句>」。讲解页按需生成并复用陪读的 Markdown 渲染,可标记已弄懂。实测:切到语法页显示「已弄懂 1 / 已撞见 1 / 还没接触 65」,点开 `～かった` 的讲解以「美味しいでした」切入 |
 | 2026-08-08 | 新增 §13「学习者知识库与活的学习系统」,记录 Harvest 全局的长期底层方向,不限于单词与语法:复杂性放在系统的记忆与判断里,界面保持简单;真实事件是事实,学习状态是可重算的投影,AI 内容是可丢弃缓存;用结构化关系、分层记忆、稳定角色、关系记忆、动态学习场景与克制的主动性让系统越用越懂使用者;引入「理解圆桌 / 沉浸圆桌」,但不把多 Agent 做成并列功能菜单。语法骨架只是第一个验证切片,不是系统边界。本次只确定设计,尚未实现 |
 | 2026-08-08 | §13.9 新增 M0–M7 实施路线与五道验收闸:全局架构从一开始定义,但每次只验证一条纵向闭环;先稳固语法的证据/投影/缓存语义,再建立全局学习事件契约、稳定角色与理解圆桌,通过真实使用后才扩到全入口、关系记忆、沉浸圆桌、动态场景与向量召回 |
+| 2026-08-08 | 完成 §13.9 M0:语法状态改为可解释的证据投影,首次来源与后来真实错误分离;陪读使用单次结构化契约保守登记「明确问过」,不冒充错误;讲解缓存加入提示词版本、证据引用和指纹并随新增/删除证据失效;用户手动状态优先,已懂后新证据以 `needs_attention` 提醒且可手动改回留意;语法页按需留意/已懂/未接触排序并显示最近错句或问题与状态原因。删除单条纠错或整段聊天都会重算投影,且不会忘记后来主动读过讲解的事实。独立 PostgreSQL 全链路、后端 163 项与 iOS 41 项测试全部通过 |
 
 ---
 
@@ -1304,34 +1391,37 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 因此边界是:
 
 - **存目录与状态,不存讲解正文。**数据库里只有「语法点清单」和「这个点你处于什么状态」。讲解按需由 §5.8 的教学内核生成并缓存,不预置成套教材文本,也不抄写课本例句。
-- **优先由真实语料驱动。**纠错与查词中出现过的语法点自动登记为「已撞见」,这是主路径;主动浏览目录是补充,不是主路径。
+- **优先由真实语料驱动。**聊天中的真实纠错与陪读中的明确语法提问自动登记为「已撞见」,这是主路径;主动浏览目录是补充,不是主路径。查词不登记语法。
 - **不做课程进度条、打卡、连续天数**(§1.4 仍然有效)。清单可以显示「已撞见 / 已弄懂 / 未接触」,但不换算成百分比进度或成就。
 
 ### 12.2 数据
 
-新增 `grammar_point`(目录:稳定 key、中文短标题、难度分级、所属类别)与 `grammar_encounter`(使用者与某个点的关系:首次撞见的来源、状态、更新时间)。目录是**索引而非内容**——不含讲解正文与例句,那些按需生成后缓存在 `grammar_explanation`,可随时丢弃重建。
+新增 `grammar_point`(目录:稳定 key、中文短标题、难度分级、所属类别)与 `grammar_encounter`(使用者与某个点的当前关系投影:状态、状态来源、首次/最近来源、证据与状态更新时间)。目录是**索引而非内容**——不含讲解正文与例句,那些按需生成后缓存在 `grammar_explanation`,可随时丢弃重建。`companion_grammar_evidence` 把用户的明确陪读问题关联到目录,但不把提问冒充成错误。
 
 首批目录为 N5–N4 共 67 点(助词 15、动词变形 18、形容词 8、句型 26),覆盖使用者已实测踩到的全部类型。追加 N3 及以上只是往 `grammar_catalogue.py` 里增加条目,不需要改代码或迁移数据。
 
-`chat_correction_item` 增加 `grammar_key`,把一次真实纠错关联回目录;有该关联时,§12.3 的讲解必须以那句原句切入。
+`chat_correction_item` 增加 `grammar_key`,把一次真实纠错关联回目录;有该关联时,§12.3 的讲解必须以那句原句切入。错误数量、最近错句和最近陪读问题都从这些事实表派生,不从 `grammar_encounter.note` 猜测。
 
-状态只有三种,且**不换算成百分比或成就**:未接触(没有 `grammar_encounter` 行)、已撞见、已弄懂。自动登记只会把「未接触」升为「已撞见」,**绝不把已弄懂降级**。
+状态只有三种,且**不换算成百分比或成就**:未接触(没有 `grammar_encounter` 行)、已撞见、已弄懂。自动登记只会把「未接触」升为「已撞见」,**绝不把已弄懂降级**。已懂后出现更新证据时保留用户判断,另以 `needs_attention` 表示「后来又遇到了」;用户也可以主动改回需要留意。
 
 ### 12.3 讲解生成
 
-复用 §5.8 共同内核,并追加:面向中文母语者优先说明与中文的差异;若使用者在此点上有过真实错误,**必须引用他自己的那句原句与修正**作为切入,而不是另造例句。
+复用 §5.8 共同内核,并追加:面向中文母语者优先说明与中文的差异;若使用者在此点上有过真实错误,**必须引用他自己的那句原句与修正**作为切入,而不是另造例句;若只有明确陪读问题,以当时的问题与可用阅读语境切入,不得称为错误。
+
+缓存键不只看语法点 key:必须同时匹配当前提示词版本和当前证据引用的 SHA-256 指纹。讲解行保存 `prompt_version`、`evidence_fingerprint`、`evidence_refs` 与更新时间;新增或删除证据后旧缓存立即失效,因此缓存正文永远不充当学习事实。
 
 ### 12.4 界面
 
 原「生词」标签页改为「**积累**」,顶部分段切换 生词 / 语法。两者是同一件事的不同粒度——都是从真实使用里沉淀下来的东西——因此共用一个标签页,底部导航不再增加(§1.5 要求克制)。
 
-语法页按状态分组:已弄懂、已撞见,以及可折叠的「还没接触」。**不显示百分比、进度条或成就**;累积本身就是反馈。来自真实错误的点会在标题下显示「你写过：<原句>」——这一行是骨架区别于课本目录的关键,它说的是「你在这里撞见过」,不是「第 12 课」。
+语法页按**需要留意、已弄懂、还没接触**分组,已弄懂后出现新证据的点重新进入需要留意,但不篡改其已懂状态。**不显示百分比、进度条或成就**;累积本身就是反馈。卡片优先显示最近真实错句,没有错误但有明确陪读问题时显示该问题,并用 `state_reason` 解释为什么出现在当前分组。
 
-讲解页按 §12.3 生成,复用陪读的 Markdown 渲染;底部提供「标记为已弄懂」。
+讲解页按 §12.3 生成,复用陪读的 Markdown 渲染;底部可「标记为已弄懂」,已懂后也可「重新标为需要留意」。
 
 ### 12.5 与既有功能的关系
 
 - 纠错(§5.6)在生成 `chat_correction_item` 时尝试标注 `grammar_key`,从而自动登记撞见。提示词中带上完整目录(key = 形式, 标签),并明确要求:**只在这个错误确实就是该点时才标注**,词汇选择、自然度或没把握的一律留空——错误的标注会悄悄污染骨架,比不标更糟。服务端只接受目录中真实存在的 key,模型编造的一律丢弃,且**丢弃标注而不是让整轮纠错失败**。登记发生在该轮事务提交之后:骨架写入失败绝不能连累纠错本身
+- 陪读(§5.4)只把用户本轮明确询问的语法点写入 `companion_grammar_evidence`;当前材料里被动出现的点和助手自行扩展的内容都不登记
 - 查词(§5.9)不参与登记:词汇不是语法点
 - 生词复习(§5.9)与语法骨架各自独立,不合并调度
 
@@ -1473,17 +1563,19 @@ Harvest 不应只是阅读、聊天、查词、语法等 AI 功能的集合,也�
 
 每个里程碑进入编码前,先把该阶段的精确表结构回写§4、流程/API 回写§5、验收方法回写本节;不用本路线中的概念名称直接猜数据库实现。
 
-#### M0 — 稳固当前语法切片
+#### M0 — 稳固当前语法切片（已完成,2026-08-08）
 
 目标:让§12 真正符合§13.2 的事件、投影与缓存语义,避免全局层建在错误基础上。
 
-- 把「首次来源」与「是否有真实错误 / 最近一次错误」分开;
-- 新的错误或明确陪读提问出现时,使相关讲解缓存失效,并记录生成所用的证据与提示词/规则版本;
-- 自动登记不得降级用户状态,用户可主动重新标为需要留意;
-- 语法页优先展示最近撞见且尚需留意的点,已弄懂历史放在后面;
-- 补后端集成测试与 iOS 语法页契约/交互测试。
+- [x] 把「首次来源」与「是否有真实错误 / 最近一次错误」分开;
+- [x] 新的错误或明确陪读提问出现时,使相关讲解缓存失效,并记录生成所用的证据与提示词/规则版本;
+- [x] 自动登记不得降级用户状态,用户可主动重新标为需要留意;
+- [x] 语法页优先展示最近撞见且尚需留意的点,已弄懂历史放在后面;
+- [x] 补后端集成测试与 iOS 语法页契约/交互测试。
 
 通过条件:新增、更新或删除一条真实证据后,语法状态与讲解可按规则重建;每个用户可见状态都能回答「为什么」。
+
+验收记录:独立 PostgreSQL 覆盖「主动浏览 → 真实纠错 → 标记已懂 → 新纠错 → 手动改回留意 → 明确陪读提问 → 删除单条纠错/整段聊天 → 投影收敛」全链路;验证首次来源不被覆盖、陪读问题不计为错误、手动状态保留、纯自动证据删除后回到未接触、纠错后主动浏览不会随纠错删除而丢失,以及缓存版本/证据引用/指纹。后端 `ruff` 通过且全套 163 项测试通过;iPhone 17 模拟器上 iOS 41 项测试通过,0 失败、0 跳过。五道共同验收闸中,M0 涉及的数据、准确性、体验与退化边界均有自动测试;学习效果的长期观察继续由后续真实使用验证,不以本次测试数量替代。
 
 #### M1 — 建立全局学习事件契约
 
@@ -1584,4 +1676,4 @@ Harvest 不应只是阅读、聊天、查词、语法等 AI 功能的集合,也�
 4. **学习闸**:功能促成新的理解、提问或真实日语输出,不以消费更多 AI 内容和更长使用时间替代学习效果。
 5. **退化闸**:记忆、圆桌、角色或语义检索不可用时,阅读、播放、查词、陪读和聊天主路径仍可继续。
 
-当前唯一允许进入实施的下一个里程碑是 **M0**。M0 通过后再详化 M1 的§4/§5 契约;未到该里程碑时,后续 M2–M7 保留产品方向与验收边界,不提前猜定最终技术实现。
+**M0 已通过。当前下一步只允许先详化 M1 的 §4/§5 精确契约与回填/重放验收方案,尚未授权实施 M1。**后续 M2–M7 继续只保留产品方向与验收边界,不提前猜定最终技术实现。

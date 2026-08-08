@@ -391,6 +391,7 @@ def test_lifespan_creates_one_shared_engine_and_disposes_it(monkeypatch: pytest.
     calls: list[object] = []
     monkeypatch.setattr(main, "make_engine", lambda: calls.append(object()) or engine)
     monkeypatch.setattr(main, "apply_schema", lambda value: calls.append(value))
+    monkeypatch.setattr(main.Repository, "sync_grammar_catalogue", lambda self: calls.append("grammar"))
     main._engine = None
     main._repository = None
 
@@ -403,8 +404,9 @@ def test_lifespan_creates_one_shared_engine_and_disposes_it(monkeypatch: pytest.
 
     asyncio.run(exercise())
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert calls[1] is engine
+    assert calls[2] == "grammar"
     assert engine.dispose_calls == 1
     with pytest.raises(RuntimeError, match="尚未初始化"):
         main.repository()
@@ -433,6 +435,7 @@ class CompanionRepository:
             {"id": 1, "role": "user", "content": "之前的问题", "created_at": "now"},
             {"id": 2, "role": "assistant", "content": "之前的回答", "created_at": "now"},
         ]
+        self.grammar_links: list[tuple[int, list[str]]] = []
 
     def get_material(self, material_id: int) -> dict[str, Any]:
         return {"id": material_id}
@@ -450,6 +453,10 @@ class CompanionRepository:
     def companion_messages(self, material_id: int) -> list[dict[str, Any]]:
         return self.messages
 
+    def record_companion_grammar_evidence(self, message_id: int, keys: list[str]) -> list[str]:
+        self.grammar_links.append((message_id, keys))
+        return keys
+
 
 def test_companion_sends_prior_turns_to_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     repository = CompanionRepository()
@@ -460,7 +467,7 @@ def test_companion_sends_prior_turns_to_llm(monkeypatch: pytest.MonkeyPatch) -> 
         def reply(self, messages: list[dict[str, str]], **values: Any) -> str:
             captured.extend(messages)
             options.append(values)
-            return "新的回答"
+            return '{"answer_markdown":"新的回答","grammar_keys":[]}'
 
     monkeypatch.setattr(main, "repository", lambda: repository)
     monkeypatch.setattr(main, "llm_service", lambda: RecordingLLM())
@@ -470,8 +477,25 @@ def test_companion_sends_prior_turns_to_llm(monkeypatch: pytest.MonkeyPatch) -> 
     assert [item["content"] for item in captured[1:3]] == ["之前的问题", "之前的回答"]
     assert "只作语境参考,不是日语词汇的全集" in captured[-1]["content"]
     assert captured[-1]["content"].endswith("用户问题:\n请解释「流会」的意思")
-    assert options == [{"enable_thinking": False, "max_tokens": 1_200}]
+    assert options == [{"enable_thinking": False, "json_mode": True, "max_tokens": 1_200}]
     assert result["assistant"]["content"] == "新的回答"
+    assert repository.grammar_links == []
+
+
+def test_companion_records_only_valid_explicit_grammar_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = CompanionRepository()
+
+    class RecordingLLM:
+        def reply(self, messages: list[dict[str, str]], **values: Any) -> str:
+            return '{"answer_markdown":"这里是て形。","grammar_keys":["verb-te","invented"]}'
+
+    monkeypatch.setattr(main, "repository", lambda: repository)
+    monkeypatch.setattr(main, "llm_service", lambda: RecordingLLM())
+
+    result = main.post_companion(main.CompanionRequest(material_id=7, segment_id=3, question="这里为什么用て形？"))
+
+    assert result["assistant"]["content"] == "这里是て形。"
+    assert repository.grammar_links == [(3, ["verb-te"])]
 
 
 def test_dictionary_prompt_ranks_the_chinese_difference_first() -> None:

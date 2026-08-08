@@ -216,13 +216,29 @@ CREATE INDEX IF NOT EXISTS idx_grammar_point_order ON grammar_point(level, sort_
 
 -- One row per point the learner has any relationship with. Absent row = 未接触.
 CREATE TABLE IF NOT EXISTS grammar_encounter (
-    point_id     BIGINT PRIMARY KEY REFERENCES grammar_point(id) ON DELETE CASCADE,
-    status       TEXT NOT NULL,         -- encountered | understood
-    first_source TEXT,                  -- correction | lookup | browse
-    note         TEXT,                  -- the learner's own sentence that triggered it
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    point_id          BIGINT PRIMARY KEY REFERENCES grammar_point(id) ON DELETE CASCADE,
+    status            TEXT NOT NULL,         -- encountered | understood
+    status_source     TEXT NOT NULL DEFAULT 'automatic', -- automatic | manual
+    first_source      TEXT,                  -- immutable first contact
+    last_source       TEXT,                  -- correction | companion | browse | manual
+    note              TEXT,                  -- compatibility snapshot; evidence stays in source tables
+    last_evidence_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    browsed_at        TIMESTAMPTZ,
+    status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE grammar_encounter ADD COLUMN IF NOT EXISTS status_source TEXT NOT NULL DEFAULT 'automatic';
+ALTER TABLE grammar_encounter ADD COLUMN IF NOT EXISTS last_source TEXT;
+ALTER TABLE grammar_encounter ADD COLUMN IF NOT EXISTS last_evidence_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE grammar_encounter ADD COLUMN IF NOT EXISTS browsed_at TIMESTAMPTZ;
+ALTER TABLE grammar_encounter ADD COLUMN IF NOT EXISTS status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
+UPDATE grammar_encounter SET last_source = first_source WHERE last_source IS NULL;
+UPDATE grammar_encounter SET browsed_at = created_at
+WHERE browsed_at IS NULL AND (first_source = 'browse' OR last_source = 'browse');
+-- Before status_source existed, only an explicit user action could create understood.
+UPDATE grammar_encounter SET status_source = 'manual'
+WHERE status = 'understood' AND status_source <> 'manual';
 -- CREATE TRIGGER has no IF NOT EXISTS, and this file re-runs on every startup.
 DROP TRIGGER IF EXISTS trg_grammar_encounter_updated ON grammar_encounter;
 CREATE TRIGGER trg_grammar_encounter_updated BEFORE UPDATE ON grammar_encounter
@@ -230,10 +246,33 @@ CREATE TRIGGER trg_grammar_encounter_updated BEFORE UPDATE ON grammar_encounter
 
 -- Cache only. Safe to delete at any time; it will be regenerated.
 CREATE TABLE IF NOT EXISTS grammar_explanation (
-    point_id   BIGINT PRIMARY KEY REFERENCES grammar_point(id) ON DELETE CASCADE,
-    content    TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    point_id             BIGINT PRIMARY KEY REFERENCES grammar_point(id) ON DELETE CASCADE,
+    content              TEXT NOT NULL,
+    prompt_version       TEXT NOT NULL DEFAULT '',
+    evidence_fingerprint TEXT NOT NULL DEFAULT '',
+    evidence_refs        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE grammar_explanation ADD COLUMN IF NOT EXISTS prompt_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE grammar_explanation ADD COLUMN IF NOT EXISTS evidence_fingerprint TEXT NOT NULL DEFAULT '';
+ALTER TABLE grammar_explanation ADD COLUMN IF NOT EXISTS evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE grammar_explanation ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+DROP TRIGGER IF EXISTS trg_grammar_explanation_updated ON grammar_explanation;
+CREATE TRIGGER trg_grammar_explanation_updated BEFORE UPDATE ON grammar_explanation
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- An explicit companion question is evidence that the learner met a point, but it is
+-- not a mistake. Keep the source message and point as a relationship instead of
+-- copying the question into grammar_encounter.
+CREATE TABLE IF NOT EXISTS companion_grammar_evidence (
+    message_id BIGINT NOT NULL REFERENCES companion_message(id) ON DELETE CASCADE,
+    point_id   BIGINT NOT NULL REFERENCES grammar_point(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (message_id, point_id)
+);
+CREATE INDEX IF NOT EXISTS idx_companion_grammar_point
+    ON companion_grammar_evidence(point_id, created_at DESC);
 
 -- Links a correction back to the grammar skeleton so a real mistake registers the
 -- point automatically (§12.1: corrections are the main path, browsing is the补充).

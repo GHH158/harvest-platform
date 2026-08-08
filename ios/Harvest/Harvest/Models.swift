@@ -398,8 +398,19 @@ struct GrammarPoint: Codable, Identifiable, Hashable {
     let level: String
     let category: String
     let status: String?
+    let statusSource: String?
     let firstSource: String?
+    let lastSource: String?
     let note: String?
+    let hasMistake: Bool?
+    let mistakeCount: Int?
+    let latestMistake: String?
+    let hasCompanionQuestion: Bool?
+    let companionQuestionCount: Int?
+    let latestQuestion: String?
+    let needsAttention: Bool?
+    let stateReason: String?
+    let latestLearningEvidenceAt: String?
     let hasExplanation: Bool?
     let explanation: String?
 
@@ -407,13 +418,26 @@ struct GrammarPoint: Codable, Identifiable, Hashable {
         case id, key, level, category, status, note, explanation
         case titleJA = "title_ja"
         case titleZH = "title_zh"
+        case statusSource = "status_source"
         case firstSource = "first_source"
+        case lastSource = "last_source"
+        case hasMistake = "has_mistake"
+        case mistakeCount = "mistake_count"
+        case latestMistake = "latest_mistake"
+        case hasCompanionQuestion = "has_companion_question"
+        case companionQuestionCount = "companion_question_count"
+        case latestQuestion = "latest_question"
+        case needsAttention = "needs_attention"
+        case stateReason = "state_reason"
+        case latestLearningEvidenceAt = "latest_learning_evidence_at"
         case hasExplanation = "has_explanation"
     }
 
     var isUnderstood: Bool { status == "understood" }
     var isEncountered: Bool { status == "encountered" }
-    /// Came from a real mistake rather than from browsing the catalogue.
-    var cameFromMistake: Bool { firstSource == "correction" }
+    var requiresAttention: Bool { needsAttention ?? isEncountered }
+    var isSettled: Bool { isUnderstood && !requiresAttention }
+    /// A mistake may happen after the first encounter, so firstSource cannot answer this.
+    var cameFromMistake: Bool { hasMistake ?? (firstSource == "correction") }
+    var mistakeText: String? { latestMistake ?? note }
 }
-
