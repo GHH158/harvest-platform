@@ -59,6 +59,53 @@ def test_chat_prompt_carries_the_catalogue_so_the_model_can_tag() -> None:
     assert "worse than leaving it empty" in CHAT_SYSTEM_PROMPT
 
 
+def test_chat_system_prompt_is_trimmed_to_the_supplied_catalogue_subset() -> None:
+    # §5.11: the prompt is computed per request from a subset, not the baked-in
+    # module constant, once a caller passes one in.
+    from app.chat import build_chat_system_prompt
+
+    subset = [("verb-te", "～て", "て形与连接", "N5", "动词变形")]
+    prompt = build_chat_system_prompt(subset)
+
+    assert "verb-te = ～て" in prompt
+    assert "i-adj-past" not in prompt
+    assert "verb-te-iru" not in prompt
+
+
+def test_companion_system_prompt_is_trimmed_to_the_supplied_catalogue_subset() -> None:
+    from app.companion import build_companion_system_prompt
+
+    subset = [("verb-te", "～て", "て形与连接", "N5", "动词变形")]
+    prompt = build_companion_system_prompt(subset)
+
+    assert "verb-te = ～て" in prompt
+    assert "i-adj-past" not in prompt
+
+
+def test_learning_event_payload_is_validated_by_kind() -> None:
+    from app.learning_events import validated_learning_event_payload
+    from pydantic import ValidationError
+
+    correction = validated_learning_event_payload(
+        "correction_item",
+        {
+            "original": "読むています",
+            "replacement": "読んでいます",
+            "reason_zh": "て形",
+            "category": "grammar",
+        },
+    )
+    assert correction["replacement"] == "読んでいます"
+
+    with pytest.raises(ValidationError):
+        validated_learning_event_payload(
+            "companion_question",
+            {"question": "为什么？", "material_id": 1, "segment_id": None, "unexpected": True},
+        )
+    with pytest.raises(ValidationError):
+        validated_learning_event_payload("unknown_kind", {})
+
+
 def test_grammar_evidence_fingerprint_is_deterministic_and_changes_with_evidence() -> None:
     evidence = [
         {"kind": "correction", "id": 17, "created_at": "ignored", "reason_zh": "ignored"},
@@ -206,3 +253,85 @@ def test_stale_grammar_cache_regenerates_and_keeps_questions_distinct_from_mista
         "evidence_fingerprint": current_fingerprint,
         "evidence_refs": current_refs,
     }
+
+
+class RejectEvidenceRepository:
+    """§5.11: reject/unreject return the point projection; the endpoint attaches
+    the (now trimmed) evidence list in the same response so the client needs no
+    second round trip."""
+
+    def __init__(self, *, point: dict[str, Any] | None, evidence: list[dict[str, Any]]) -> None:
+        self.point = point
+        self.evidence = evidence
+        self.rejected_ids: list[int] = []
+        self.unrejected_ids: list[int] = []
+
+    def reject_learning_event(self, event_id: int) -> dict[str, Any] | None:
+        self.rejected_ids.append(event_id)
+        return dict(self.point) if self.point is not None else None
+
+    def unreject_learning_event(self, event_id: int) -> dict[str, Any] | None:
+        self.unrejected_ids.append(event_id)
+        return dict(self.point) if self.point is not None else None
+
+    def grammar_evidence(self, key: str) -> list[dict[str, Any]]:
+        return self.evidence
+
+
+def test_reject_grammar_evidence_returns_updated_point_with_trimmed_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = RejectEvidenceRepository(
+        point={"id": 1, "key": "verb-te-oku", "status": "encountered", "mistake_count": 0},
+        evidence=[],
+    )
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    result = main.reject_grammar_evidence(17)
+
+    assert repository.rejected_ids == [17]
+    assert result["status"] == "encountered"
+    assert result["evidence"] == []
+
+
+def test_unreject_grammar_evidence_returns_updated_point_with_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restored_evidence = [{"kind": "correction", "id": 17, "original_fragment": "買うておきます"}]
+    repository = RejectEvidenceRepository(
+        point={"id": 1, "key": "verb-te-oku", "status": "encountered", "mistake_count": 1},
+        evidence=restored_evidence,
+    )
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    result = main.unreject_grammar_evidence(17)
+
+    assert repository.unrejected_ids == [17]
+    assert result["evidence"] == restored_evidence
+
+
+def test_status_update_keeps_detail_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    class StatusRepository:
+        def mark_grammar_encounter(self, key: str, **values: Any) -> dict[str, Any]:
+            return {"id": 1, "key": key, "status": values["status"]}
+
+        def grammar_evidence(self, key: str) -> list[dict[str, Any]]:
+            return [{"kind": "correction", "id": 17, "original_fragment": "買うて"}]
+
+    monkeypatch.setattr(main, "repository", lambda: StatusRepository())
+
+    result = main.set_grammar_status("verb-te", main.GrammarStatusUpdate(status="understood"))
+
+    assert result["status"] == "understood"
+    assert result["evidence"][0]["id"] == 17
+
+
+@pytest.mark.parametrize("endpoint", [main.reject_grammar_evidence, main.unreject_grammar_evidence])
+def test_reject_and_unreject_404_on_unknown_event(monkeypatch: pytest.MonkeyPatch, endpoint) -> None:
+    repository = RejectEvidenceRepository(point=None, evidence=[])
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    with pytest.raises(main.HTTPException) as caught:
+        endpoint(999)
+
+    assert caught.value.status_code == 404

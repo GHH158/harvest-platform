@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,7 +11,14 @@ from sqlalchemy import Engine, text
 
 from .chat import build_correction_guidance
 from .grammar_catalogue import catalogue_rows
+from .learning_events import LEARNING_EVENT_SCHEMA_VERSION, validated_learning_event_payload
 from .text import canonical_source_key
+
+logger = logging.getLogger(__name__)
+
+# §5.11: JLPT levels from most to least basic. Learning state may change prompt
+# ordering, but it must never hide an unseen point from recurrence detection.
+GRAMMAR_LEVEL_ORDER = ("N5", "N4", "N3", "N2", "N1")
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,125 @@ class Job:
 class Repository:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
+
+    def _record_learning_event(
+        self,
+        *,
+        kind: str,
+        source_table: str,
+        source_id: int,
+        subject_key: str,
+        occurred_at: Any,
+        payload: dict[str, Any],
+        confidence: float | None = None,
+    ) -> bool:
+        """Write one validated v1 event in its own transaction.
+
+        Callers invoke this only after the source fact has committed. A malformed
+        event or event-index failure therefore cannot roll back chat or companion
+        content, and the source tables remain sufficient for idempotent replay.
+        """
+
+        validated_payload = validated_learning_event_payload(kind, payload)
+        with self.engine.begin() as connection:
+            inserted = connection.execute(
+                text(
+                    """INSERT INTO learning_event
+                       (schema_version, kind, source_table, source_id, subject_kind,
+                        subject_key, confidence, occurred_at, payload)
+                       VALUES (:schema_version, :kind, :source_table, :source_id,
+                               'grammar_point', :subject_key, :confidence, :occurred_at,
+                               CAST(:payload AS JSONB))
+                       ON CONFLICT (source_table, source_id, subject_kind, subject_key)
+                       DO NOTHING RETURNING id"""
+                ),
+                {
+                    "schema_version": LEARNING_EVENT_SCHEMA_VERSION,
+                    "kind": kind,
+                    "source_table": source_table,
+                    "source_id": source_id,
+                    "subject_key": subject_key,
+                    "confidence": confidence,
+                    "occurred_at": occurred_at,
+                    "payload": json.dumps(validated_payload, ensure_ascii=False),
+                },
+            ).scalar_one_or_none()
+        return inserted is not None
+
+    def backfill_learning_events(self) -> list[str]:
+        """Replay legacy grammar links into the v1 event envelope, idempotently.
+
+        `apply_schema` creates the destination table first; startup then calls this
+        method before serving requests. Newly inserted keys and active events whose
+        projection is missing are repaired; a healthy repeat startup is a no-op.
+        """
+
+        with self.engine.begin() as connection:
+            correction_keys = connection.execute(
+                text(
+                    """INSERT INTO learning_event
+                       (schema_version, kind, source_table, source_id, subject_kind,
+                        subject_key, actor, confidence, occurred_at, backfilled, payload)
+                       SELECT :schema_version, 'correction_item', 'chat_correction_item',
+                              ci.id, 'grammar_point', ci.grammar_key, 'user', NULL,
+                              c.created_at, true,
+                              jsonb_build_object(
+                                  'original', ci.original_fragment,
+                                  'replacement', ci.replacement,
+                                  'reason_zh', ci.reason_zh,
+                                  'category', ci.category
+                              )
+                       FROM chat_correction_item ci
+                       JOIN chat_correction c ON c.id = ci.correction_id
+                       JOIN grammar_point p ON p.key = ci.grammar_key
+                       WHERE ci.grammar_key IS NOT NULL
+                       ON CONFLICT (source_table, source_id, subject_kind, subject_key)
+                       DO NOTHING RETURNING subject_key"""
+                ),
+                {"schema_version": LEARNING_EVENT_SCHEMA_VERSION},
+            ).scalars().all()
+            companion_keys = connection.execute(
+                text(
+                    """INSERT INTO learning_event
+                       (schema_version, kind, source_table, source_id, subject_kind,
+                        subject_key, actor, confidence, occurred_at, backfilled, payload)
+                       SELECT :schema_version, 'companion_question', 'companion_message',
+                              cm.id, 'grammar_point', p.key, 'user', NULL,
+                              cm.created_at, true,
+                              jsonb_build_object(
+                                  'question', cm.content,
+                                  'material_id', cm.material_id,
+                                  'segment_id', cm.segment_id
+                              )
+                       FROM companion_grammar_evidence cge
+                       JOIN companion_message cm ON cm.id = cge.message_id
+                       JOIN grammar_point p ON p.id = cge.point_id
+                       ON CONFLICT (source_table, source_id, subject_kind, subject_key)
+                       DO NOTHING RETURNING subject_key"""
+                ),
+                {"schema_version": LEARNING_EVENT_SCHEMA_VERSION},
+            ).scalars().all()
+            missing_projection_keys = connection.execute(
+                text(
+                    """SELECT DISTINCT le.subject_key
+                       FROM learning_event le
+                       JOIN grammar_point p ON p.key = le.subject_key
+                       LEFT JOIN grammar_encounter e ON e.point_id = p.id
+                       WHERE le.schema_version = :schema_version
+                         AND le.subject_kind = 'grammar_point'
+                         AND le.rejected_at IS NULL
+                         AND e.point_id IS NULL"""
+                ),
+                {"schema_version": LEARNING_EVENT_SCHEMA_VERSION},
+            ).scalars().all()
+        keys = list(
+            dict.fromkeys(
+                str(key) for key in [*correction_keys, *companion_keys, *missing_projection_keys]
+            )
+        )
+        for key in keys:
+            self.reconcile_grammar_projection(key)
+        return keys
 
     def find_material_by_source_url(self, url: str) -> dict[str, Any] | None:
         """Existing material imported from the same source, ignoring share noise.
@@ -391,6 +518,21 @@ class Repository:
                     {"session_id": session_id},
                 ).scalars()
             ]
+            # learning_event has no FK to chat_correction_item (§5.11: a logical
+            # reference, not a physical one), so the cascade below would otherwise
+            # leave orphaned evidence that keeps counting after the session is gone.
+            connection.execute(
+                text(
+                    """DELETE FROM learning_event
+                       WHERE source_table = 'chat_correction_item'
+                         AND source_id IN (
+                             SELECT ci.id FROM chat_correction_item ci
+                             JOIN chat_correction c ON c.id = ci.correction_id
+                             WHERE c.session_id = :session_id
+                         )"""
+                ),
+                {"session_id": session_id},
+            )
             deleted = connection.execute(
                 text("DELETE FROM chat_session WHERE id = :session_id RETURNING id"),
                 {"session_id": session_id},
@@ -446,7 +588,7 @@ class Repository:
         correction: dict[str, Any] | None,
         create_session_topic: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any]]:
-        touched_grammar_keys: list[tuple[str, str]] = []
+        pending_learning_events: list[dict[str, Any]] = []
         with self.engine.begin() as connection:
             if create_session_topic is not None:
                 connection.execute(
@@ -500,7 +642,21 @@ class Repository:
                     items.append(dict(stored_item))
                     # A real mistake is the main path into the grammar skeleton (§12.1).
                     if key := item.get("grammar_key"):
-                        touched_grammar_keys.append((str(key), str(item["original"])))
+                        pending_learning_events.append(
+                            {
+                                "kind": "correction_item",
+                                "source_table": "chat_correction_item",
+                                "source_id": int(stored_item["id"]),
+                                "subject_key": str(key),
+                                "occurred_at": correction_row["created_at"],
+                                "payload": {
+                                    "original": stored_item["original"],
+                                    "replacement": stored_item["replacement"],
+                                    "reason_zh": stored_item["reason_zh"],
+                                    "category": stored_item["category"],
+                                },
+                            }
+                        )
                 stored_correction = dict(correction_row)
                 stored_correction["items"] = items
             assistant = connection.execute(
@@ -514,16 +670,23 @@ class Repository:
                 text("UPDATE chat_session SET topic = topic WHERE id = :session_id"),
                 {"session_id": session_id},
             )
-        # Registered after the turn's transaction commits: a failure to record the
-        # skeleton must never lose the correction itself.
-        for key, original in touched_grammar_keys:
-            self.mark_grammar_encounter(
-                key,
-                status="encountered",
-                source="correction",
-                note=original,
-                invalidate_explanation=True,
-            )
+        # Event indexing and projection are enhancements. They run only after the
+        # chat transaction commits and cannot make a successful turn look failed.
+        for event in pending_learning_events:
+            try:
+                self._record_learning_event(**event)
+                self.mark_grammar_encounter(
+                    str(event["subject_key"]),
+                    status="encountered",
+                    source="correction",
+                    note=str(event["payload"]["original"]),
+                    invalidate_explanation=True,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to record correction learning event",
+                    extra={"source_id": event["source_id"], "subject_key": event["subject_key"]},
+                )
         return dict(user), stored_correction, dict(assistant)
 
     def chat_corrections(
@@ -618,6 +781,18 @@ class Repository:
                     {"correction_id": correction_id},
                 ).scalars()
             ]
+            # Same reasoning as delete_chat_session: learning_event must be cleaned up
+            # by hand since it only references chat_correction_item logically.
+            connection.execute(
+                text(
+                    """DELETE FROM learning_event
+                       WHERE source_table = 'chat_correction_item'
+                         AND source_id IN (
+                             SELECT id FROM chat_correction_item WHERE correction_id = :correction_id
+                         )"""
+                ),
+                {"correction_id": correction_id},
+            )
             deleted = connection.execute(
                 text("DELETE FROM chat_correction WHERE id = :correction_id RETURNING id"),
                 {"correction_id": correction_id},
@@ -1279,6 +1454,37 @@ class Repository:
                     row,
                 )
 
+    def grammar_catalogue_for_prompt(self) -> list[tuple[str, str, str, str, str]]:
+        """Build the compact prompt catalogue without creating discovery blind spots.
+
+        Current catalogue size is small enough to include every key. Existing
+        encounters move first so the model sees personal history prominently, but
+        an unseen N4/N3 point remains available for a first real mistake. Any future
+        retrieval-based limit must first prove recall against this complete baseline.
+        """
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT p.key, p.title_ja, p.title_zh, p.level, p.category,
+                              p.sort_order, p.id, (e.point_id IS NOT NULL) AS encountered
+                       FROM grammar_point p
+                       LEFT JOIN grammar_encounter e ON e.point_id = p.id"""
+                )
+            ).mappings().all()
+        # Level as TEXT sorts lexically ("N1" < "N5"), the wrong way round for JLPT.
+        # State changes ordering only; it never excludes a catalogue entry.
+        level_rank = {level: index for index, level in enumerate(GRAMMAR_LEVEL_ORDER)}
+        rows = sorted(
+            (dict(row) for row in rows),
+            key=lambda row: (
+                0 if row["encountered"] else 1,
+                level_rank.get(str(row["level"]), len(GRAMMAR_LEVEL_ORDER)),
+                row["sort_order"],
+                row["id"],
+            ),
+        )
+        return [(row["key"], row["title_ja"], row["title_zh"], row["level"], row["category"]) for row in rows]
+
     def _grammar_rows(self, key: str | None = None) -> list[dict[str, Any]]:
         where = "WHERE p.key = :key" if key is not None else ""
         with self.engine.connect() as connection:
@@ -1303,24 +1509,31 @@ class Repository:
                         LEFT JOIN grammar_explanation x ON x.point_id = p.id
                         LEFT JOIN LATERAL (
                             SELECT count(*)::int AS mistake_count,
-                                   (array_agg(ci.original_fragment ORDER BY ci.id DESC))[1] AS latest_mistake,
-                                   max(c.created_at) AS latest_mistake_at
-                            FROM chat_correction_item ci
-                            JOIN chat_correction c ON c.id = ci.correction_id
-                            WHERE ci.grammar_key = p.key
+                                   (array_agg(le.payload->>'original'
+                                        ORDER BY le.occurred_at DESC, le.id DESC))[1] AS latest_mistake,
+                                   max(le.occurred_at) AS latest_mistake_at
+                            FROM learning_event le
+                            WHERE le.subject_kind = 'grammar_point' AND le.subject_key = p.key
+                              AND le.schema_version = :schema_version
+                              AND le.kind = 'correction_item' AND le.rejected_at IS NULL
                         ) m ON TRUE
                         LEFT JOIN LATERAL (
                             SELECT count(*)::int AS question_count,
-                                   (array_agg(cm.content ORDER BY cm.id DESC))[1] AS latest_question,
-                                   max(cm.created_at) AS latest_question_at
-                            FROM companion_grammar_evidence ge
-                            JOIN companion_message cm ON cm.id = ge.message_id
-                            WHERE ge.point_id = p.id
+                                   (array_agg(le.payload->>'question'
+                                        ORDER BY le.occurred_at DESC, le.id DESC))[1] AS latest_question,
+                                   max(le.occurred_at) AS latest_question_at
+                            FROM learning_event le
+                            WHERE le.subject_kind = 'grammar_point' AND le.subject_key = p.key
+                              AND le.schema_version = :schema_version
+                              AND le.kind = 'companion_question' AND le.rejected_at IS NULL
                         ) q ON TRUE
                         {where}
                         ORDER BY p.level, p.sort_order, p.id"""
                 ),
-                {"key": key} if key is not None else {},
+                {
+                    "schema_version": LEARNING_EVENT_SCHEMA_VERSION,
+                    **({"key": key} if key is not None else {}),
+                },
             ).mappings().all()
         return [self._grammar_row(dict(row)) for row in rows]
 
@@ -1476,13 +1689,18 @@ class Repository:
     def record_companion_grammar_evidence(self, message_id: int, keys: list[str]) -> list[str]:
         """Links an explicit learner question to known points, idempotently."""
         inserted_keys: list[str] = []
+        message_data: dict[str, Any] | None = None
         with self.engine.begin() as connection:
-            role = connection.execute(
-                text("SELECT role FROM companion_message WHERE id = :message_id"),
+            message = connection.execute(
+                text(
+                    """SELECT role, material_id, segment_id, content, created_at
+                       FROM companion_message WHERE id = :message_id"""
+                ),
                 {"message_id": message_id},
-            ).scalar_one_or_none()
-            if role != "user":
+            ).mappings().one_or_none()
+            if message is None or message["role"] != "user":
                 return []
+            message_data = dict(message)
             for key in dict.fromkeys(keys):
                 point_id = connection.execute(
                     text("SELECT id FROM grammar_point WHERE key = :key"), {"key": key}
@@ -1499,7 +1717,20 @@ class Repository:
                 ).scalar_one_or_none()
                 if inserted is not None:
                     inserted_keys.append(key)
+        assert message_data is not None
         for key in inserted_keys:
+            self._record_learning_event(
+                kind="companion_question",
+                source_table="companion_message",
+                source_id=message_id,
+                subject_key=key,
+                occurred_at=message_data["created_at"],
+                payload={
+                    "question": message_data["content"],
+                    "material_id": message_data["material_id"],
+                    "segment_id": message_data["segment_id"],
+                },
+            )
             self.mark_grammar_encounter(
                 key,
                 status="encountered",
@@ -1507,6 +1738,55 @@ class Repository:
                 invalidate_explanation=True,
             )
         return inserted_keys
+
+    def _set_learning_event_rejected(
+        self, event_id: int, *, rejected: bool
+    ) -> tuple[str, bool] | None:
+        """Shared body for reject/unreject (§5.11): the model's original judgement stays
+        on the row untouched — only `rejected_at` moves. Idempotent either direction."""
+        with self.engine.begin() as connection:
+            event = connection.execute(
+                text(
+                    """SELECT subject_key, rejected_at
+                       FROM learning_event
+                       WHERE id = :event_id AND subject_kind = 'grammar_point'
+                         AND schema_version = :schema_version
+                       FOR UPDATE"""
+                ),
+                {"event_id": event_id, "schema_version": LEARNING_EVENT_SCHEMA_VERSION},
+            ).mappings().one_or_none()
+            if event is None:
+                return None
+            already_rejected = event["rejected_at"] is not None
+            if already_rejected == rejected:
+                return str(event["subject_key"]), False
+            connection.execute(
+                text(
+                    """UPDATE learning_event
+                       SET rejected_at = CASE WHEN :rejected THEN now() ELSE NULL END
+                       WHERE id = :event_id"""
+                ),
+                {"event_id": event_id, "rejected": rejected},
+            )
+        return str(event["subject_key"]), True
+
+    def reject_learning_event(self, event_id: int) -> dict[str, Any] | None:
+        """The learner says a piece of evidence was mistagged. The row and its payload
+        are untouched — the model's judgement was a historical fact; this is a new one.
+        Recomputes the projection the same way deleting source evidence would."""
+        result = self._set_learning_event_rejected(event_id, rejected=True)
+        if result is None:
+            return None
+        key, changed = result
+        return self.reconcile_grammar_projection(key) if changed else self.get_grammar_point(key)
+
+    def unreject_learning_event(self, event_id: int) -> dict[str, Any] | None:
+        """Undoes an accidental reject."""
+        result = self._set_learning_event_rejected(event_id, rejected=False)
+        if result is None:
+            return None
+        key, changed = result
+        return self.reconcile_grammar_projection(key) if changed else self.get_grammar_point(key)
 
     def invalidate_grammar_explanation(self, key: str) -> None:
         with self.engine.begin() as connection:
@@ -1555,34 +1835,54 @@ class Repository:
             )
 
     def corrections_touching(self, key: str, limit: int = 3) -> list[dict[str, Any]]:
-        """Recent real mistakes for personalised explanation and cache provenance."""
+        """Recent real mistakes for personalised explanation and cache provenance.
+
+        `id` is the learning_event id (the reject endpoint's target), not the
+        underlying chat_correction_item id.
+        """
         with self.engine.connect() as connection:
             rows = connection.execute(
                 text(
-                    """SELECT ci.id, ci.original_fragment, ci.replacement, ci.reason_zh, c.created_at
-                       FROM chat_correction_item ci
-                       JOIN chat_correction c ON c.id = ci.correction_id
-                       WHERE ci.grammar_key = :key
-                       ORDER BY ci.id DESC LIMIT :limit"""
+                    """SELECT id, payload->>'original' AS original_fragment,
+                              payload->>'replacement' AS replacement,
+                              payload->>'reason_zh' AS reason_zh,
+                              occurred_at AS created_at
+                       FROM learning_event
+                       WHERE subject_kind = 'grammar_point' AND subject_key = :key
+                         AND schema_version = :schema_version
+                         AND kind = 'correction_item' AND rejected_at IS NULL
+                       ORDER BY occurred_at DESC, id DESC LIMIT :limit"""
                 ),
-                {"key": key, "limit": limit},
+                {
+                    "key": key,
+                    "limit": limit,
+                    "schema_version": LEARNING_EVENT_SCHEMA_VERSION,
+                },
             ).mappings().all()
         return [dict(row) for row in rows]
 
     def companion_questions_touching(self, key: str, limit: int = 3) -> list[dict[str, Any]]:
-        """Recent explicit companion questions, which are encounters but not mistakes."""
+        """Recent explicit companion questions, which are encounters but not mistakes.
+
+        `id` is the learning_event id, matching corrections_touching above.
+        """
         with self.engine.connect() as connection:
             rows = connection.execute(
                 text(
-                    """SELECT cm.id, cm.content AS question, cm.created_at, s.text_ja AS context_ja
-                       FROM companion_grammar_evidence ge
-                       JOIN grammar_point p ON p.id = ge.point_id
-                       JOIN companion_message cm ON cm.id = ge.message_id
-                       LEFT JOIN segment s ON s.id = cm.segment_id
-                       WHERE p.key = :key
-                       ORDER BY cm.id DESC LIMIT :limit"""
+                    """SELECT le.id, le.payload->>'question' AS question, le.occurred_at AS created_at,
+                              s.text_ja AS context_ja
+                       FROM learning_event le
+                       LEFT JOIN segment s ON s.id = (le.payload->>'segment_id')::bigint
+                       WHERE le.subject_kind = 'grammar_point' AND le.subject_key = :key
+                         AND le.schema_version = :schema_version
+                         AND le.kind = 'companion_question' AND le.rejected_at IS NULL
+                       ORDER BY le.occurred_at DESC, le.id DESC LIMIT :limit"""
                 ),
-                {"key": key, "limit": limit},
+                {
+                    "key": key,
+                    "limit": limit,
+                    "schema_version": LEARNING_EVENT_SCHEMA_VERSION,
+                },
             ).mappings().all()
         return [dict(row) for row in rows]
 

@@ -227,6 +227,7 @@ async def lifespan(_: FastAPI):
         _engine = engine
         _repository = Repository(engine)
         _repository.sync_grammar_catalogue()
+        _repository.backfill_learning_events()
         _llm_service = llm
         yield
     finally:
@@ -795,7 +796,12 @@ def post_companion(payload: CompanionRequest) -> dict:
         raise HTTPException(status_code=404, detail="该材料中不存在这句话。")
     user = repo.add_companion_message(payload.material_id, payload.segment_id, "user", payload.question.strip())
     history = repo.companion_messages(payload.material_id)[-12:-1]
-    messages = build_companion_messages(context=context, history=history, question=payload.question)
+    messages = build_companion_messages(
+        context=context,
+        history=history,
+        question=payload.question,
+        catalogue_subset=repo.grammar_catalogue_for_prompt(),
+    )
     try:
         turn = generate_companion_turn(llm_service(), messages)
     except Exception as error:
@@ -816,12 +822,20 @@ def post_companion(payload: CompanionRequest) -> dict:
     return {"user": user, "assistant": assistant}
 
 
-def _chat_turn(*, topic: str, history: list[dict], guidance: str, user_message: str | None):
+def _chat_turn(
+    *,
+    topic: str,
+    history: list[dict],
+    guidance: str,
+    user_message: str | None,
+    catalogue_subset: list[tuple[str, str, str, str, str]],
+):
     messages = chat_messages(
         topic=topic,
         history=history,
         guidance=guidance,
         user_message=user_message,
+        catalogue_subset=catalogue_subset,
     )
     try:
         turn = generate_chat_turn(llm_service(), messages)
@@ -849,6 +863,7 @@ def create_chat_session(payload: ChatSessionCreate) -> dict:
         history=[],
         guidance=repo.recent_correction_guidance(),
         user_message=None,
+        catalogue_subset=repo.grammar_catalogue_for_prompt(),
     )
     session, assistant = repo.create_chat_session(
         session_id=str(uuid.uuid4()),
@@ -891,6 +906,7 @@ def post_chat_message(session_id: str, payload: ChatMessageCreate) -> dict:
         history=repo.chat_messages(session_id)[-20:],
         guidance=repo.recent_correction_guidance(),
         user_message=message,
+        catalogue_subset=repo.grammar_catalogue_for_prompt(),
     )
     user, correction, assistant = repo.complete_chat_turn(
         session_id=session_id,
@@ -945,6 +961,7 @@ def post_chat(payload: ChatRequest) -> dict:
         history=repo.chat_messages(payload.session_id)[-20:],
         guidance=repo.recent_correction_guidance(),
         user_message=message,
+        catalogue_subset=repo.grammar_catalogue_for_prompt(),
     )
     user, correction, assistant = repo.complete_chat_turn(
         session_id=payload.session_id,
@@ -1154,8 +1171,8 @@ def get_grammar(key: str, refresh: bool = False) -> dict:
     )
     if cache_is_current and not refresh:
         if point.get("status") is None:
-            return repo.mark_grammar_encounter(key, status="encountered", source="browse") or point
-        return point
+            point = repo.mark_grammar_encounter(key, status="encountered", source="browse") or point
+        return {**point, "evidence": evidence}
 
     prompt = f"语法点：{point['title_ja']}（{point['title_zh']}，{point['level']}）"
     mistakes = [item for item in evidence if item["kind"] == "correction"]
@@ -1190,12 +1207,13 @@ def get_grammar(key: str, refresh: bool = False) -> dict:
     )
     # Reading an explanation counts as having met the point.
     repo.mark_grammar_encounter(key, status="encountered", source="browse")
-    return repo.get_grammar_point(key) or point
+    return {**(repo.get_grammar_point(key) or point), "evidence": evidence}
 
 
 @app.post("/grammar/{key}/status")
 def set_grammar_status(key: str, payload: GrammarStatusUpdate) -> dict:
-    updated = repository().mark_grammar_encounter(
+    repo = repository()
+    updated = repo.mark_grammar_encounter(
         key,
         status=payload.status,
         source="manual",
@@ -1203,7 +1221,27 @@ def set_grammar_status(key: str, payload: GrammarStatusUpdate) -> dict:
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="没有这个语法点。")
-    return updated
+    return {**updated, "evidence": repo.grammar_evidence(key)}
+
+
+@app.post("/grammar/evidence/{event_id}/reject")
+def reject_grammar_evidence(event_id: int) -> dict:
+    """§5.11: the learner says one piece of evidence was mistagged. Idempotent —
+    calling this twice on the same event has no further effect."""
+    repo = repository()
+    updated = repo.reject_learning_event(event_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="没有这条证据。")
+    return {**updated, "evidence": repo.grammar_evidence(str(updated["key"]))}
+
+
+@app.post("/grammar/evidence/{event_id}/unreject")
+def unreject_grammar_evidence(event_id: int) -> dict:
+    repo = repository()
+    updated = repo.unreject_learning_event(event_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="没有这条证据。")
+    return {**updated, "evidence": repo.grammar_evidence(str(updated["key"]))}
 
 
 @app.get("/vocabulary")

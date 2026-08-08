@@ -6,6 +6,7 @@ import pytest
 from app import main
 from app.config import Settings
 from app.db import apply_schema, make_engine
+from app.grammar_catalogue import GRAMMAR_CATALOGUE
 from app.repository import Repository
 from sqlalchemy import create_engine, text
 
@@ -790,6 +791,24 @@ def test_grammar_projection_preserves_learner_decisions_and_tracks_real_evidence
             int(question["id"]), [grammar_key, "unknown-key", grammar_key]
         ) == [grammar_key]
 
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """DELETE FROM learning_event
+                       WHERE source_table = 'companion_message' AND source_id = :source_id"""
+                ),
+                {"source_id": int(question["id"])},
+            )
+        assert repository.backfill_learning_events() == [grammar_key]
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    """SELECT backfilled FROM learning_event
+                       WHERE source_table = 'companion_message' AND source_id = :source_id"""
+                ),
+                {"source_id": int(question["id"])},
+            ).scalar_one() is True
+
         after_question = repository.get_grammar_point(grammar_key)
         assert after_question is not None
         assert after_question["has_companion_question"] is True
@@ -826,6 +845,8 @@ def test_grammar_projection_preserves_learner_decisions_and_tracks_real_evidence
         assert without_mistakes["explanation"] is None
 
         with engine.begin() as connection:
+            # The source-row trigger must clean the polymorphic event reference even
+            # when companion_message disappears through a material cascade.
             connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
         material_id = None
         reconciled = repository.reconcile_grammar_projection(grammar_key)
@@ -982,4 +1003,315 @@ def test_deleting_a_mistake_does_not_forget_a_later_explicit_browse() -> None:
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
             connection.execute(text("DELETE FROM grammar_point WHERE id = :id"), {"id": point_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_learning_event_dual_write_reject_unreject_and_cleanup_on_delete() -> None:
+    """§5.11's precise contract: corrections and companion questions dual-write into
+    learning_event with the source row's real occurred_at; the projection reads that
+    table (excluding rejected_at); reject/unreject are idempotent and recompute the
+    projection like deleting source evidence would; deleting the correction cleans up
+    the orphaned learning_event row instead of leaving it counted forever."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    grammar_key = f"test-m1-{uuid.uuid4().hex}"
+    session_id = f"test-{uuid.uuid4()}"
+    with engine.begin() as connection:
+        point_id = connection.execute(
+            text(
+                """INSERT INTO grammar_point
+                   (key, title_ja, title_zh, level, category, sort_order)
+                   VALUES (:key, '～ておく', '预先做好', 'N4', '动词变形', 999999)
+                   RETURNING id"""
+            ),
+            {"key": grammar_key},
+        ).scalar_one()
+
+    try:
+        repository.create_chat_session(
+            session_id=session_id,
+            topic="M1 学习事件",
+            starter_id=None,
+            assistant_content="始めましょう。",
+        )
+        _, correction, _ = repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="旅行の前に切符を買うておきます。",
+            assistant_content="準備が早いですね。",
+            correction={
+                "corrected_text": "旅行の前に切符を買っておきます。",
+                "summary_zh": "使用正确的て形连接～ておく。",
+                "items": [
+                    {
+                        "original": "買うておきます",
+                        "replacement": "買っておきます",
+                        "reason_zh": "五段动词「買う」的て形是「買って」。",
+                        "category": "grammar",
+                        "grammar_key": grammar_key,
+                    }
+                ],
+            },
+        )
+        assert correction is not None
+        correction_item_id = int(correction["items"][0]["id"])
+
+        with engine.connect() as connection:
+            event = connection.execute(
+                text(
+                    """SELECT id, kind, source_table, source_id, occurred_at, payload
+                       FROM learning_event
+                       WHERE source_table = 'chat_correction_item' AND source_id = :source_id"""
+                ),
+                {"source_id": correction_item_id},
+            ).mappings().one()
+            correction_created_at = connection.execute(
+                text("SELECT created_at FROM chat_correction WHERE id = :id"),
+                {"id": int(correction["id"])},
+            ).scalar_one()
+        assert event["kind"] == "correction_item"
+        assert event["source_table"] == "chat_correction_item"
+        # occurred_at is the correction's real time, not the learning_event write time.
+        assert event["occurred_at"] == correction_created_at
+        assert event["payload"]["original"] == "買うておきます"
+
+        # Simulate an upgrade from M0: the legacy grammar_key exists but its event
+        # envelope does not. Startup replay must restore it once and mark provenance.
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM learning_event WHERE id = :id"),
+                {"id": int(event["id"])},
+            )
+        assert repository.backfill_learning_events() == [grammar_key]
+        assert repository.backfill_learning_events() == []
+        with engine.connect() as connection:
+            event = connection.execute(
+                text(
+                    """SELECT id, backfilled, occurred_at, payload
+                       FROM learning_event
+                       WHERE source_table = 'chat_correction_item' AND source_id = :source_id"""
+                ),
+                {"source_id": correction_item_id},
+            ).mappings().one()
+        assert event["backfilled"] is True
+        assert event["occurred_at"] == correction_created_at
+        event_id = int(event["id"])
+
+        # If event indexing committed but projection update failed, the next replay
+        # repairs the missing projection without duplicating the event.
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM grammar_encounter WHERE point_id = :point_id"),
+                {"point_id": point_id},
+            )
+        assert repository.backfill_learning_events() == [grammar_key]
+        assert repository.backfill_learning_events() == []
+
+        # A duplicate dual write (e.g. a retried request) must not double-count.
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """INSERT INTO learning_event
+                       (kind, source_table, source_id, subject_kind, subject_key, confidence,
+                        occurred_at, payload)
+                       VALUES ('correction_item', 'chat_correction_item', :source_id, 'grammar_point',
+                               :subject_key, 1.0, :occurred_at, CAST(:payload AS JSONB))
+                       ON CONFLICT (source_table, source_id, subject_kind, subject_key) DO NOTHING"""
+                ),
+                {
+                    "source_id": correction_item_id,
+                    "subject_key": grammar_key,
+                    "occurred_at": correction_created_at,
+                    "payload": '{"original": "x"}',
+                },
+            )
+            count = connection.execute(
+                text("SELECT count(*) FROM learning_event WHERE source_table = 'chat_correction_item'"
+                     " AND source_id = :source_id"),
+                {"source_id": correction_item_id},
+            ).scalar_one()
+        assert count == 1
+
+        before_reject = repository.get_grammar_point(grammar_key)
+        assert before_reject is not None
+        assert before_reject["mistake_count"] == 1
+        assert before_reject["status"] == "encountered"
+
+        rejected = repository.reject_learning_event(event_id)
+        assert rejected is not None
+        assert rejected["mistake_count"] == 0
+        assert rejected["has_mistake"] is False
+        repository.save_grammar_explanation(
+            grammar_key,
+            "不含已撤销证据的讲解",
+            prompt_version="grammar-explanation-v2",
+            evidence_fingerprint="empty",
+            evidence_refs=[],
+        )
+        # Idempotent means a network retry must not purge a valid regenerated cache.
+        rejected_again = repository.reject_learning_event(event_id)
+        assert rejected_again is not None
+        assert rejected_again["mistake_count"] == 0
+        assert rejected_again["explanation"] == "不含已撤销证据的讲解"
+
+        restored = repository.unreject_learning_event(event_id)
+        assert restored is not None
+        assert restored["mistake_count"] == 1
+        assert restored["latest_mistake"] == "買うておきます"
+
+        assert repository.reject_learning_event(999_999_999) is None
+        assert repository.unreject_learning_event(999_999_999) is None
+
+        evidence = repository.grammar_evidence(grammar_key)
+        assert evidence == [
+            {
+                "kind": "correction",
+                "id": event_id,
+                "original_fragment": "買うておきます",
+                "replacement": "買っておきます",
+                "reason_zh": "五段动词「買う」的て形是「買って」。",
+                "created_at": correction_created_at,
+            }
+        ]
+
+        # Deleting the correction must clean up the learning_event row too, or the
+        # projection would keep counting evidence whose source no longer exists.
+        assert repository.delete_chat_correction(int(correction["id"])) is True
+        with engine.connect() as connection:
+            remaining = connection.execute(
+                text(
+                    """SELECT count(*) FROM learning_event
+                       WHERE source_table = 'chat_correction_item' AND source_id = :source_id"""
+                ),
+                {"source_id": correction_item_id},
+            ).scalar_one()
+        assert remaining == 0
+        after_delete = repository.get_grammar_point(grammar_key)
+        assert after_delete is not None
+        assert after_delete["mistake_count"] == 0
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM grammar_point WHERE id = :id"), {"id": point_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_learning_event_failure_does_not_roll_back_a_completed_chat_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    grammar_key = f"test-event-failure-{uuid.uuid4().hex}"
+    session_id = f"test-{uuid.uuid4()}"
+    with engine.begin() as connection:
+        point_id = connection.execute(
+            text(
+                """INSERT INTO grammar_point
+                   (key, title_ja, title_zh, level, category, sort_order)
+                   VALUES (:key, '～検証', '验证点', 'N5', '测试', 999999)
+                   RETURNING id"""
+            ),
+            {"key": grammar_key},
+        ).scalar_one()
+
+    try:
+        repository.create_chat_session(
+            session_id=session_id,
+            topic="事件失败隔离",
+            starter_id=None,
+            assistant_content="始めましょう。",
+        )
+
+        def fail_event_write(**_: Any) -> bool:
+            raise RuntimeError("simulated event index failure")
+
+        monkeypatch.setattr(repository, "_record_learning_event", fail_event_write)
+        user, correction, assistant = repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="読むています。",
+            assistant_content="読んでいます。",
+            correction={
+                "corrected_text": "読んでいます。",
+                "summary_zh": "て形",
+                "items": [
+                    {
+                        "original": "読むています",
+                        "replacement": "読んでいます",
+                        "reason_zh": "て形",
+                        "category": "grammar",
+                        "grammar_key": grammar_key,
+                    }
+                ],
+            },
+        )
+
+        assert user["content"] == "読むています。"
+        assert correction is not None
+        assert assistant["content"] == "読んでいます。"
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT count(*) FROM chat_correction WHERE session_id = :session_id"),
+                {"session_id": session_id},
+            ).scalar_one() == 1
+            assert connection.execute(
+                text(
+                    """SELECT count(*) FROM learning_event
+                       WHERE source_table = 'chat_correction_item'
+                         AND source_id = :source_id"""
+                ),
+                {"source_id": int(correction["items"][0]["id"])},
+            ).scalar_one() == 0
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM grammar_point WHERE id = :id"), {"id": point_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_grammar_catalogue_keeps_unseen_levels_and_prioritizes_existing_evidence() -> None:
+    """Learning history may reorder the compact catalogue but must never gate first
+    discovery: an advanced user's first N4 mistake still needs its key in the prompt."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    repository.sync_grammar_catalogue()
+    priority_key = f"test-catalogue-priority-{uuid.uuid4().hex}"
+    try:
+        baseline = repository.grammar_catalogue_for_prompt()
+        assert {row[0] for row in GRAMMAR_CATALOGUE} <= {row[0] for row in baseline}
+        assert {row[3] for row in baseline} >= {"N5", "N4"}
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """INSERT INTO grammar_point
+                       (key, title_ja, title_zh, level, category, sort_order)
+                       VALUES (:key, '～検証', '验证点', 'N4', '测试', 999999)"""
+                ),
+                {"key": priority_key},
+            )
+        repository.mark_grammar_encounter(priority_key, status="encountered", source="browse")
+
+        reordered = repository.grammar_catalogue_for_prompt()
+        assert reordered[0][0] == priority_key
+        assert {row[0] for row in GRAMMAR_CATALOGUE} <= {row[0] for row in reordered}
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM grammar_point WHERE key = :key"), {"key": priority_key})
         engine.dispose()

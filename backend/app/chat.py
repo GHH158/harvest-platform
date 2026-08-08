@@ -111,15 +111,21 @@ Grammar keys (key = form, label):
 {grammar_keys}
 """
 
-GRAMMAR_KEY_LIST = "\n".join(
-    f"{key} = {title_ja}, {title_zh}" for key, title_ja, title_zh, _, _ in GRAMMAR_CATALOGUE
-)
 KNOWN_GRAMMAR_KEYS = {key for key, *_ in GRAMMAR_CATALOGUE}
 
-CHAT_SYSTEM_PROMPT = (
-    f"{INTERACTIVE_TEACHING_CORE_PROMPT}\n\n"
-    + CHAT_SCENE_PROMPT.replace("{grammar_keys}", GRAMMAR_KEY_LIST)
-)
+
+def build_chat_system_prompt(
+    catalogue_subset: list[tuple[str, str, str, str, str]] | None = None,
+) -> str:
+    """§5.11: the grammar key list is computed per request from the learner's
+    current grammar_encounter state, not baked in at import time. `catalogue_subset`
+    defaults to the full catalogue so existing callers keep their old behavior."""
+    rows = catalogue_subset if catalogue_subset is not None else GRAMMAR_CATALOGUE
+    grammar_key_list = "\n".join(f"{key} = {title_ja}, {title_zh}" for key, title_ja, title_zh, _, _ in rows)
+    return f"{INTERACTIVE_TEACHING_CORE_PROMPT}\n\n" + CHAT_SCENE_PROMPT.replace("{grammar_keys}", grammar_key_list)
+
+
+CHAT_SYSTEM_PROMPT = build_chat_system_prompt()
 
 
 class CorrectionItemOutput(BaseModel):
@@ -220,9 +226,11 @@ def chat_messages(
     history: list[dict],
     guidance: str,
     user_message: str | None,
+    catalogue_subset: list[tuple[str, str, str, str, str]] | None = None,
 ) -> list[dict[str, str]]:
     context = f"Session topic: {topic}\nLearner notes from recent corrections:\n{guidance or 'None yet.'}"
-    messages = [{"role": "system", "content": f"{CHAT_SYSTEM_PROMPT}\n\n{context}"}]
+    system_prompt = build_chat_system_prompt(catalogue_subset)
+    messages = [{"role": "system", "content": f"{system_prompt}\n\n{context}"}]
     for message in history[-20:]:
         role = str(message.get("role", ""))
         content = str(message.get("content", "")).strip()

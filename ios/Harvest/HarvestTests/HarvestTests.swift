@@ -462,7 +462,7 @@ struct HarvestTests {
         let baseURL = URL(string: "https://harvest.example")!
         let url = baseURL.appending(path: "grammar/verb-te/status")
         StubURLProtocol.responses[url] = """
-        {"id":1,"key":"verb-te","title_ja":"～て","title_zh":"て形与连接","level":"N5","category":"动词变形","status":"encountered","status_source":"manual","first_source":"correction","last_source":"manual","note":"読むています","has_mistake":true,"mistake_count":1,"latest_mistake":"読むています","has_companion_question":false,"companion_question_count":0,"latest_question":null,"needs_attention":true,"state_reason":"你已将这个点重新标记为需要留意。","latest_learning_evidence_at":"2026-08-08T20:00:00Z","has_explanation":true,"explanation":"讲解"}
+        {"id":1,"key":"verb-te","title_ja":"～て","title_zh":"て形与连接","level":"N5","category":"动词变形","status":"encountered","status_source":"manual","first_source":"correction","last_source":"manual","note":"読むています","has_mistake":true,"mistake_count":1,"latest_mistake":"読むています","has_companion_question":false,"companion_question_count":0,"latest_question":null,"needs_attention":true,"state_reason":"你已将这个点重新标记为需要留意。","latest_learning_evidence_at":"2026-08-08T20:00:00Z","has_explanation":true,"explanation":"讲解","evidence":[{"id":17,"kind":"correction","original_fragment":"読むています","replacement":"読んでいます","reason_zh":"て形","question":null,"context_ja":null,"created_at":"2026-08-08T20:00:00Z"}]}
         """.data(using: .utf8)!
         let client = APIClient(baseURL: baseURL, session: stubSession())
 
@@ -472,8 +472,31 @@ struct HarvestTests {
 
         #expect(updated.requiresAttention)
         #expect(updated.statusSource == "manual")
+        #expect(updated.evidence?.first?.id == 17)
         #expect(json["status"] == "encountered")
         #expect(StubURLProtocol.requestedRequests.last?.httpMethod == "POST")
+    }
+
+    @Test func grammarEvidenceRejectAndUnrejectUseReversibleEndpoints() async throws {
+        resetStub()
+        let baseURL = URL(string: "https://harvest.example")!
+        let rejectURL = baseURL.appending(path: "grammar/evidence/17/reject")
+        let unrejectURL = baseURL.appending(path: "grammar/evidence/17/unreject")
+        StubURLProtocol.responses[rejectURL] = """
+        {"id":1,"key":"verb-te","title_ja":"～て","title_zh":"て形与连接","level":"N5","category":"动词变形","status":null,"evidence":[]}
+        """.data(using: .utf8)!
+        StubURLProtocol.responses[unrejectURL] = """
+        {"id":1,"key":"verb-te","title_ja":"～て","title_zh":"て形与连接","level":"N5","category":"动词变形","status":"encountered","evidence":[{"id":17,"kind":"correction","original_fragment":"読むています","replacement":"読んでいます","reason_zh":"て形","question":null,"context_ja":null,"created_at":"2026-08-08T20:00:00Z"}]}
+        """.data(using: .utf8)!
+        let client = APIClient(baseURL: baseURL, session: stubSession())
+
+        let rejected = try await client.rejectGrammarEvidence(eventID: 17)
+        let restored = try await client.unrejectGrammarEvidence(eventID: 17)
+
+        #expect(rejected.evidence?.isEmpty == true)
+        #expect(restored.evidence?.first?.id == 17)
+        #expect(StubURLProtocol.requestedRequests.map(\.url) == [rejectURL, unrejectURL])
+        #expect(StubURLProtocol.requestedRequests.allSatisfy { $0.httpMethod == "POST" })
     }
 
     @Test func topicDeckShowsEveryTopicBeforeRepeatingAndAvoidsImmediateRepeat() {

@@ -185,6 +185,18 @@ struct APIClient {
         try await post("grammar/\(key)/status", body: ["status": status])
     }
 
+    /// §5.11: the learner says one piece of evidence was mistagged. The row stays;
+    /// only its `rejected_at` moves, so this is safe to retry.
+    @discardableResult
+    func rejectGrammarEvidence(eventID: Int) async throws -> GrammarPoint {
+        try await postWithoutBody("grammar/evidence/\(eventID)/reject")
+    }
+
+    @discardableResult
+    func unrejectGrammarEvidence(eventID: Int) async throws -> GrammarPoint {
+        try await postWithoutBody("grammar/evidence/\(eventID)/unreject")
+    }
+
     /// Words due for spaced-repetition review right now, oldest-due first.
     func reviewDueVocabulary(limit: Int = 20) async throws -> [VocabularyWord] {
         guard var components = URLComponents(

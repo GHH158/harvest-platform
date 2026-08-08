@@ -165,8 +165,11 @@ struct GrammarDetailView: View {
     @EnvironmentObject private var configuration: AppConfiguration
     @State private var loaded: GrammarPoint?
     @State private var errorMessage: String?
+    @State private var actionErrorMessage: String?
     @State private var isLoading = true
     @State private var isUpdating = false
+    @State private var rejectingEvidenceIDs: Set<Int> = []
+    @State private var recentlyRejectedEvidence: [GrammarEvidenceItem] = []
 
     private var client: APIClient? {
         configuration.endpoint.map { APIClient(baseURL: $0) }
@@ -197,7 +200,15 @@ struct GrammarDetailView: View {
                 } else if let explanation = current.explanation {
                     MarkdownMessageView(markdown: explanation, style: .teaching)
                 }
-                if !isLoading && errorMessage == nil { statusButton }
+                if !isLoading && errorMessage == nil {
+                    evidenceSection
+                    statusButton
+                    if let actionErrorMessage {
+                        Text(actionErrorMessage)
+                            .font(.caption)
+                            .foregroundStyle(DesignTokens.muted)
+                    }
+                }
             }
             .padding(DesignTokens.pageInset)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -236,6 +247,60 @@ struct GrammarDetailView: View {
                     .foregroundStyle(DesignTokens.muted)
                     .padding(.top, 2)
             }
+        }
+    }
+
+    /// §5.11: each real mistake or companion question that fed this point, with a
+    /// per-row "标错了" — the learner can undo a mistagged association without
+    /// deleting the correction or question itself.
+    @ViewBuilder
+    private var evidenceSection: some View {
+        let evidence = current.evidence ?? []
+        if !evidence.isEmpty || !recentlyRejectedEvidence.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("证据")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(DesignTokens.muted)
+                ForEach(evidence) { item in
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.summaryText)
+                                .font(.subheadline)
+                                .foregroundStyle(DesignTokens.ink)
+                            if item.isMistake, let reason = item.reasonZH, !reason.isEmpty {
+                                Text(reason)
+                                    .font(.caption)
+                                    .foregroundStyle(DesignTokens.muted)
+                            } else if !item.isMistake, let context = item.contextJA, !context.isEmpty {
+                                Text("当时读到「\(context)」")
+                                    .font(.caption)
+                                    .foregroundStyle(DesignTokens.muted)
+                            }
+                        }
+                        Spacer()
+                        Button("标错了") { Task { await reject(item) } }
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(DesignTokens.accent)
+                            .disabled(rejectingEvidenceIDs.contains(item.id))
+                    }
+                    .opacity(rejectingEvidenceIDs.contains(item.id) ? 0.5 : 1)
+                }
+                ForEach(recentlyRejectedEvidence) { item in
+                    HStack(spacing: 10) {
+                        Text("已忽略「\(item.summaryText)」")
+                            .font(.caption)
+                            .foregroundStyle(DesignTokens.muted)
+                            .lineLimit(2)
+                        Spacer()
+                        Button("撤销") { Task { await restore(item) } }
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(DesignTokens.accent)
+                            .disabled(rejectingEvidenceIDs.contains(item.id))
+                    }
+                    .opacity(rejectingEvidenceIDs.contains(item.id) ? 0.5 : 1)
+                }
+            }
+            .padding(.top, 4)
         }
     }
 
@@ -306,11 +371,44 @@ struct GrammarDetailView: View {
     private func setStatus(_ status: String) async {
         guard let client else { return }
         isUpdating = true
+        actionErrorMessage = nil
         defer { isUpdating = false }
         do {
             loaded = try await client.setGrammarStatus(key: point.key, status: status)
         } catch {
-            errorMessage = error.localizedDescription
+            actionErrorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func reject(_ item: GrammarEvidenceItem) async {
+        guard let client else { return }
+        rejectingEvidenceIDs.insert(item.id)
+        actionErrorMessage = nil
+        defer { rejectingEvidenceIDs.remove(item.id) }
+        do {
+            // The response already carries the trimmed evidence list and the
+            // recomputed status, so a single round trip is enough to update everything.
+            loaded = try await client.rejectGrammarEvidence(eventID: item.id)
+            if !recentlyRejectedEvidence.contains(where: { $0.id == item.id }) {
+                recentlyRejectedEvidence.append(item)
+            }
+        } catch {
+            actionErrorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func restore(_ item: GrammarEvidenceItem) async {
+        guard let client else { return }
+        rejectingEvidenceIDs.insert(item.id)
+        actionErrorMessage = nil
+        defer { rejectingEvidenceIDs.remove(item.id) }
+        do {
+            loaded = try await client.unrejectGrammarEvidence(eventID: item.id)
+            recentlyRejectedEvidence.removeAll { $0.id == item.id }
+        } catch {
+            actionErrorMessage = error.localizedDescription
         }
     }
 }

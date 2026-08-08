@@ -392,6 +392,7 @@ def test_lifespan_creates_one_shared_engine_and_disposes_it(monkeypatch: pytest.
     monkeypatch.setattr(main, "make_engine", lambda: calls.append(object()) or engine)
     monkeypatch.setattr(main, "apply_schema", lambda value: calls.append(value))
     monkeypatch.setattr(main.Repository, "sync_grammar_catalogue", lambda self: calls.append("grammar"))
+    monkeypatch.setattr(main.Repository, "backfill_learning_events", lambda self: calls.append("backfill"))
     main._engine = None
     main._repository = None
 
@@ -404,9 +405,10 @@ def test_lifespan_creates_one_shared_engine_and_disposes_it(monkeypatch: pytest.
 
     asyncio.run(exercise())
 
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert calls[1] is engine
     assert calls[2] == "grammar"
+    assert calls[3] == "backfill"
     assert engine.dispose_calls == 1
     with pytest.raises(RuntimeError, match="尚未初始化"):
         main.repository()
@@ -452,6 +454,9 @@ class CompanionRepository:
 
     def companion_messages(self, material_id: int) -> list[dict[str, Any]]:
         return self.messages
+
+    def grammar_catalogue_for_prompt(self) -> list[tuple[str, str, str, str, str]]:
+        return [("verb-te", "～て", "て形与连接", "N5", "动词变形")]
 
     def record_companion_grammar_evidence(self, message_id: int, keys: list[str]) -> list[str]:
         self.grammar_links.append((message_id, keys))

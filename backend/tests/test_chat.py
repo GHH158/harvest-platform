@@ -196,6 +196,9 @@ class ChatRepository:
     def recent_correction_guidance(self) -> str:
         return "- grammar"
 
+    def grammar_catalogue_for_prompt(self) -> list[tuple[str, str, str, str, str]]:
+        return [("verb-te", "～て", "て形与连接", "N5", "动词变形")]
+
     def create_chat_session(self, **values: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         self.created = values
         session = {"id": values["session_id"], "topic": values["topic"], "starter_id": values["starter_id"]}
@@ -232,7 +235,13 @@ def test_session_creation_returns_ai_opener(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert result["session"]["topic"] == "今週末の予定"
     assert result["assistant"]["content"].endswith("どんなところが一番よかったですか？")
-    assert captured == {"topic": "今週末の予定", "history": [], "guidance": "- grammar", "user_message": None}
+    assert captured == {
+        "topic": "今週末の予定",
+        "history": [],
+        "guidance": "- grammar",
+        "user_message": None,
+        "catalogue_subset": repository.grammar_catalogue_for_prompt(),
+    }
 
 
 def test_model_contract_failure_writes_no_partial_turn(monkeypatch: pytest.MonkeyPatch) -> None:

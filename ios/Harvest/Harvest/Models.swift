@@ -413,9 +413,12 @@ struct GrammarPoint: Codable, Identifiable, Hashable {
     let latestLearningEvidenceAt: String?
     let hasExplanation: Bool?
     let explanation: String?
+    /// Individual证据 rows behind this point (§5.11), only present on `GET /grammar/{key}`
+    /// and the reject/unreject responses — the list endpoint has no need for them.
+    let evidence: [GrammarEvidenceItem]?
 
     enum CodingKeys: String, CodingKey {
-        case id, key, level, category, status, note, explanation
+        case id, key, level, category, status, note, explanation, evidence
         case titleJA = "title_ja"
         case titleZH = "title_zh"
         case statusSource = "status_source"
@@ -440,4 +443,30 @@ struct GrammarPoint: Codable, Identifiable, Hashable {
     /// A mistake may happen after the first encounter, so firstSource cannot answer this.
     var cameFromMistake: Bool { hasMistake ?? (firstSource == "correction") }
     var mistakeText: String? { latestMistake ?? note }
+}
+
+/// One registered piece of evidence behind a grammar point encounter (§5.11): a
+/// mistake actually written, or a question actually asked in the companion. `id`
+/// is the learning_event id — the target for the reject/unreject endpoints. A
+/// rejected event simply stops appearing here; the server never sends it back.
+struct GrammarEvidenceItem: Codable, Identifiable, Hashable {
+    let id: Int
+    let kind: String
+    let originalFragment: String?
+    let replacement: String?
+    let reasonZH: String?
+    let question: String?
+    let contextJA: String?
+    let createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, question, replacement
+        case originalFragment = "original_fragment"
+        case reasonZH = "reason_zh"
+        case contextJA = "context_ja"
+        case createdAt = "created_at"
+    }
+
+    var isMistake: Bool { kind == "correction" }
+    var summaryText: String { isMistake ? (originalFragment ?? "") : (question ?? "") }
 }

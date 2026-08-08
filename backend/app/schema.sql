@@ -278,3 +278,50 @@ CREATE INDEX IF NOT EXISTS idx_companion_grammar_point
 -- point automatically (§12.1: corrections are the main path, browsing is the补充).
 ALTER TABLE chat_correction_item ADD COLUMN IF NOT EXISTS grammar_key TEXT;
 CREATE INDEX IF NOT EXISTS idx_correction_item_grammar ON chat_correction_item(grammar_key);
+
+-- Global learning events (M1, full contract in §5.11 of docs/PROJECT.md). A thin
+-- envelope plus a payload validated by `kind` at the application layer, not here:
+-- the source row's original text stays in its own table, this only stores a
+-- reference and a necessary snapshot. chat_correction_item.grammar_key and
+-- companion_grammar_evidence keep being written for traceability, but the
+-- grammar_encounter projection reads this table instead.
+CREATE TABLE IF NOT EXISTS learning_event (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    schema_version TEXT NOT NULL DEFAULT 'learning-event-v1',
+    kind           TEXT NOT NULL,       -- correction_item | companion_question
+    source_table   TEXT NOT NULL,
+    source_id      BIGINT NOT NULL,
+    subject_kind   TEXT NOT NULL,       -- grammar_point (only value so far)
+    subject_key    TEXT NOT NULL,
+    actor          TEXT NOT NULL DEFAULT 'user',
+    confidence     REAL,
+    occurred_at    TIMESTAMPTZ NOT NULL,
+    backfilled     BOOLEAN NOT NULL DEFAULT false,
+    rejected_at    TIMESTAMPTZ,
+    payload        JSONB NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source_table, source_id, subject_kind, subject_key)
+);
+CREATE INDEX IF NOT EXISTS idx_learning_event_subject
+    ON learning_event(subject_kind, subject_key, occurred_at DESC)
+    WHERE rejected_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_learning_event_source ON learning_event(source_table, source_id);
+
+-- Polymorphic source references cannot use one foreign key. Source-row deletion
+-- still has to remove its event envelope, including cascades from deleting a chat
+-- session or material, so keep that invariant next to the tables themselves.
+CREATE OR REPLACE FUNCTION delete_learning_events_for_source() RETURNS TRIGGER AS $$
+BEGIN
+    DELETE FROM learning_event
+    WHERE source_table = TG_TABLE_NAME AND source_id = OLD.id;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_correction_item_learning_event_delete ON chat_correction_item;
+CREATE TRIGGER trg_correction_item_learning_event_delete
+    AFTER DELETE ON chat_correction_item
+    FOR EACH ROW EXECUTE FUNCTION delete_learning_events_for_source();
+DROP TRIGGER IF EXISTS trg_companion_message_learning_event_delete ON companion_message;
+CREATE TRIGGER trg_companion_message_learning_event_delete
+    AFTER DELETE ON companion_message
+    FOR EACH ROW EXECUTE FUNCTION delete_learning_events_for_source();
