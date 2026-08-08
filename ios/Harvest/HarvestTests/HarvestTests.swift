@@ -263,17 +263,6 @@ struct HarvestTests {
         #expect(playlist.segments[1].url.absoluteString == "https://media.example/materials/7/hls/video/segment-00001.ts")
     }
 
-    @MainActor @Test func segmentedPlayerAppendsNewlyDownloadedParts() {
-        let player = SegmentQueuePlayer()
-        let first = URL(fileURLWithPath: "/tmp/segment-00000.ts")
-        let second = URL(fileURLWithPath: "/tmp/segment-00001.ts")
-
-        player.update([first])
-        #expect(player.player.items().count == 1)
-        player.update([first, second])
-        #expect(player.player.items().count == 2)
-    }
-
     @Test func completedPlaybackOnlyRestartsWhenPlayIsPressedFromStoppedState() {
         #expect(shouldRestartCompletedPlayback(isPlaying: false, hasReachedEnd: true))
         #expect(!shouldRestartCompletedPlayback(isPlaying: true, hasReachedEnd: true))
@@ -307,92 +296,6 @@ struct HarvestTests {
         #expect(!player.hasReachedEnd)
         #expect(player.positionMs == 0)
         player.pause()
-    }
-
-    @MainActor @Test func segmentedPlayerRebuildsConsumedQueueBeforePlayingAgain() async throws {
-        let player = SegmentQueuePlayer()
-        player.update([URL(fileURLWithPath: "/tmp/finished-segment.ts")], durations: [6])
-        let item = try #require(player.player.items().first)
-
-        NotificationCenter.default.post(name: .AVPlayerItemDidPlayToEndTime, object: item)
-        await Task.yield()
-        await Task.yield()
-        #expect(player.hasReachedEnd)
-
-        player.toggle()
-
-        #expect(!player.hasReachedEnd)
-        #expect(player.player.items().count == 1)
-        #expect(player.positionMs == 0)
-        player.pause()
-    }
-
-    @Test func offlineEntryOnlyExposesContiguousDownloadedPrefix() throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let first = root.appending(path: "segment-00000.ts")
-        let third = root.appending(path: "segment-00002.ts")
-        try Data("first".utf8).write(to: first)
-        try Data("third".utf8).write(to: third)
-        let materialData = """
-        {"id":7,"kind":"video","title":"動画","status":"ready","error_message":null,"duration_ms":18000,"audio_url":"https://example.com/audio/index.m3u8","video_url":"https://example.com/video/index.m3u8","segments":[],"tokens":[]}
-        """.data(using: .utf8)!
-        let material = try JSONDecoder().decode(MaterialDetail.self, from: materialData)
-        let entry = OfflineEntry(
-            material: material,
-            videoSegmentPaths: [first.path(), nil, third.path()],
-            audioSegmentPaths: [],
-            totalVideoSegments: 3,
-            totalAudioSegments: nil
-        )
-
-        #expect(entry.downloadedVideoSegmentCount == 2)
-        #expect(entry.localVideoSegmentURLs == [first])
-        #expect(!entry.isWatchVideoComplete)
-    }
-
-    @MainActor @Test func segmentedDownloadResumesWithoutRefetchingStoredParts() async throws {
-        let videoPlaylistURL = URL(string: "https://media.example/video/index.m3u8")!
-        let audioPlaylistURL = URL(string: "https://media.example/audio/index.m3u8")!
-        let videoSegmentURLs = (0...1).map { URL(string: "https://media.example/video/segment-0000\($0).ts")! }
-        let audioSegmentURLs = (0...1).map { URL(string: "https://media.example/audio/segment-0000\($0).ts")! }
-        let playlist = """
-        #EXTM3U
-        #EXTINF:6.0,
-        segment-00000.ts
-        #EXTINF:2.0,
-        segment-00001.ts
-        #EXT-X-ENDLIST
-        """.data(using: .utf8)!
-        StubURLProtocol.responses = [videoPlaylistURL: playlist, audioPlaylistURL: playlist]
-        for url in videoSegmentURLs + audioSegmentURLs { StubURLProtocol.responses[url] = Data("segment".utf8) }
-        StubURLProtocol.requestedURLs = []
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StubURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let library = OfflineLibrary(downloadSession: session, rootDirectory: root)
-        let materialData = """
-        {"id":7,"kind":"video","title":"動画","status":"ready","error_message":null,"duration_ms":8000,"audio_url":"https://media.example/audio/index.m3u8","video_url":"https://media.example/video/index.m3u8","segments":[],"tokens":[]}
-        """.data(using: .utf8)!
-        let material = try JSONDecoder().decode(MaterialDetail.self, from: materialData)
-
-        try await library.download(material, videoMedia: .watch)
-        #expect(library.entry(for: 7)?.isWatchVideoComplete == true)
-        #expect(library.entry(for: 7)?.totalAudioSegments == nil)
-        #expect(StubURLProtocol.requestedURLs.count == 3)
-        #expect(!StubURLProtocol.requestedURLs.contains(audioPlaylistURL))
-
-        StubURLProtocol.requestedURLs = []
-        try await library.download(material, videoMedia: .watch)
-        #expect(StubURLProtocol.requestedURLs == [videoPlaylistURL])
-
-        StubURLProtocol.requestedURLs = []
-        try await library.download(material, videoMedia: .shadowing)
-        #expect(library.entry(for: 7)?.isShadowingAudioComplete == true)
-        #expect(Set(StubURLProtocol.requestedURLs) == Set([audioPlaylistURL] + audioSegmentURLs))
     }
 
     @Test func materialListDecodesProgressFailureAndThumbnailProjection() throws {
@@ -840,5 +743,52 @@ struct HarvestTests {
 
     @Test func clozeGivesUpWhenTheWordIsAbsent() {
         #expect(clozeSentence(word: "電話", example: "今日はいい天気です。") == nil)
+    }
+
+    @Test func offlineVideoIsPlayableOnlyOnceTheAssetBundleExists() throws {
+        // The old model stored raw .ts segments, which AVFoundation cannot open at all.
+        // Readiness is now "the .movpkg AVAssetDownloadURLSession produced is on disk".
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bundle = root.appending(path: "watch.movpkg")
+        let materialData = """
+        {"id":7,"kind":"video","title":"動画","status":"ready","error_message":null,"duration_ms":18000,"audio_url":"https://example.com/audio/index.m3u8","video_url":"https://example.com/video/index.m3u8","segments":[],"tokens":[]}
+        """.data(using: .utf8)!
+        let material = try JSONDecoder().decode(MaterialDetail.self, from: materialData)
+
+        let downloading = OfflineEntry(material: material, videoAssetPath: nil, videoProgress: 0.4)
+        #expect(downloading.localVideoAssetURL == nil)
+        #expect(!downloading.isWatchVideoComplete)
+        #expect(downloading.hasIncompleteRequestedVideoMedia)
+        #expect(!downloading.hasPlayableMedia)
+
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        let finished = OfflineEntry(material: material, videoAssetPath: bundle.filePath, videoProgress: 1)
+        #expect(finished.localVideoAssetURL != nil)
+        #expect(finished.isWatchVideoComplete)
+        #expect(!finished.hasIncompleteRequestedVideoMedia)
+        #expect(finished.hasPlayableMedia)
+    }
+
+    @Test func assetPathsAreCarriedThroughTheRelativePathMapping() throws {
+        let materialData = """
+        {"id":7,"kind":"video","title":"動画","status":"ready","error_message":null,"duration_ms":18000,"audio_url":"https://example.com/audio/index.m3u8","video_url":"https://example.com/video/index.m3u8","segments":[],"tokens":[]}
+        """.data(using: .utf8)!
+        let material = try JSONDecoder().decode(MaterialDetail.self, from: materialData)
+        let entry = OfflineEntry(
+            material: material,
+            videoAssetPath: "/root/material-7/watch.movpkg",
+            audioAssetPath: "/root/material-7/shadowing.movpkg",
+            videoProgress: 1,
+            audioProgress: 0.5
+        )
+
+        let relative = entry.mappingPaths { $0.replacingOccurrences(of: "/root/", with: "") }
+
+        #expect(relative.videoAssetPath == "material-7/watch.movpkg")
+        #expect(relative.audioAssetPath == "material-7/shadowing.movpkg")
+        #expect(relative.videoProgress == 1)
+        #expect(relative.audioProgress == 0.5)
     }
 }

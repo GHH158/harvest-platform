@@ -177,7 +177,7 @@ struct DownloadsView: View {
 
     private var storageSignature: String {
         offlineLibrary.entries.map {
-            "\($0.id):\($0.downloadedVideoSegmentCount):\($0.downloadedAudioSegmentCount):\($0.localAudioPath ?? "")"
+            "\($0.id):\($0.videoAssetPath ?? ""):\($0.audioAssetPath ?? ""):\($0.localAudioPath ?? "")"
         }.joined(separator: "|")
     }
 
@@ -201,10 +201,12 @@ struct DownloadsView: View {
     private func summary(_ entry: OfflineEntry) -> String {
         guard entry.material.kind == "video" else { return "朗读 · \(entry.material.segments.count) 句" }
         var parts: [String] = []
-        if let total = entry.totalVideoSegments { parts.append("视频 \(entry.downloadedVideoSegmentCount)/\(total)") }
-        if let total = entry.totalAudioSegments { parts.append("跟读音频 \(entry.downloadedAudioSegmentCount)/\(total)") }
+        if entry.isWatchVideoComplete { parts.append("视频已下载") }
+        else if let fraction = entry.videoProgress { parts.append("视频 \(Int(fraction * 100))%") }
+        if entry.isShadowingAudioComplete { parts.append("跟读音频已下载") }
+        else if let fraction = entry.audioProgress { parts.append("跟读音频 \(Int(fraction * 100))%") }
         if entry.hasIncompleteRequestedVideoMedia { parts.append("可继续") }
-        return parts.isEmpty ? "尚无本地分片" : parts.joined(separator: " · ")
+        return parts.isEmpty ? "尚未下载" : parts.joined(separator: " · ")
     }
 
     private func bytes(_ value: Int64) -> String {

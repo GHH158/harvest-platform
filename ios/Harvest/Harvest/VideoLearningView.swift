@@ -191,169 +191,6 @@ final class OnlineMediaPlayer: ObservableObject {
     }
 }
 
-@MainActor
-final class SegmentQueuePlayer: ObservableObject {
-    let player = AVQueuePlayer()
-    @Published private(set) var isPlaying = false
-    @Published private(set) var positionMs = 0
-    @Published private(set) var errorMessage: String?
-    private var knownURLs: [URL] = []
-    private var durations: [Double] = []
-    private var playedCount = 0
-    /// MPEG-TS segments carry absolute presentation timestamps, so a standalone `.ts`
-    /// does not start at zero — segment 20 of this material reports ~121 s the moment it
-    /// opens. Adding the elapsed durations on top counted that offset twice and ran the
-    /// timeline at roughly double speed: subtitles desynced and, once the position shot
-    /// past the end, no sentence was current so word highlighting vanished entirely.
-    /// Calibrate an origin from the first observed time instead, re-doing it at each
-    /// item boundary so a stream whose timestamps reset is handled too.
-    private var timelineOrigin: Double?
-    private var calibratedPlayedCount = -1
-    private var pendingCalibrationOffset = 0.0
-    private var itemObservers: [NSObjectProtocol] = []
-    private var itemStatusObservations: [NSKeyValueObservation] = []
-    private var timeObserver: Any?
-    private var playbackObserver: NSKeyValueObservation?
-
-    init() {
-        AudioSessionSupport.activatePlayback()
-        timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(value: 50, timescale: 1_000),
-            queue: .main
-        ) { [weak self] time in
-            Task { @MainActor in self?.updatePosition(time) }
-        }
-        playbackObserver = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
-            let isPlaying = player.timeControlStatus == .playing
-            Task { @MainActor in self?.isPlaying = isPlaying }
-        }
-    }
-
-    func update(_ urls: [URL], durations newDurations: [Double]? = nil) {
-        let normalized = normalizedDurations(newDurations, count: urls.count)
-        guard urls != knownURLs || normalized != durations else { return }
-        if urls.starts(with: knownURLs), normalized.starts(with: durations) {
-            for (index, url) in urls.enumerated().dropFirst(knownURLs.count) {
-                append(url, duration: normalized[index])
-            }
-            knownURLs = urls
-            durations = normalized
-        } else {
-            knownURLs = urls
-            durations = normalized
-            rebuild(startingAt: 0, offsetMs: 0)
-        }
-        if isPlaying { player.play() }
-    }
-
-    func seek(to milliseconds: Int) {
-        guard !knownURLs.isEmpty else { return }
-        let seconds = max(0, Double(milliseconds) / 1_000)
-        var elapsed = 0.0
-        var target = knownURLs.count - 1
-        for index in knownURLs.indices {
-            if seconds < elapsed + durations[index] {
-                target = index
-                break
-            }
-            elapsed += durations[index]
-        }
-        rebuild(startingAt: target, offsetMs: Int((seconds - elapsed) * 1_000))
-        if isPlaying { player.play() }
-    }
-
-    func toggle() {
-        if isPlaying {
-            pause()
-            return
-        }
-        if shouldRestartCompletedPlayback(isPlaying: isPlaying, hasReachedEnd: hasReachedEnd) {
-            rebuild(startingAt: 0, offsetMs: 0)
-        }
-        isPlaying = true
-        player.play()
-    }
-
-    func pause() {
-        player.pause()
-        isPlaying = false
-    }
-
-    private func rebuild(startingAt index: Int, offsetMs: Int) {
-        player.removeAllItems()
-        removeItemObservers()
-        playedCount = index
-        // Force re-calibration: the new first item brings its own timestamp base.
-        timelineOrigin = nil
-        calibratedPlayedCount = -1
-        pendingCalibrationOffset = Double(offsetMs) / 1_000
-        for itemIndex in index..<knownURLs.count {
-            append(knownURLs[itemIndex], duration: durations[itemIndex])
-        }
-        let completed = durations.prefix(index).reduce(0, +)
-        positionMs = max(0, Int(completed * 1_000) + offsetMs)
-        if offsetMs > 0 {
-            player.seek(to: CMTime(value: CMTimeValue(offsetMs), timescale: 1_000))
-        }
-    }
-
-    private func append(_ url: URL, duration: Double) {
-        let item = AVPlayerItem(url: url)
-        player.insert(item, after: player.items().last)
-        let observer = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: item,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.playedCount = min(self.playedCount + 1, self.knownURLs.count)
-                if self.playedCount >= self.knownURLs.count {
-                    self.positionMs = max(0, Int(self.durations.reduce(0, +) * 1_000))
-                    self.isPlaying = false
-                }
-            }
-        }
-        itemObservers.append(observer)
-        let statusObservation = item.observe(\.status) { [weak self] observedItem, _ in
-            let isFailed = observedItem.status == .failed
-            let message = observedItem.error?.localizedDescription
-            Task { @MainActor in
-                if isFailed { self?.errorMessage = message ?? "离线播放失败" }
-            }
-        }
-        itemStatusObservations.append(statusObservation)
-    }
-
-    private func normalizedDurations(_ values: [Double]?, count: Int) -> [Double] {
-        guard let values, values.count >= count else { return Array(repeating: 6, count: count) }
-        return Array(values.prefix(count)).map { $0 > 0 ? $0 : 6 }
-    }
-
-    private func updatePosition(_ time: CMTime) {
-        let seconds = time.seconds
-        guard seconds.isFinite else { return }
-        if calibratedPlayedCount != playedCount || timelineOrigin == nil {
-            let expected = durations.prefix(playedCount).reduce(0, +) + pendingCalibrationOffset
-            timelineOrigin = seconds - expected
-            calibratedPlayedCount = playedCount
-            pendingCalibrationOffset = 0
-        }
-        positionMs = max(0, Int((seconds - (timelineOrigin ?? 0)) * 1_000))
-    }
-
-    var hasReachedEnd: Bool {
-        !knownURLs.isEmpty && (playedCount >= knownURLs.count || (player.items().isEmpty && positionMs > 0))
-    }
-
-    private func removeItemObservers() {
-        for observer in itemObservers { NotificationCenter.default.removeObserver(observer) }
-        itemObservers.removeAll()
-        for observation in itemStatusObservations { observation.invalidate() }
-        itemStatusObservations.removeAll()
-    }
-}
-
 private struct VideoSubtitleRow: Identifiable {
     let segment: Segment
     let units: [JapaneseReadingUnit]
@@ -385,8 +222,8 @@ struct VideoLearningView: View {
     @State private var questionSegment: Segment?
     @StateObject private var onlineVideo = OnlineMediaPlayer()
     @StateObject private var onlineAudio = OnlineMediaPlayer()
-    @StateObject private var offlineVideoPlayer = SegmentQueuePlayer()
-    @StateObject private var offlineAudioPlayer = SegmentQueuePlayer()
+    @StateObject private var offlineVideoPlayer = OnlineMediaPlayer()
+    @StateObject private var offlineAudioPlayer = OnlineMediaPlayer()
     private let subtitleRows: [VideoSubtitleRow]
     private let playbackSegments: [Segment]
 
@@ -581,8 +418,8 @@ struct VideoLearningView: View {
         Group {
             if usesOfflineVideo {
                 VideoPlayer(player: offlineVideoPlayer.player)
-                    .task(id: offlineVideoSignature) {
-                        offlineVideoPlayer.update(offlineVideoURLs, durations: offlineEntry?.videoSegmentDurations)
+                    .task(id: offlineVideoAssetURL) {
+                        if let url = offlineVideoAssetURL { offlineVideoPlayer.prepare(url: url) }
                         applyPendingResumePosition()
                     }
             } else if let videoURL = material.videoURL {
@@ -612,13 +449,13 @@ struct VideoLearningView: View {
     @ViewBuilder
     private var shadowingPlayer: some View {
         VStack(spacing: 12) {
-            if !offlineAudioURLs.isEmpty {
+            if let audioAssetURL = offlineAudioAssetURL {
                 Button(offlineAudioPlayer.isPlaying ? "暂停跟读音频" : "播放跟读音频") {
                     offlineAudioPlayer.toggle()
                 }
                 .buttonStyle(PrimaryButtonStyle())
-                .task(id: offlineAudioSignature) {
-                    offlineAudioPlayer.update(offlineAudioURLs, durations: offlineEntry?.audioSegmentDurations)
+                .task(id: audioAssetURL) {
+                    offlineAudioPlayer.prepare(url: audioAssetURL)
                 }
             } else if let audioURL = material.audioURL {
                 Button(onlineAudio.isPlaying ? "暂停跟读音频" : "播放跟读音频") {
@@ -661,11 +498,11 @@ struct VideoLearningView: View {
                 } else {
                     Image(systemName: selectedMediaIsComplete ? "checkmark.circle.fill" : "arrow.down.circle.fill")
                 }
-                if let total = selectedTotalSegmentCount {
-                    Text(selectedMediaIsComplete ? "已下载" : "\(downloaded)/\(total)")
-                        .monospacedDigit()
-                } else if selectedMediaIsComplete {
+                if selectedMediaIsComplete {
                     Text("已下载")
+                } else if let fraction = downloadFraction {
+                    Text("\(Int(fraction * 100))%")
+                        .monospacedDigit()
                 }
             }
             .font(.caption2.weight(.semibold))
@@ -837,7 +674,7 @@ struct VideoLearningView: View {
         if mode == "观看" {
             updateLoopTarget(for: milliseconds)
             seekWatch(to: milliseconds)
-        } else if offlineAudioURLs.isEmpty {
+        } else if !usesOfflineAudio {
             onlineAudio.seek(to: milliseconds)
         } else {
             offlineAudioPlayer.seek(to: milliseconds)
@@ -912,8 +749,8 @@ struct VideoLearningView: View {
     }
 
     private var offlineEntry: OfflineEntry? { offlineLibrary.entry(for: material.id) }
-    private var offlineVideoURLs: [URL] { offlineEntry?.localVideoSegmentURLs ?? [] }
-    private var offlineAudioURLs: [URL] { offlineEntry?.localHLSAudioSegmentURLs ?? [] }
+    private var offlineVideoAssetURL: URL? { offlineEntry?.localVideoAssetURL }
+    private var offlineAudioAssetURL: URL? { offlineEntry?.localShadowingAssetURL }
 
     /// Whether playback should read from disk rather than the network.
     ///
@@ -925,22 +762,17 @@ struct VideoLearningView: View {
     /// §5.2 does allow watching a partially downloaded video — just not by hot-swapping
     /// mid-download, so wait until this material is no longer downloading.
     private var usesOfflineVideo: Bool {
-        !offlineVideoURLs.isEmpty && !offlineLibrary.isDownloading(material.id)
+        offlineVideoAssetURL != nil && !offlineLibrary.isDownloading(material.id)
     }
 
     private var usesOfflineAudio: Bool {
-        !offlineAudioURLs.isEmpty && !offlineLibrary.isDownloading(material.id)
+        offlineAudioAssetURL != nil && !offlineLibrary.isDownloading(material.id)
     }
-    private var offlineVideoSignature: String { offlineVideoURLs.map(\.path).joined(separator: "|") }
-    private var offlineAudioSignature: String { offlineAudioURLs.map(\.path).joined(separator: "|") }
     private var selectedVideoMedia: VideoOfflineMedia { mode == "观看" ? .watch : .shadowing }
-    private var selectedTotalSegmentCount: Int? {
-        mode == "观看" ? offlineEntry?.totalVideoSegments : offlineEntry?.totalAudioSegments
-    }
-    private var downloaded: Int {
-        mode == "观看"
-            ? offlineEntry?.downloadedVideoSegmentCount ?? 0
-            : offlineEntry?.downloadedAudioSegmentCount ?? 0
+    /// AVFoundation reports asset download progress as a fraction of the media's
+    /// duration, so there is no meaningful segment count to show any more.
+    private var downloadFraction: Double? {
+        mode == "观看" ? offlineEntry?.videoProgress : offlineEntry?.audioProgress
     }
     private var selectedMediaIsComplete: Bool {
         mode == "观看"
@@ -950,7 +782,7 @@ struct VideoLearningView: View {
     private var downloadAccessibilityLabel: String {
         if selectedMediaIsComplete { return mode == "观看" ? "观看视频已下载" : "跟读音频已下载" }
         if offlineLibrary.isDownloading(material.id) { return "正在下载" }
-        if let total = selectedTotalSegmentCount { return "继续下载，已完成 \(downloaded) 个，共 \(total) 个分片" }
+        if let fraction = downloadFraction { return "继续下载，已完成 \(Int(fraction * 100))%" }
         return mode == "观看" ? "下载观看视频" : "下载跟读音频"
     }
 

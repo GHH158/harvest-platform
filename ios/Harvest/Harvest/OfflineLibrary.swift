@@ -30,6 +30,13 @@ struct OfflineEntry: Codable, Identifiable {
     let audioSegmentDurations: [Double]?
     let totalVideoSegments: Int?
     let totalAudioSegments: Int?
+    /// Locations of the `.movpkg` bundles produced by `AVAssetDownloadURLSession`.
+    /// The older `*SegmentPaths` fields hold raw `.ts` files that AVFoundation cannot
+    /// open at all; they are decoded only so existing manifests still parse.
+    let videoAssetPath: String?
+    let audioAssetPath: String?
+    let videoProgress: Double?
+    let audioProgress: Double?
     let downloadedAt: Date
 
     init(
@@ -41,6 +48,10 @@ struct OfflineEntry: Codable, Identifiable {
         audioSegmentDurations: [Double]? = nil,
         totalVideoSegments: Int? = nil,
         totalAudioSegments: Int? = nil,
+        videoAssetPath: String? = nil,
+        audioAssetPath: String? = nil,
+        videoProgress: Double? = nil,
+        audioProgress: Double? = nil,
         downloadedAt: Date = .now
     ) {
         self.material = material
@@ -51,6 +62,10 @@ struct OfflineEntry: Codable, Identifiable {
         self.audioSegmentDurations = audioSegmentDurations
         self.totalVideoSegments = totalVideoSegments
         self.totalAudioSegments = totalAudioSegments
+        self.videoAssetPath = videoAssetPath
+        self.audioAssetPath = audioAssetPath
+        self.videoProgress = videoProgress
+        self.audioProgress = audioProgress
         self.downloadedAt = downloadedAt
     }
 
@@ -58,29 +73,28 @@ struct OfflineEntry: Codable, Identifiable {
     var localAudioURL: URL? {
         localAudioPath.map { URL(fileURLWithPath: normalizedStoredPath($0)) }
     }
-    var localVideoSegmentURLs: [URL] { contiguousURLs(videoSegmentPaths ?? []) }
-    var localHLSAudioSegmentURLs: [URL] { contiguousURLs(audioSegmentPaths ?? []) }
-    var downloadedVideoSegmentCount: Int { existingCount(videoSegmentPaths ?? []) }
-    var downloadedAudioSegmentCount: Int { existingCount(audioSegmentPaths ?? []) }
-    var isWatchVideoComplete: Bool {
-        guard material.kind == "video", let totalVideoSegments else { return false }
-        return downloadedVideoSegmentCount == totalVideoSegments
-    }
-    var isShadowingAudioComplete: Bool {
-        guard material.kind == "video", let totalAudioSegments else { return false }
-        return downloadedAudioSegmentCount == totalAudioSegments
-    }
+    var localVideoAssetURL: URL? { existingAsset(videoAssetPath) }
+    var localShadowingAssetURL: URL? { existingAsset(audioAssetPath) }
+    var isWatchVideoComplete: Bool { localVideoAssetURL != nil }
+    var isShadowingAudioComplete: Bool { localShadowingAssetURL != nil }
     var hasIncompleteRequestedVideoMedia: Bool {
         guard material.kind == "video" else { return false }
-        return (totalVideoSegments != nil && !isWatchVideoComplete)
-            || (totalAudioSegments != nil && !isShadowingAudioComplete)
+        return (videoProgress != nil && localVideoAssetURL == nil)
+            || (audioProgress != nil && localShadowingAssetURL == nil)
     }
     var hasPlayableMedia: Bool {
         if material.kind == "video" {
-            return !localVideoSegmentURLs.isEmpty || !localHLSAudioSegmentURLs.isEmpty
+            return localVideoAssetURL != nil || localShadowingAssetURL != nil
         }
         guard let localAudioURL else { return false }
         return FileManager.default.fileExists(atPath: localAudioURL.filePath)
+    }
+
+    private func existingAsset(_ path: String?) -> URL? {
+        guard let path else { return nil }
+        let resolved = normalizedStoredPath(path)
+        guard FileManager.default.fileExists(atPath: resolved) else { return nil }
+        return URL(fileURLWithPath: resolved)
     }
 
     /// Rewrites every stored file path, leaving the rest of the entry untouched.
@@ -95,24 +109,14 @@ struct OfflineEntry: Codable, Identifiable {
             audioSegmentDurations: audioSegmentDurations,
             totalVideoSegments: totalVideoSegments,
             totalAudioSegments: totalAudioSegments,
+            videoAssetPath: videoAssetPath.map(transform),
+            audioAssetPath: audioAssetPath.map(transform),
+            videoProgress: videoProgress,
+            audioProgress: audioProgress,
             downloadedAt: downloadedAt
         )
     }
 
-    private func contiguousURLs(_ paths: [String?]) -> [URL] {
-        var urls: [URL] = []
-        for path in paths {
-            guard let path else { break }
-            let resolved = normalizedStoredPath(path)
-            guard FileManager.default.fileExists(atPath: resolved) else { break }
-            urls.append(URL(fileURLWithPath: resolved))
-        }
-        return urls
-    }
-
-    private func existingCount(_ paths: [String?]) -> Int {
-        paths.compactMap(\.self).count { FileManager.default.fileExists(atPath: normalizedStoredPath($0)) }
-    }
 }
 
 enum VideoOfflineMedia: Equatable {
@@ -172,6 +176,7 @@ final class OfflineLibrary: ObservableObject {
     private let downloadSession: URLSession
     private let rootDirectoryOverride: URL?
     private let monitor = NWPathMonitor()
+    private let assetDownloader = HLSAssetDownloader()
 
     init(downloadSession: URLSession? = nil, rootDirectory: URL? = nil) {
         self.downloadSession = downloadSession ?? Self.makeDownloadSession()
@@ -312,57 +317,64 @@ final class OfflineLibrary: ObservableObject {
 
     private func downloadVideo(_ material: MaterialDetail, media: VideoOfflineMedia) async throws {
         let remoteURL: URL
-        let directoryName: String
         switch media {
         case .watch:
             guard let videoURL = material.videoURL else { throw OfflineLibraryError.noVideo }
             remoteURL = videoURL
-            directoryName = "hls-video"
         case .shadowing:
             guard let audioURL = material.audioURL else { throw OfflineLibraryError.noAudio }
             remoteURL = audioURL
-            directoryName = "hls-audio"
         }
 
-        let mediaPlaylist = try await playlist(from: remoteURL)
+        // Record that a download is under way, so the UI can show progress and the
+        // player knows not to switch sources yet.
+        publishAssetProgress(material, media: media, fraction: 0)
+        let location = try await assetDownloader.download(
+            remoteURL: remoteURL,
+            title: material.title
+        ) { [weak self] fraction in
+            guard let self else { return }
+            self.publishAssetProgress(material, media: media, fraction: fraction)
+        }
+
+        // AVFoundation writes the bundle into our container already; move it under the
+        // material's own directory so the existing relative-path scheme still applies.
         let root = try directory(for: material.id)
-        let mediaDirectory = root.appending(path: directoryName)
-        try fileManager.createDirectory(at: mediaDirectory, withIntermediateDirectories: true)
-        var paths = existingPaths(for: mediaPlaylist.segments, in: mediaDirectory)
-        let durations = mediaPlaylist.segments.map(\.duration)
-        try publishVideoEntry(
-            material, media: media, paths: paths, durations: durations, total: mediaPlaylist.segments.count
+        let destination = root.appending(path: media == .watch ? "watch.movpkg" : "shadowing.movpkg")
+        if destination != location {
+            try? fileManager.removeItem(at: destination)
+            try fileManager.moveItem(at: location, to: destination)
+        }
+        publishAssetEntry(material, media: media, assetPath: destination.filePath)
+    }
+
+    private func publishAssetProgress(_ material: MaterialDetail, media: VideoOfflineMedia, fraction: Double) {
+        let previous = entry(for: material.id)
+        upsert(
+            OfflineEntry(
+                material: material,
+                localAudioPath: previous?.localAudioPath,
+                videoAssetPath: previous?.videoAssetPath,
+                audioAssetPath: previous?.audioAssetPath,
+                videoProgress: media == .watch ? fraction : previous?.videoProgress,
+                audioProgress: media == .shadowing ? fraction : previous?.audioProgress
+            )
         )
-
-        for index in mediaPlaylist.segments.indices where paths[index] == nil {
-            try Task.checkCancellation()
-            let segment = mediaPlaylist.segments[index]
-            let destination = segmentDestination(index: index, remoteURL: segment.url, directory: mediaDirectory)
-            try await download(segment.url, to: destination)
-            paths[index] = destination.filePath
-            try publishVideoEntry(material, media: media, paths: paths, durations: durations, total: mediaPlaylist.segments.count)
-        }
     }
 
-    private func playlist(from url: URL) async throws -> HLSPlaylist {
-        let (data, response) = try await downloadSession.data(from: url)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-              let text = String(data: data, encoding: .utf8) else {
-            throw OfflineLibraryError.invalidPlaylist
-        }
-        return try HLSPlaylist(text: text, baseURL: url)
-    }
-
-    private func existingPaths(for segments: [HLSSegment], in directory: URL) -> [String?] {
-        segments.indices.map { index in
-            let destination = segmentDestination(index: index, remoteURL: segments[index].url, directory: directory)
-            return fileManager.fileExists(atPath: destination.filePath) ? destination.filePath : nil
-        }
-    }
-
-    private func segmentDestination(index: Int, remoteURL: URL, directory: URL) -> URL {
-        let suffix = remoteURL.pathExtension.isEmpty ? "ts" : remoteURL.pathExtension
-        return directory.appending(path: String(format: "segment-%05d.%@", index, suffix))
+    private func publishAssetEntry(_ material: MaterialDetail, media: VideoOfflineMedia, assetPath: String) {
+        let previous = entry(for: material.id)
+        upsert(
+            OfflineEntry(
+                material: material,
+                localAudioPath: previous?.localAudioPath,
+                videoAssetPath: media == .watch ? assetPath : previous?.videoAssetPath,
+                audioAssetPath: media == .shadowing ? assetPath : previous?.audioAssetPath,
+                videoProgress: media == .watch ? 1 : previous?.videoProgress,
+                audioProgress: media == .shadowing ? 1 : previous?.audioProgress
+            )
+        )
+        try? persist()
     }
 
     private func download(_ remoteURL: URL, to destination: URL) async throws {
@@ -401,28 +413,6 @@ final class OfflineLibrary: ObservableObject {
         default:
             throw OfflineLibraryError.segmentDownloadFailed(http.statusCode)
         }
-    }
-
-    private func publishVideoEntry(
-        _ material: MaterialDetail,
-        media: VideoOfflineMedia,
-        paths: [String?],
-        durations: [Double],
-        total: Int
-    ) throws {
-        let previous = entry(for: material.id)
-        upsert(
-            OfflineEntry(
-                material: material,
-                videoSegmentPaths: media == .watch ? paths : previous?.videoSegmentPaths,
-                audioSegmentPaths: media == .shadowing ? paths : previous?.audioSegmentPaths,
-                videoSegmentDurations: media == .watch ? durations : previous?.videoSegmentDurations,
-                audioSegmentDurations: media == .shadowing ? durations : previous?.audioSegmentDurations,
-                totalVideoSegments: media == .watch ? total : previous?.totalVideoSegments,
-                totalAudioSegments: media == .shadowing ? total : previous?.totalAudioSegments
-            )
-        )
-        try persist()
     }
 
     private func upsert(_ entry: OfflineEntry) {
@@ -534,6 +524,7 @@ enum OfflineLibraryError: LocalizedError {
     case invalidPlaylist
     case masterPlaylistUnsupported
     case segmentDownloadFailed(Int?)
+    case assetDownloadUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -542,6 +533,8 @@ enum OfflineLibraryError: LocalizedError {
         case .videoMediaRequired: "请选择下载观看视频或跟读音频。"
         case .invalidPlaylist: "无法读取视频分片清单。"
         case .masterPlaylistUnsupported: "当前只接受材料自己的 HLS 媒体清单。"
+        case .assetDownloadUnavailable:
+            "这台设备无法离线下载视频（模拟器不支持，请在 iPhone 上试）。"
         case .segmentDownloadFailed(let status):
             if let status { "分片下载失败（HTTP \(status)），稍后可从缺失处继续。" }
             else { "分片下载失败，稍后可从缺失处继续。" }
