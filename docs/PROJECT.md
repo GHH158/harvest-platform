@@ -619,6 +619,8 @@ CREATE TRIGGER trg_grammar_explanation_updated BEFORE UPDATE ON grammar_explanat
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- 用户在陪读中明确问到某语法点:是接触证据,但不是错误
+-- 遗留表(M1 之后不再是投影的读取路径,详见 §5.11):写入仍保留供追溯,
+-- grammar_encounter 的投影改为读 learning_event。
 CREATE TABLE companion_grammar_evidence (
     message_id BIGINT NOT NULL REFERENCES companion_message(id) ON DELETE CASCADE,
     point_id   BIGINT NOT NULL REFERENCES grammar_point(id) ON DELETE CASCADE,
@@ -627,6 +629,30 @@ CREATE TABLE companion_grammar_evidence (
 );
 CREATE INDEX idx_companion_grammar_point
     ON companion_grammar_evidence(point_id, created_at DESC);
+
+-- 全局学习事件(M1,§5.11 有完整契约与迁移说明)。薄信封 + 按 kind 校验的载荷,
+-- 不是给每种来源发明共享字段;原文仍留在来源业务表,这里只存引用与必要快照。
+CREATE TABLE learning_event (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    schema_version TEXT NOT NULL DEFAULT 'learning-event-v1',
+    kind           TEXT NOT NULL,       -- correction_item | companion_question (更多见 §5.11)
+    source_table   TEXT NOT NULL,       -- 原始行所在表,用于追溯与幂等回填
+    source_id      BIGINT NOT NULL,
+    subject_kind   TEXT NOT NULL,       -- grammar_point(当前唯一取值,为未来扩展保留)
+    subject_key    TEXT NOT NULL,       -- 如 grammar_point.key
+    actor          TEXT NOT NULL DEFAULT 'user',
+    confidence     REAL,                -- 仅对「判断类」证据有意义,如语法点归类;直接观测的事实留空
+    occurred_at    TIMESTAMPTZ NOT NULL,-- 原始事件真实发生时间,不是这行写入时间
+    backfilled     BOOLEAN NOT NULL DEFAULT false,
+    rejected_at    TIMESTAMPTZ,         -- 用户明确「这条关联标错了」;NULL = 仍是有效证据
+    payload        JSONB NOT NULL,      -- 形状按 kind 在应用层校验,不用 JSONB CHECK 约束
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source_table, source_id, subject_kind, subject_key)
+);
+CREATE INDEX idx_learning_event_subject
+    ON learning_event(subject_kind, subject_key, occurred_at DESC)
+    WHERE rejected_at IS NULL;
+CREATE INDEX idx_learning_event_source ON learning_event(source_table, source_id);
 ```
 
 > **延续上一个项目验证过的约定**:枚举字段一律 TEXT、不加 CHECK 约束(§7.3 已写明);`updated_at` 由触发器统一维护,不要在应用层再手动设置一遍——两套机制并存容易在验收时对不上。
@@ -1072,6 +1098,62 @@ Output
 - 新增纠错或明确陪读问题立即删除旧讲解;删除单条纠错或整段聊天后重算投影并删除旧讲解。陪读个性化关联与纠错后的语法登记失败都不得回滚已经成功的主路径
 - 讲解使用当前最近纠错和明确陪读问题,分别标为「实际写错过」与「曾明确问过」;保存 `prompt_version`、`evidence_fingerprint` 与 `evidence_refs`,不依赖缓存正文猜测来源
 
+### 5.11 全局学习事件契约(M1)
+
+本节是 §13.9 M1 的精确契约,按项目自己的规矩先于实现落地。范围只覆盖这次要定的三件事:证据可撤销、事件信封的形状、系统提示词按学习状态裁剪。M1 清单里的其余条目(陪读/生词/跟读适配器全量接入、决策 trace)不在本次契约内,留到实现时再各自回写。
+
+#### 为什么是「薄信封 + 按 kind 校验的载荷」
+
+纠错、陪读提问、以后的生词复习和跟读结果,形状天差地别。硬凑一套共享字段会变成接口闸第 6 条明确警告的「含混的 event 结构」;完全不统一又会让「同一件事从另一个入口被召回」失去意义。
+
+折中是:`learning_event` 表本身只有信封字段(见 §4.2 DDL)——谁、关于什么、什么时候、要不要紧、算不算数;`payload` 是 JSONB,但**形状按 `kind` 在应用层(Pydantic 判别联合)校验,不是数据库约束**。新增一种 `kind` 是往判别联合里加一个分支,不改表结构,呼应 `schema_version` 与"事件类型只做可向后兼容的追加"。
+
+M1 首批只需要两种 `kind`,对应已经在跑的证据来源:
+
+```text
+kind="correction_item"
+  source_table="chat_correction_item"
+  payload = {"original": str, "replacement": str, "reason_zh": str, "category": str}
+  confidence = 1.0   # 当前是模型的二选一判断(标或不标),暂无更细粒度
+
+kind="companion_question"
+  source_table="companion_message"
+  payload = {"question": str, "material_id": int|null, "segment_id": int|null}
+  confidence = 1.0
+```
+
+`vocabulary_review`、`shadowing_attempt` 等留给 M1 清单里"扩展到全部入口"那一步,届时各自定义 payload 形状,不在本次预先猜测。
+
+#### `occurred_at` 与 `created_at` 必须分开,否则回填会撒谎
+
+`occurred_at` 取自来源行的真实时间(纠错事件用所属 `chat_correction.created_at`,陪读问题用 `companion_message.created_at`);`created_at` 是这一行 `learning_event` 自己的写入时间。回填历史数据时两者会明显不同——**所有"最近撞见""需要留意"的排序与判断必须用 `occurred_at`,不能用 `created_at`**,否则一次回填任务会让所有旧证据看起来像刚刚发生。`backfilled=true` 标记来源,不参与业务判断,只用于审计。
+
+#### 撤销:证据可以被判定为误标,而不必删除整条纠错
+
+原来只能删掉整条 `chat_correction`(连带正确的部分一起丢)才能撤掉一个错误的语法标注,现在改为:
+
+- `POST /grammar/evidence/{event_id}/reject`:把该条 `learning_event.rejected_at` 设为当前时间。**不删除行、不修改 `payload`**——模型当初的判断本身是历史事实(「系统当时认为这是て形」),用户的否定是新事实,不是对旧事实的编辑。幂等,重复调用无副作用。返回该事件所属语法点的最新投影,前端据此立即更新(可能因此从「需要留意」退回「未接触」或「已弄懂」)。
+- `POST /grammar/evidence/{event_id}/unreject`:清空 `rejected_at`,处理误触。
+- 投影查询一律加 `WHERE rejected_at IS NULL`。§5.10 里"自动证据可以把未接触变为 encountered,但不能把 understood 降级"的规则不变,只是判断"是否还有活跃证据"时改为排除被撤销的事件。
+
+界面入口放在语法详情页(`GrammarDetailView`),每条证据(写错的原句 / 问过的问题)旁边一个「标错了」——不动聊天或陪读的界面,不扩大改动面。
+
+**遗留读取路径的收尾**:`grammar_encounter` 的投影查询([repository.py:1308](backend/app/repository.py:1308) 起的 `_grammar_rows`)从直接 `JOIN chat_correction_item ci ON ci.grammar_key = p.key` 改为 `JOIN learning_event` 按 `subject_key` 关联。`chat_correction_item.grammar_key` 与 `companion_grammar_evidence` 两张表继续写入(向后兼容、便于审计和未来重新回填),但**不再是投影的读取路径**——两个来源同时可读同一份事实,不可避免地会在某次改动后悄悄分叉,只留一个真正被查询的路径。
+
+#### 系统提示词按学习状态裁剪,不携带全量目录
+
+现状:[chat.py:114](backend/app/chat.py:114) 和 [companion.py:54](backend/app/companion.py:54) 把完整目录烘进模块级常量,每次调用不分青红皂白携带全部 67 条(当前约 1900 字符)。N3 扩容后翻倍,再铺到 M1 清单里的其余入口会再乘以入口数。这是现在改代价最小、以后改代价最大的一处。
+
+规则:
+
+- 提示词构造从「导入时固定的字符串」改为「每轮请求时,根据 `grammar_encounter` 现状计算出的字符串」——即 `build_chat_system_prompt(catalogue_subset)`,不再是裸常量。
+- 子集规则:**用户当前有效水平及以下的全部点,并集上已经出现过 `grammar_encounter` 行的全部点**(不论等级)。后一半保证"已经标记过的点"始终在候选里,不会因为等级过滤而丢失复发检测能力——这正是 §12.1"最近又在这里撞见了一次"要依赖的信号。
+- 有效水平的判定:按等级统计已有 `grammar_encounter` 行的点数,达到阈值(如 N5 已接触 ≥15/38)才把下一等级并入候选,不是一次性放开全部等级。这是启发式,不是精确科学,先用简单规则,不要在没有真实数据前过度设计。
+- 无论如何设置硬上限(如 40 条):候选超过上限时,优先保留"已有 `grammar_encounter` 行的点",再按等级、`sort_order` 补足到上限。
+- 计算本身是一次索引查询,不是模型调用,不会明显增加延迟,可以每轮都算,不需要跨轮缓存。
+
+这一条不依赖 `learning_event` 存在,只需要 `grammar_encounter`(M0 已有),可以独立于本节其余部分先行实现。
+
 ---
 
 ## 6. 开发阶段规划
@@ -1363,6 +1445,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-08 | §13.9 新增 M0–M7 实施路线与初版五道验收闸:全局架构从一开始定义,但每次只验证一条纵向闭环;先稳固语法的证据/投影/缓存语义,再建立全局学习事件契约、稳定角色与理解圆桌,通过真实使用后才扩到全入口、关系记忆、沉浸圆桌、动态场景与向量召回 |
 | 2026-08-08 | 完成 §13.9 M0:语法状态改为可解释的证据投影,首次来源与后来真实错误分离;陪读使用单次结构化契约保守登记「明确问过」,不冒充错误;讲解缓存加入提示词版本、证据引用和指纹并随新增/删除证据失效;用户手动状态优先,已懂后新证据以 `needs_attention` 提醒且可手动改回留意;语法页按需留意/已懂/未接触排序并显示最近错句或问题与状态原因。删除单条纠错或整段聊天都会重算投影,且不会忘记后来主动读过讲解的事实。独立 PostgreSQL 全链路、后端 163 项与 iOS 41 项测试全部通过 |
 | 2026-08-08 | 完成 §13.10 Alice 方法论正式审计:覆盖官网序章、15 个工程章节、5 个产品观章节、附录和 7 篇实践故事,建立「直接采用 / 转译采用 / 证据后采用 / 明确排除」矩阵。将接口版本、调用来源、隐私默认、最小权限、撤销与成本加入共同验收闸;细化 M1–M6 的角色隔离、情绪/执行双通道、中心化圆桌、虚构声明和动态场景一致性;明确不照搬通用朋友圈、数值好感、虚拟消费、过早五层基础设施与大规模 Agent 阵容;记录本地密钥/学习历史静态保护和现有 Markdown 标题强调条的待审计风险。M1 继续只允许先设计契约,尚未进入编码 |
+| 2026-08-08 | M1 精确契约定稿(§4.2 `learning_event` 表、§5.11):按讨论中判断优先级排定的三件事——①证据可撤销,新增 `rejected_at`,撤销一条误标的语法关联不必删除整条纠错,模型当初的判断保留为历史事实,用户的否定是新事实而非编辑;②`learning_event` 定为薄信封(id/kind/来源引用/主体/`occurred_at`/`confidence`)+ 按 `kind` 在应用层校验的 JSONB `payload`,不做跨来源的共享字段,避免接口闸第 6 条警告的含混 event 结构;`occurred_at` 与写入时间 `created_at` 严格分开,回填不得让旧证据看起来像刚发生;③系统提示词里的语法目录改为按 `grammar_encounter` 现状动态裁剪,不再无差别携带全部条目,此条不依赖 `learning_event`,可独立先行实现。`chat_correction_item.grammar_key` 与 `companion_grammar_evidence` 降为遗留写入路径,投影改读 `learning_event`,避免同一份事实两个查询入口分叉。本次只定稿契约,未写代码 |
 
 ---
 
@@ -1584,6 +1667,8 @@ Harvest 不应只是阅读、聊天、查词、语法等 AI 功能的集合,也�
 #### M1 — 建立全局学习事件契约
 
 目标:用一套逻辑契约连接所有学习入口,同时保留原业务表作为事实原文。
+
+> `learning_event` 的精确表结构见 §4.2,证据撤销与系统提示词裁剪的完整契约见 §5.11——这两点已经定稿,可以先行实现,不必等本节其余条目一起完成。字段名以 §4.2 为准(`source_table` 而非下面这行的 `source_type`,取表名更明确);`LearnerMemory`、决策 trace 与陪读/生词/跟读全量适配器仍是概念性描述,进入编码前还要各自回写精确契约。
 
 - 定义统一 `LearningEvent`:稳定 id、`kind`、`source_type/source_id`、`occurred_at`、`subject_kind/subject_key`、`actor` 与必要的置信信息;
 - 契约从第一版就带 `schema_version` 与兼容策略;事件类型只做可向后兼容的追加,不得让每个入口发明自己的字段组合。这里的领域事件用于事实索引和重放,与未来 UI 流式事件是两套接口,不得混用;
