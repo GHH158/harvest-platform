@@ -32,3 +32,24 @@ def test_catalogue_rows_are_ordered_and_complete() -> None:
     assert [row["sort_order"] for row in rows] == list(range(len(rows)))
     assert {row["level"] for row in rows} <= {"N5", "N4", "N3"}
     assert all(row["category"] for row in rows)
+
+
+def test_correction_items_only_accept_real_catalogue_keys() -> None:
+    from app.chat import CorrectionItemOutput
+
+    base = {"original": "読むています", "replacement": "読んでいます", "reason_zh": "て形", "category": "grammar"}
+    assert CorrectionItemOutput(**base, grammar_key="verb-te").grammar_key == "verb-te"
+    # A key the model invented is dropped rather than failing the whole turn: a bad
+    # tag should cost the tag, not the correction.
+    assert CorrectionItemOutput(**base, grammar_key="totally-made-up").grammar_key is None
+    assert CorrectionItemOutput(**base, grammar_key="  ").grammar_key is None
+    assert CorrectionItemOutput(**base).grammar_key is None
+
+
+def test_chat_prompt_carries_the_catalogue_so_the_model_can_tag() -> None:
+    from app.chat import CHAT_SYSTEM_PROMPT
+
+    assert "i-adj-past = ～かった" in CHAT_SYSTEM_PROMPT
+    assert "verb-te-iru = ～ている" in CHAT_SYSTEM_PROMPT
+    # And the instruction that a wrong tag is worse than none.
+    assert "worse than leaving it empty" in CHAT_SYSTEM_PROMPT

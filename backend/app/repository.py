@@ -430,6 +430,7 @@ class Repository:
         correction: dict[str, Any] | None,
         create_session_topic: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any]]:
+        touched_grammar_keys: list[tuple[str, str]] = []
         with self.engine.begin() as connection:
             if create_session_topic is not None:
                 connection.execute(
@@ -468,14 +469,22 @@ class Repository:
                     stored_item = connection.execute(
                         text(
                             """INSERT INTO chat_correction_item
-                            (correction_id, idx, original_fragment, replacement, reason_zh, category)
-                            VALUES (:correction_id, :idx, :original, :replacement, :reason_zh, :category)
+                            (correction_id, idx, original_fragment, replacement, reason_zh, category, grammar_key)
+                            VALUES (:correction_id, :idx, :original, :replacement, :reason_zh, :category, :grammar_key)
                             RETURNING id, correction_id, idx, original_fragment AS original,
-                                replacement, reason_zh, category"""
+                                replacement, reason_zh, category, grammar_key"""
                         ),
-                        {"correction_id": int(correction_row["id"]), "idx": index, **item},
+                        {
+                            "correction_id": int(correction_row["id"]),
+                            "idx": index,
+                            "grammar_key": item.get("grammar_key"),
+                            **{k: v for k, v in item.items() if k != "grammar_key"},
+                        },
                     ).mappings().one()
                     items.append(dict(stored_item))
+                    # A real mistake is the main path into the grammar skeleton (§12.1).
+                    if key := item.get("grammar_key"):
+                        touched_grammar_keys.append((str(key), str(item["original"])))
                 stored_correction = dict(correction_row)
                 stored_correction["items"] = items
             assistant = connection.execute(
@@ -489,6 +498,10 @@ class Repository:
                 text("UPDATE chat_session SET topic = topic WHERE id = :session_id"),
                 {"session_id": session_id},
             )
+        # Registered after the turn's transaction commits: a failure to record the
+        # skeleton must never lose the correction itself.
+        for key, original in touched_grammar_keys:
+            self.mark_grammar_encounter(key, status="encountered", source="correction", note=original)
         return dict(user), stored_correction, dict(assistant)
 
     def chat_corrections(

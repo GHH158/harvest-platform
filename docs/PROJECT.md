@@ -836,7 +836,7 @@ Output
 - Return exactly one JSON object, with no Markdown or surrounding commentary.
 - Allowed correction categories: grammar, word_choice, naturalness, register, orthography.
 - The exact schema is:
-{"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","reason_zh":"...","category":"grammar"}]},"reply_ja":"...","follow_up_ja":"..."}
+{"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","reason_zh":"...","category":"grammar","grammar_key":null}]},"reply_ja":"...","follow_up_ja":"..."}
 - When correction is unnecessary, use needed=false, corrected_text=null, summary_zh=null, items=[].
 ```
 
@@ -1268,6 +1268,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-07 | 视频离线下载改用 `AVAssetDownloadURLSession`(原方案根本无法播放)。此前把 HLS 逐片存成裸 `.ts` 再喂给 `AVQueuePlayer`——文件下载正确,但 AVFoundation 只在 HLS 流中支持 MPEG-TS,单独打开 `.ts` 必然失败(`Cannot Open`),因此视频离线播放在任何版本上都没有真正工作过。改为让 AVFoundation 自己下载,产出 `.movpkg` 由 `AVURLAsset` 直接打开;离线播放器随之从分片队列换成普通 `AVPlayer`,`SegmentQueuePlayer`、HLS 清单解析与分片路径模型一并删除;进度由「已完成片数」改为 AVFoundation 报告的百分比。实测:下载 17%→完成,离线播放正常,字幕与逐词高亮跟随正确 |
 | 2026-08-07 | **修订 §1.1 / §1.4 关于「不做课本数字化」的判断**,新增 §12 语法骨架。原判断(基础靠课本、软件只做课本做不了的事)在「内容」层面继续成立,但实际使用暴露了一个课本给不了的缺口:陪读与纠错的讲解是一次性且离散的,遇到过什么、还差什么无处可查。放宽为**不搬运课本正文,但维护一份语法点目录**——存目录与状态,讲解按需由 §5.8 内核生成并缓存;优先由真实纠错自动登记「已撞见」,主动浏览为补充;仍不做课程进度条、打卡与连续天数 |
 | 2026-08-07 | §12 语法骨架落地后端:新增 `grammar_point` / `grammar_encounter` / `grammar_explanation` 三表与 N5–N4 共 67 点目录,`chat_correction_item` 增加 `grammar_key`;`GET /grammar` 列出全部点与状态,`GET /grammar/{key}` 按需生成讲解并缓存,`POST /grammar/{key}/status` 标记已弄懂。实测:把真实纠错「美味しいでした」挂到 `i-adj-past` 后,生成的讲解以该原句切入并点明中日差异,状态自动升为已撞见。iOS 界面尚未接入 |
+| 2026-08-07 | 语法骨架接上主路径(§12.1):§5.6 的纠错契约新增 `grammar_key`,聊天提示词带上完整目录,模型在确有把握时把一次真实错误标注到语法点,服务端校验后自动登记「已撞见」并记下使用者写错的原句。编造的 key 只丢标注不废纠错;登记在事务提交后进行;自动登记绝不把「已弄懂」降级。实测:写「本を読むています」→ 模型标注 `verb-te` → 该点自动从未接触变为已撞见,note 存着原句 |
 
 ---
 
@@ -1319,6 +1320,6 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 
 ### 12.4 与既有功能的关系
 
-- 纠错(§5.6)在生成 `chat_correction_item` 时尝试标注语法点 key,从而自动登记撞见
+- 纠错(§5.6)在生成 `chat_correction_item` 时尝试标注 `grammar_key`,从而自动登记撞见。提示词中带上完整目录(key = 形式, 标签),并明确要求:**只在这个错误确实就是该点时才标注**,词汇选择、自然度或没把握的一律留空——错误的标注会悄悄污染骨架,比不标更糟。服务端只接受目录中真实存在的 key,模型编造的一律丢弃,且**丢弃标注而不是让整轮纠错失败**。登记发生在该轮事务提交之后:骨架写入失败绝不能连累纠错本身
 - 查词(§5.9)不参与登记:词汇不是语法点
 - 生词复习(§5.9)与语法骨架各自独立,不合并调度

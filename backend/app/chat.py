@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .grammar_catalogue import GRAMMAR_CATALOGUE
 from .llm import LLMService
 from .prompts import INTERACTIVE_TEACHING_CORE_PROMPT
 
@@ -97,12 +98,28 @@ Output
 - Return exactly one JSON object, with no Markdown or surrounding commentary.
 - Allowed correction categories: grammar, word_choice, naturalness, register, orthography.
 - The exact schema is:
-{"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","reason_zh":"...","category":"grammar"}]},"reply_ja":"...","follow_up_ja":"..."}
+{"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","reason_zh":"...","category":"grammar","grammar_key":null}]},"reply_ja":"...","follow_up_ja":"..."}
 - When correction is unnecessary, use needed=false, corrected_text=null, summary_zh=null, items=[].
 - follow_up_ja is optional: set it to null when this turn should not end with a question.
+- grammar_key links a correction item to the learner's grammar skeleton. Set it only when
+  the mistake genuinely is that point, using a key from the list below verbatim. Leave it
+  null for word choice, naturalness or anything you are not sure about: a wrong key
+  quietly corrupts the skeleton, which is worse than leaving it empty. Unknown keys are
+  discarded anyway.
+
+Grammar keys (key = form, label):
+{grammar_keys}
 """
 
-CHAT_SYSTEM_PROMPT = f"{INTERACTIVE_TEACHING_CORE_PROMPT}\n\n{CHAT_SCENE_PROMPT}"
+GRAMMAR_KEY_LIST = "\n".join(
+    f"{key} = {title_ja}, {title_zh}" for key, title_ja, title_zh, _, _ in GRAMMAR_CATALOGUE
+)
+KNOWN_GRAMMAR_KEYS = {key for key, *_ in GRAMMAR_CATALOGUE}
+
+CHAT_SYSTEM_PROMPT = (
+    f"{INTERACTIVE_TEACHING_CORE_PROMPT}\n\n"
+    + CHAT_SCENE_PROMPT.replace("{grammar_keys}", GRAMMAR_KEY_LIST)
+)
 
 
 class CorrectionItemOutput(BaseModel):
@@ -112,6 +129,10 @@ class CorrectionItemOutput(BaseModel):
     replacement: str = Field(min_length=1, max_length=1_000)
     reason_zh: str = Field(min_length=1, max_length=1_000)
     category: CorrectionCategory
+    # Optional link into the grammar skeleton (§12). Left null unless the mistake
+    # really is that point: a wrong tag quietly pollutes the learner's skeleton,
+    # which is worse than no tag at all. Unknown keys are dropped server-side.
+    grammar_key: str | None = Field(default=None, max_length=64)
 
     @field_validator("original", "replacement", "reason_zh")
     @classmethod
@@ -120,6 +141,14 @@ class CorrectionItemOutput(BaseModel):
         if not value:
             raise ValueError("纠错字段不能为空。")
         return value
+
+    @field_validator("grammar_key")
+    @classmethod
+    def only_known_keys(cls, value: str | None) -> str | None:
+        """Drops anything the model invented rather than failing the whole turn:
+        a bad tag should cost the tag, not the correction."""
+        cleaned = (value or "").strip()
+        return cleaned if cleaned in KNOWN_GRAMMAR_KEYS else None
 
 
 class CorrectionOutput(BaseModel):
