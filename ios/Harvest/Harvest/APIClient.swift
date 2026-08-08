@@ -170,6 +170,21 @@ struct APIClient {
         try await delete("vocabulary/\(id)")
     }
 
+    func listGrammar() async throws -> [GrammarPoint] {
+        try await get("grammar")
+    }
+
+    /// Explanations are generated on demand, so this call is slow the first time and
+    /// instant afterwards — the server caches it.
+    func grammarPoint(key: String) async throws -> GrammarPoint {
+        try await get("grammar/\(key)")
+    }
+
+    @discardableResult
+    func setGrammarStatus(key: String, status: String) async throws -> GrammarPoint {
+        try await post("grammar/\(key)/status", body: ["status": status])
+    }
+
     /// Words due for spaced-repetition review right now, oldest-due first.
     func reviewDueVocabulary(limit: Int = 20) async throws -> [VocabularyWord] {
         guard var components = URLComponents(

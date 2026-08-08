@@ -386,3 +386,34 @@ struct VocabularyWord: Codable, Identifiable {
         alreadySaved = try container.decodeIfPresent(Bool.self, forKey: .alreadySaved) ?? false
     }
 }
+
+
+/// One point in the grammar skeleton (§12). `status` is nil for 未接触 — absence is
+/// the third state rather than a stored value, so a fresh catalogue needs no rows.
+struct GrammarPoint: Codable, Identifiable, Hashable {
+    let id: Int
+    let key: String
+    let titleJA: String
+    let titleZH: String
+    let level: String
+    let category: String
+    let status: String?
+    let firstSource: String?
+    let note: String?
+    let hasExplanation: Bool?
+    let explanation: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, key, level, category, status, note, explanation
+        case titleJA = "title_ja"
+        case titleZH = "title_zh"
+        case firstSource = "first_source"
+        case hasExplanation = "has_explanation"
+    }
+
+    var isUnderstood: Bool { status == "understood" }
+    var isEncountered: Bool { status == "encountered" }
+    /// Came from a real mistake rather than from browsing the catalogue.
+    var cameFromMistake: Bool { firstSource == "correction" }
+}
+

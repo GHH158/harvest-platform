@@ -30,6 +30,8 @@
 		A0000000000000000000001B /* WordLookupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000022 /* WordLookupSheet.swift */; };
 		A0000000000000000000001D /* WordPickSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000024 /* WordPickSheet.swift */; };
 		A0000000000000000000001E /* SelectableText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000025 /* SelectableText.swift */; };
+		A00000000000000000000031 /* AccumulationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000038 /* AccumulationView.swift */; };
+		A00000000000000000000030 /* GrammarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000037 /* GrammarView.swift */; };
 		A0000000000000000000002F /* HLSAssetDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000036 /* HLSAssetDownloader.swift */; };
 		A0000000000000000000001C /* VocabularyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000023 /* VocabularyView.swift */; };
 		A0000000000000000000001F /* VocabularyReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000026 /* VocabularyReviewView.swift */; };
@@ -71,6 +73,8 @@
 		A10000000000000000000022 /* WordLookupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordLookupSheet.swift; sourceTree = "<group>"; };
 		A10000000000000000000024 /* WordPickSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPickSheet.swift; sourceTree = "<group>"; };
 		A10000000000000000000025 /* SelectableText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectableText.swift; sourceTree = "<group>"; };
+		A10000000000000000000038 /* AccumulationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccumulationView.swift; sourceTree = "<group>"; };
+		A10000000000000000000037 /* GrammarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrammarView.swift; sourceTree = "<group>"; };
 		A10000000000000000000036 /* HLSAssetDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSAssetDownloader.swift; sourceTree = "<group>"; };
 		A10000000000000000000023 /* VocabularyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocabularyView.swift; sourceTree = "<group>"; };
 		A10000000000000000000026 /* VocabularyReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocabularyReviewView.swift; sourceTree = "<group>"; };
@@ -128,6 +132,8 @@
 				A10000000000000000000022 /* WordLookupSheet.swift */,
 				A10000000000000000000024 /* WordPickSheet.swift */,
 				A10000000000000000000025 /* SelectableText.swift */,
+				A10000000000000000000038 /* AccumulationView.swift */,
+				A10000000000000000000037 /* GrammarView.swift */,
 				A10000000000000000000036 /* HLSAssetDownloader.swift */,
 				A10000000000000000000023 /* VocabularyView.swift */,
 				A10000000000000000000026 /* VocabularyReviewView.swift */,
@@ -254,6 +260,8 @@
 				A0000000000000000000001B /* WordLookupSheet.swift in Sources */,
 				A0000000000000000000001D /* WordPickSheet.swift in Sources */,
 				A0000000000000000000001E /* SelectableText.swift in Sources */,
+				A00000000000000000000031 /* AccumulationView.swift in Sources */,
+				A00000000000000000000030 /* GrammarView.swift in Sources */,
 				A0000000000000000000002F /* HLSAssetDownloader.swift in Sources */,
 				A0000000000000000000001C /* VocabularyView.swift in Sources */,
 				A0000000000000000000001F /* VocabularyReviewView.swift in Sources */,

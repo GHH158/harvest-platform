@@ -53,8 +53,8 @@ struct MainTabView: View {
             NavigationStack { DownloadsView() }
                 .tabItem { Label("下载", systemImage: "arrow.down.circle") }
                 .tag(MainTab.downloads)
-            NavigationStack { VocabularyView(isActive: selectedTab == .vocabulary) }
-                .tabItem { Label("生词", systemImage: "character.book.closed") }
+            NavigationStack { AccumulationView(isActive: selectedTab == .vocabulary) }
+                .tabItem { Label("积累", systemImage: "square.stack.3d.up") }
                 .tag(MainTab.vocabulary)
             NavigationStack { SettingsView(isOnboarding: false) }
                 .tabItem { Label("设置", systemImage: "gearshape") }
