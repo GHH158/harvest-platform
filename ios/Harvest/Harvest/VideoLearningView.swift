@@ -356,6 +356,9 @@ struct VideoLearningView: View {
     @State private var isSentenceLoopEnabled = false
     @State private var loopSegmentID: Int?
     @State private var pendingResumePositionMs: Int?
+    /// Last real playback position seen, used to carry the position across a switch
+    /// between the online and offline players.
+    @State private var lastWatchPositionMs = 0
     @State private var didRestorePlayback = false
     @State private var lastSavedPositionMs = 0
     @State private var questionSegment: Segment?
@@ -412,6 +415,18 @@ struct VideoLearningView: View {
         .onChange(of: watchPlaybackPositionMs) { oldPosition, newPosition in
             handleSentenceLoop(from: oldPosition, to: newPosition)
             savePlaybackPositionIfNeeded(newPosition)
+            if newPosition > 0 { lastWatchPositionMs = newPosition }
+        }
+        .onChange(of: usesOfflineVideo) { _, _ in
+            // Silence whichever player is being left — otherwise its audio keeps running
+            // underneath the new one — and hand the position over so the swap is not felt.
+            onlineVideo.pause()
+            offlineVideoPlayer.pause()
+            pendingResumePositionMs = lastWatchPositionMs
+        }
+        .onChange(of: usesOfflineAudio) { _, _ in
+            onlineAudio.pause()
+            offlineAudioPlayer.pause()
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase != .active { savePlaybackPosition(force: true) }
@@ -543,7 +558,7 @@ struct VideoLearningView: View {
     @ViewBuilder
     private var watchPlayer: some View {
         Group {
-            if !offlineVideoURLs.isEmpty {
+            if usesOfflineVideo {
                 VideoPlayer(player: offlineVideoPlayer.player)
                     .task(id: offlineVideoSignature) {
                         offlineVideoPlayer.update(offlineVideoURLs, durations: offlineEntry?.videoSegmentDurations)
@@ -691,20 +706,20 @@ struct VideoLearningView: View {
 
     private var playbackError: String? {
         if mode == "观看" {
-            return offlineVideoURLs.isEmpty ? onlineVideo.errorMessage : offlineVideoPlayer.errorMessage
+            return usesOfflineVideo ? offlineVideoPlayer.errorMessage : onlineVideo.errorMessage
         }
-        return offlineAudioURLs.isEmpty ? onlineAudio.errorMessage : offlineAudioPlayer.errorMessage
+        return usesOfflineAudio ? offlineAudioPlayer.errorMessage : onlineAudio.errorMessage
     }
 
     private var playbackPositionMs: Int {
         if mode == "观看" {
             return watchPlaybackPositionMs
         }
-        return offlineAudioURLs.isEmpty ? onlineAudio.positionMs : offlineAudioPlayer.positionMs
+        return usesOfflineAudio ? offlineAudioPlayer.positionMs : onlineAudio.positionMs
     }
 
     private var watchPlaybackPositionMs: Int {
-        offlineVideoURLs.isEmpty ? onlineVideo.positionMs : offlineVideoPlayer.positionMs
+        usesOfflineVideo ? offlineVideoPlayer.positionMs : onlineVideo.positionMs
     }
 
     /// Sentence and word highlights use start boundaries rather than strict ASR
@@ -727,11 +742,11 @@ struct VideoLearningView: View {
     }
 
     private var isWatchPlaying: Bool {
-        offlineVideoURLs.isEmpty ? onlineVideo.isPlaying : offlineVideoPlayer.isPlaying
+        usesOfflineVideo ? offlineVideoPlayer.isPlaying : onlineVideo.isPlaying
     }
 
     private func toggleWatchPlayback() {
-        if offlineVideoURLs.isEmpty { onlineVideo.toggle() }
+        if !usesOfflineVideo { onlineVideo.toggle() }
         else { offlineVideoPlayer.toggle() }
     }
 
@@ -809,7 +824,7 @@ struct VideoLearningView: View {
     }
 
     private func seekWatch(to milliseconds: Int) {
-        if offlineVideoURLs.isEmpty { onlineVideo.seek(to: milliseconds) }
+        if !usesOfflineVideo { onlineVideo.seek(to: milliseconds) }
         else { offlineVideoPlayer.seek(to: milliseconds) }
     }
 
@@ -878,6 +893,23 @@ struct VideoLearningView: View {
     private var offlineEntry: OfflineEntry? { offlineLibrary.entry(for: material.id) }
     private var offlineVideoURLs: [URL] { offlineEntry?.localVideoSegmentURLs ?? [] }
     private var offlineAudioURLs: [URL] { offlineEntry?.localHLSAudioSegmentURLs ?? [] }
+
+    /// Whether playback should read from disk rather than the network.
+    ///
+    /// The contiguous prefix grows one file at a time while a download runs, so keying
+    /// the source off "any local segment exists" swapped the player out from under an
+    /// active online session: the picture went black on a one-segment offline player,
+    /// the online player kept its audio running because nothing paused it, subtitles
+    /// froze on the new player's position and the error surfaced as "Cannot Open".
+    /// §5.2 does allow watching a partially downloaded video — just not by hot-swapping
+    /// mid-download, so wait until this material is no longer downloading.
+    private var usesOfflineVideo: Bool {
+        !offlineVideoURLs.isEmpty && !offlineLibrary.isDownloading(material.id)
+    }
+
+    private var usesOfflineAudio: Bool {
+        !offlineAudioURLs.isEmpty && !offlineLibrary.isDownloading(material.id)
+    }
     private var offlineVideoSignature: String { offlineVideoURLs.map(\.path).joined(separator: "|") }
     private var offlineAudioSignature: String { offlineAudioURLs.map(\.path).joined(separator: "|") }
     private var selectedVideoMedia: VideoOfflineMedia { mode == "观看" ? .watch : .shadowing }
