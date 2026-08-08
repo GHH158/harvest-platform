@@ -200,6 +200,16 @@ final class SegmentQueuePlayer: ObservableObject {
     private var knownURLs: [URL] = []
     private var durations: [Double] = []
     private var playedCount = 0
+    /// MPEG-TS segments carry absolute presentation timestamps, so a standalone `.ts`
+    /// does not start at zero — segment 20 of this material reports ~121 s the moment it
+    /// opens. Adding the elapsed durations on top counted that offset twice and ran the
+    /// timeline at roughly double speed: subtitles desynced and, once the position shot
+    /// past the end, no sentence was current so word highlighting vanished entirely.
+    /// Calibrate an origin from the first observed time instead, re-doing it at each
+    /// item boundary so a stream whose timestamps reset is handled too.
+    private var timelineOrigin: Double?
+    private var calibratedPlayedCount = -1
+    private var pendingCalibrationOffset = 0.0
     private var itemObservers: [NSObjectProtocol] = []
     private var itemStatusObservations: [NSKeyValueObservation] = []
     private var timeObserver: Any?
@@ -273,6 +283,10 @@ final class SegmentQueuePlayer: ObservableObject {
         player.removeAllItems()
         removeItemObservers()
         playedCount = index
+        // Force re-calibration: the new first item brings its own timestamp base.
+        timelineOrigin = nil
+        calibratedPlayedCount = -1
+        pendingCalibrationOffset = Double(offsetMs) / 1_000
         for itemIndex in index..<knownURLs.count {
             append(knownURLs[itemIndex], duration: durations[itemIndex])
         }
@@ -317,8 +331,15 @@ final class SegmentQueuePlayer: ObservableObject {
     }
 
     private func updatePosition(_ time: CMTime) {
-        let completed = durations.prefix(playedCount).reduce(0, +)
-        positionMs = max(0, Int((completed + time.seconds) * 1_000))
+        let seconds = time.seconds
+        guard seconds.isFinite else { return }
+        if calibratedPlayedCount != playedCount || timelineOrigin == nil {
+            let expected = durations.prefix(playedCount).reduce(0, +) + pendingCalibrationOffset
+            timelineOrigin = seconds - expected
+            calibratedPlayedCount = playedCount
+            pendingCalibrationOffset = 0
+        }
+        positionMs = max(0, Int((seconds - (timelineOrigin ?? 0)) * 1_000))
     }
 
     var hasReachedEnd: Bool {
