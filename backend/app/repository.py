@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import Engine, text
 
 from .chat import build_correction_guidance
+from .grammar_catalogue import catalogue_rows
 from .text import canonical_source_key
 
 
@@ -1203,6 +1204,121 @@ class Repository:
                 ),
                 {"material_id": material_id, "duration_ms": duration_ms},
             )
+
+    # ── grammar skeleton (§12) ──────────────────────────────────
+
+    def sync_grammar_catalogue(self) -> None:
+        """Upserts the catalogue. Only the index changes here; a learner's status
+        rows and cached explanations are untouched, so extending the list later is
+        a data change rather than a migration."""
+        rows = catalogue_rows()
+        if not rows:
+            return
+        with self.engine.begin() as connection:
+            for row in rows:
+                connection.execute(
+                    text(
+                        """INSERT INTO grammar_point (key, title_ja, title_zh, level, category, sort_order)
+                           VALUES (:key, :title_ja, :title_zh, :level, :category, :sort_order)
+                           ON CONFLICT (key) DO UPDATE SET
+                             title_ja = EXCLUDED.title_ja,
+                             title_zh = EXCLUDED.title_zh,
+                             level = EXCLUDED.level,
+                             category = EXCLUDED.category,
+                             sort_order = EXCLUDED.sort_order"""
+                    ),
+                    row,
+                )
+
+    def list_grammar_points(self) -> list[dict[str, Any]]:
+        """The whole skeleton with the learner's state. A missing encounter row
+        means 未接触 — absence is the third state, not a stored value."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT p.id, p.key, p.title_ja, p.title_zh, p.level, p.category,
+                              e.status, e.first_source, e.note, e.updated_at,
+                              (x.point_id IS NOT NULL) AS has_explanation
+                       FROM grammar_point p
+                       LEFT JOIN grammar_encounter e ON e.point_id = p.id
+                       LEFT JOIN grammar_explanation x ON x.point_id = p.id
+                       ORDER BY p.level, p.sort_order, p.id"""
+                )
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def get_grammar_point(self, key: str) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    """SELECT p.*, e.status, e.note, x.content AS explanation
+                       FROM grammar_point p
+                       LEFT JOIN grammar_encounter e ON e.point_id = p.id
+                       LEFT JOIN grammar_explanation x ON x.point_id = p.id
+                       WHERE p.key = :key"""
+                ),
+                {"key": key},
+            ).mappings().one_or_none()
+        return dict(row) if row else None
+
+    def mark_grammar_encounter(
+        self, key: str, *, status: str, source: str | None = None, note: str | None = None
+    ) -> dict[str, Any] | None:
+        """Records or upgrades the learner's relationship with a point.
+
+        Never downgrades: once something is 已弄懂, a later automatic 已撞见 from a
+        correction must not silently undo that."""
+        with self.engine.begin() as connection:
+            point = connection.execute(
+                text("SELECT id FROM grammar_point WHERE key = :key"), {"key": key}
+            ).mappings().one_or_none()
+            if point is None:
+                return None
+            connection.execute(
+                text(
+                    """INSERT INTO grammar_encounter (point_id, status, first_source, note)
+                       VALUES (:point_id, :status, :source, :note)
+                       ON CONFLICT (point_id) DO UPDATE SET
+                         status = CASE
+                             WHEN grammar_encounter.status = 'understood' THEN grammar_encounter.status
+                             ELSE EXCLUDED.status
+                         END,
+                         note = COALESCE(EXCLUDED.note, grammar_encounter.note)"""
+                ),
+                {"point_id": point["id"], "status": status, "source": source, "note": note},
+            )
+        return self.get_grammar_point(key)
+
+    def save_grammar_explanation(self, key: str, content: str) -> None:
+        with self.engine.begin() as connection:
+            point = connection.execute(
+                text("SELECT id FROM grammar_point WHERE key = :key"), {"key": key}
+            ).mappings().one_or_none()
+            if point is None:
+                return
+            connection.execute(
+                text(
+                    """INSERT INTO grammar_explanation (point_id, content)
+                       VALUES (:point_id, :content)
+                       ON CONFLICT (point_id) DO UPDATE SET content = EXCLUDED.content"""
+                ),
+                {"point_id": point["id"], "content": content},
+            )
+
+    def corrections_touching(self, key: str, limit: int = 3) -> list[dict[str, Any]]:
+        """The learner's own mistakes on this point, so §12.3 can open with their
+        sentence instead of an invented example."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT ci.original_fragment, ci.replacement, ci.reason_zh
+                       FROM chat_correction_item ci
+                       WHERE ci.grammar_key = :key
+                       ORDER BY ci.id DESC LIMIT :limit"""
+                ),
+                {"key": key, "limit": limit},
+            ).mappings().all()
+        return [dict(row) for row in rows]
 
     # ── vocabulary ──────────────────────────────────────────────
 

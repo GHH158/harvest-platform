@@ -198,3 +198,44 @@ ALTER TABLE vocabulary ADD COLUMN IF NOT EXISTS box INT NOT NULL DEFAULT 1;
 ALTER TABLE vocabulary ADD COLUMN IF NOT EXISTS review_count INT NOT NULL DEFAULT 0;
 ALTER TABLE vocabulary ADD COLUMN IF NOT EXISTS next_review_at TIMESTAMPTZ NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS idx_vocabulary_next_review ON vocabulary(next_review_at ASC, id ASC);
+
+-- Grammar skeleton (§12). The catalogue is an index, not content: a stable key,
+-- a short Chinese label, a level and an ordering. Explanations are generated on
+-- demand by the teaching kernel and cached separately, so nothing here is
+-- transcribed textbook material.
+CREATE TABLE IF NOT EXISTS grammar_point (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    key         TEXT NOT NULL UNIQUE,   -- stable identifier, e.g. "i-adj-past"
+    title_ja    TEXT NOT NULL,          -- the form itself, e.g. 「～かった」
+    title_zh    TEXT NOT NULL,          -- short Chinese label, not an explanation
+    level       TEXT NOT NULL,          -- N5 | N4 | N3 …
+    category    TEXT NOT NULL,          -- 助词 | 动词变形 | 形容词 | 句型 …
+    sort_order  INT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_grammar_point_order ON grammar_point(level, sort_order, id);
+
+-- One row per point the learner has any relationship with. Absent row = 未接触.
+CREATE TABLE IF NOT EXISTS grammar_encounter (
+    point_id     BIGINT PRIMARY KEY REFERENCES grammar_point(id) ON DELETE CASCADE,
+    status       TEXT NOT NULL,         -- encountered | understood
+    first_source TEXT,                  -- correction | lookup | browse
+    note         TEXT,                  -- the learner's own sentence that triggered it
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- CREATE TRIGGER has no IF NOT EXISTS, and this file re-runs on every startup.
+DROP TRIGGER IF EXISTS trg_grammar_encounter_updated ON grammar_encounter;
+CREATE TRIGGER trg_grammar_encounter_updated BEFORE UPDATE ON grammar_encounter
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Cache only. Safe to delete at any time; it will be regenerated.
+CREATE TABLE IF NOT EXISTS grammar_explanation (
+    point_id   BIGINT PRIMARY KEY REFERENCES grammar_point(id) ON DELETE CASCADE,
+    content    TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Links a correction back to the grammar skeleton so a real mistake registers the
+-- point automatically (§12.1: corrections are the main path, browsing is the补充).
+ALTER TABLE chat_correction_item ADD COLUMN IF NOT EXISTS grammar_key TEXT;
+CREATE INDEX IF NOT EXISTS idx_correction_item_grammar ON chat_correction_item(grammar_key);

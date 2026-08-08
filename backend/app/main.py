@@ -1096,6 +1096,68 @@ def add_vocabulary(payload: VocabularyCreate) -> dict:
     return {**row, "already_saved": already_saved}
 
 
+_GRAMMAR_SYSTEM = (
+    "你在为一个中文母语的日语学习者讲解一个语法点。\n\n"
+    "规则：\n"
+    "- 先说这个语法点到底在表达什么关系或意图，再讲形式与接续，最后给可直接套用的说法\n"
+    "- 与中文语感不同、或中文里没有对应结构时，明确点出差异，说清为什么不能照搬\n"
+    "- 若提供了学习者自己写错的句子，必须以那句为切入点讲，不要另造无关例句\n"
+    "- 例句简短、当代、口语自然；数量控制在 3 句以内\n"
+    "- 用 Markdown，但不使用 emoji 或装饰性符号；不写标题编号，不堆砌术语\n"
+    "- 不确定的地方直说，不编造规则"
+)
+
+
+class GrammarStatusUpdate(BaseModel):
+    status: str = Field(pattern="^(encountered|understood)$")
+
+
+@app.get("/grammar")
+def list_grammar() -> list[dict]:
+    repo = repository()
+    repo.sync_grammar_catalogue()
+    return repo.list_grammar_points()
+
+
+@app.get("/grammar/{key}")
+def get_grammar(key: str, refresh: bool = False) -> dict:
+    repo = repository()
+    point = repo.get_grammar_point(key)
+    if point is None:
+        raise HTTPException(status_code=404, detail="没有这个语法点。")
+    if point.get("explanation") and not refresh:
+        return point
+
+    mistakes = repo.corrections_touching(key)
+    prompt = f"语法点：{point['title_ja']}（{point['title_zh']}，{point['level']}）"
+    if mistakes:
+        lines = "\n".join(
+            f"- 原句「{m['original_fragment']}」→ 修正「{m['replacement']}」（{m['reason_zh']}）"
+            for m in mistakes
+        )
+        prompt += f"\n\n学习者在这个点上实际写错过：\n{lines}"
+    try:
+        content = llm_service().reply(
+            [{"role": "system", "content": _GRAMMAR_SYSTEM}, {"role": "user", "content": prompt}],
+            enable_thinking=False,
+            max_tokens=1_200,
+        )
+    except Exception as error:
+        raise _llm_error(error) from error
+    repo.save_grammar_explanation(key, content)
+    # Reading an explanation counts as having met the point.
+    repo.mark_grammar_encounter(key, status="encountered", source="browse")
+    return repo.get_grammar_point(key) or point
+
+
+@app.post("/grammar/{key}/status")
+def set_grammar_status(key: str, payload: GrammarStatusUpdate) -> dict:
+    updated = repository().mark_grammar_encounter(key, status=payload.status, source="browse")
+    if updated is None:
+        raise HTTPException(status_code=404, detail="没有这个语法点。")
+    return updated
+
+
 @app.get("/vocabulary")
 def list_vocabulary() -> list[dict]:
     return repository().list_vocabulary()
