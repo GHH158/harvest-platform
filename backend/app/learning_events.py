@@ -24,6 +24,28 @@ class CompanionQuestionPayload(BaseModel):
     segment_id: int | None
 
 
+class VocabularySavedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    word: str
+    reading: str | None
+    meaning: str
+
+
+class VocabularyReviewedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    correct: bool
+    box_before: int
+    box_after: int
+
+
+class ShadowingCompletedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    score: float
+
+
 class CorrectionItemEventDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -38,8 +60,33 @@ class CompanionQuestionEventDraft(BaseModel):
     payload: CompanionQuestionPayload
 
 
+class VocabularySavedEventDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["vocabulary_saved"]
+    payload: VocabularySavedPayload
+
+
+class VocabularyReviewedEventDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["vocabulary_reviewed"]
+    payload: VocabularyReviewedPayload
+
+
+class ShadowingCompletedEventDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["shadowing_completed"]
+    payload: ShadowingCompletedPayload
+
+
 LearningEventDraft = Annotated[
-    CorrectionItemEventDraft | CompanionQuestionEventDraft,
+    CorrectionItemEventDraft
+    | CompanionQuestionEventDraft
+    | VocabularySavedEventDraft
+    | VocabularyReviewedEventDraft
+    | ShadowingCompletedEventDraft,
     Field(discriminator="kind"),
 ]
 

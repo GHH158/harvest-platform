@@ -199,6 +199,23 @@ ALTER TABLE vocabulary ADD COLUMN IF NOT EXISTS review_count INT NOT NULL DEFAUL
 ALTER TABLE vocabulary ADD COLUMN IF NOT EXISTS next_review_at TIMESTAMPTZ NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS idx_vocabulary_next_review ON vocabulary(next_review_at ASC, id ASC);
 
+-- Immutable review history (M1-B, §5.11). vocabulary.box/review_count/next_review_at
+-- stay the mutable scheduling projection the review flow reads and writes; this table
+-- is the append-only fact log neither of those columns can answer questions from
+-- ("which attempt, correct or not, what box transition") since a counter cannot be
+-- unwound into individual past events. Reviews before this table existed have no
+-- recoverable history; do not backfill by guessing from review_count (§5.11).
+CREATE TABLE IF NOT EXISTS vocabulary_review_attempt (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    vocabulary_id BIGINT NOT NULL REFERENCES vocabulary(id) ON DELETE CASCADE,
+    correct       BOOLEAN NOT NULL,
+    box_before    INT NOT NULL,
+    box_after     INT NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_vocabulary_review_attempt_word
+    ON vocabulary_review_attempt(vocabulary_id, created_at DESC);
+
 -- Grammar skeleton (§12). The catalogue is an index, not content: a stable key,
 -- a short Chinese label, a level and an ordering. Explanations are generated on
 -- demand by the teaching kernel and cached separately, so nothing here is
@@ -288,10 +305,11 @@ CREATE INDEX IF NOT EXISTS idx_correction_item_grammar ON chat_correction_item(g
 CREATE TABLE IF NOT EXISTS learning_event (
     id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     schema_version TEXT NOT NULL DEFAULT 'learning-event-v1',
-    kind           TEXT NOT NULL,       -- correction_item | companion_question
+    kind           TEXT NOT NULL,       -- correction_item | companion_question | vocabulary_saved
+                                         -- | vocabulary_reviewed | shadowing_completed (§5.11)
     source_table   TEXT NOT NULL,
     source_id      BIGINT NOT NULL,
-    subject_kind   TEXT NOT NULL,       -- grammar_point (only value so far)
+    subject_kind   TEXT NOT NULL,       -- grammar_point | vocabulary_word | segment (§5.11)
     subject_key    TEXT NOT NULL,
     actor          TEXT NOT NULL DEFAULT 'user',
     confidence     REAL,
@@ -324,4 +342,19 @@ CREATE TRIGGER trg_correction_item_learning_event_delete
 DROP TRIGGER IF EXISTS trg_companion_message_learning_event_delete ON companion_message;
 CREATE TRIGGER trg_companion_message_learning_event_delete
     AFTER DELETE ON companion_message
+    FOR EACH ROW EXECUTE FUNCTION delete_learning_events_for_source();
+-- M1-B (§5.11): vocabulary_review_attempt cascades from vocabulary (ON DELETE CASCADE),
+-- so deleting a word converges both its vocabulary_saved event and every
+-- vocabulary_reviewed event from its own trigger below — no orphaned rows either way.
+DROP TRIGGER IF EXISTS trg_vocabulary_learning_event_delete ON vocabulary;
+CREATE TRIGGER trg_vocabulary_learning_event_delete
+    AFTER DELETE ON vocabulary
+    FOR EACH ROW EXECUTE FUNCTION delete_learning_events_for_source();
+DROP TRIGGER IF EXISTS trg_vocabulary_review_attempt_learning_event_delete ON vocabulary_review_attempt;
+CREATE TRIGGER trg_vocabulary_review_attempt_learning_event_delete
+    AFTER DELETE ON vocabulary_review_attempt
+    FOR EACH ROW EXECUTE FUNCTION delete_learning_events_for_source();
+DROP TRIGGER IF EXISTS trg_shadowing_attempt_learning_event_delete ON shadowing_attempt;
+CREATE TRIGGER trg_shadowing_attempt_learning_event_delete
+    AFTER DELETE ON shadowing_attempt
     FOR EACH ROW EXECUTE FUNCTION delete_learning_events_for_source();

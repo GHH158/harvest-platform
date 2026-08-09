@@ -43,13 +43,15 @@ class Repository:
         subject_key: str,
         occurred_at: Any,
         payload: dict[str, Any],
+        subject_kind: str = "grammar_point",
         confidence: float | None = None,
     ) -> bool:
         """Write one validated v1 event in its own transaction.
 
         Callers invoke this only after the source fact has committed. A malformed
-        event or event-index failure therefore cannot roll back chat or companion
-        content, and the source tables remain sufficient for idempotent replay.
+        event or event-index failure therefore cannot roll back chat, companion,
+        vocabulary or shadowing content, and the source tables remain sufficient
+        for idempotent replay.
         """
 
         validated_payload = validated_learning_event_payload(kind, payload)
@@ -60,7 +62,7 @@ class Repository:
                        (schema_version, kind, source_table, source_id, subject_kind,
                         subject_key, confidence, occurred_at, payload)
                        VALUES (:schema_version, :kind, :source_table, :source_id,
-                               'grammar_point', :subject_key, :confidence, :occurred_at,
+                               :subject_kind, :subject_key, :confidence, :occurred_at,
                                CAST(:payload AS JSONB))
                        ON CONFLICT (source_table, source_id, subject_kind, subject_key)
                        DO NOTHING RETURNING id"""
@@ -70,6 +72,7 @@ class Repository:
                     "kind": kind,
                     "source_table": source_table,
                     "source_id": source_id,
+                    "subject_kind": subject_kind,
                     "subject_key": subject_key,
                     "confidence": confidence,
                     "occurred_at": occurred_at,
@@ -79,11 +82,20 @@ class Repository:
         return inserted is not None
 
     def backfill_learning_events(self) -> list[str]:
-        """Replay legacy grammar links into the v1 event envelope, idempotently.
+        """Replay legacy grammar links, saved words and completed shadowing attempts
+        into the v1 event envelope, idempotently.
 
         `apply_schema` creates the destination table first; startup then calls this
         method before serving requests. Newly inserted keys and active events whose
         projection is missing are repaired; a healthy repeat startup is a no-op.
+
+        `vocabulary_reviewed` is deliberately absent (§5.11): `vocabulary` only ever
+        held aggregate scheduling state (`box`/`review_count`), never a per-attempt
+        history, so there is nothing real to replay — reviews before
+        `vocabulary_review_attempt` existed have no recoverable event and must not be
+        fabricated from the current count. `vocabulary_saved` and `shadowing_completed`
+        are safe: their source rows were already one-row-per-fact before this method
+        existed, so backfilling them replays real history, not a guess.
         """
 
         with self.engine.begin() as connection:
@@ -131,6 +143,35 @@ class Repository:
                 ),
                 {"schema_version": LEARNING_EVENT_SCHEMA_VERSION},
             ).scalars().all()
+            connection.execute(
+                text(
+                    """INSERT INTO learning_event
+                       (schema_version, kind, source_table, source_id, subject_kind,
+                        subject_key, actor, confidence, occurred_at, backfilled, payload)
+                       SELECT :schema_version, 'vocabulary_saved', 'vocabulary', v.id,
+                              'vocabulary_word', v.id::text, 'user', NULL, v.created_at, true,
+                              jsonb_build_object('word', v.word, 'reading', v.reading, 'meaning', v.meaning)
+                       FROM vocabulary v
+                       ON CONFLICT (source_table, source_id, subject_kind, subject_key)
+                       DO NOTHING"""
+                ),
+                {"schema_version": LEARNING_EVENT_SCHEMA_VERSION},
+            )
+            connection.execute(
+                text(
+                    """INSERT INTO learning_event
+                       (schema_version, kind, source_table, source_id, subject_kind,
+                        subject_key, actor, confidence, occurred_at, backfilled, payload)
+                       SELECT :schema_version, 'shadowing_completed', 'shadowing_attempt', sa.id,
+                              'segment', sa.segment_id::text, 'user', NULL, sa.created_at, true,
+                              jsonb_build_object('score', sa.score)
+                       FROM shadowing_attempt sa
+                       WHERE sa.status = 'ready'
+                       ON CONFLICT (source_table, source_id, subject_kind, subject_key)
+                       DO NOTHING"""
+                ),
+                {"schema_version": LEARNING_EVENT_SCHEMA_VERSION},
+            )
             missing_projection_keys = connection.execute(
                 text(
                     """SELECT DISTINCT le.subject_key
@@ -1191,13 +1232,31 @@ class Repository:
 
     def complete_shadowing_attempt(self, attempt_id: int, transcript: str, diff: list[dict[str, Any]], score: float) -> None:
         with self.engine.begin() as connection:
-            connection.execute(
+            attempt = connection.execute(
                 text("""UPDATE shadowing_attempt SET asr_text = :transcript,
                     diff_json = CAST(:diff AS JSONB), score = :score, status = 'ready', error_message = NULL
-                    WHERE id = :attempt_id"""),
+                    WHERE id = :attempt_id
+                    RETURNING segment_id, created_at"""),
                 {"attempt_id": attempt_id, "transcript": transcript, "diff": json.dumps(diff, ensure_ascii=False),
                  "score": score},
+            ).mappings().one()
+        # §5.11: occurred_at is when the recording was submitted (this row's own
+        # created_at), not when scoring finished — grading is an async job, and its
+        # queue latency is not when the learning action itself happened. asr_text and
+        # audio_path never enter the payload: only the derived score does, so the
+        # event never duplicates a recording or its full private transcript.
+        try:
+            self._record_learning_event(
+                kind="shadowing_completed",
+                source_table="shadowing_attempt",
+                source_id=attempt_id,
+                subject_kind="segment",
+                subject_key=str(attempt["segment_id"]),
+                occurred_at=attempt["created_at"],
+                payload={"score": score},
             )
+        except Exception:
+            logger.exception("Failed to record shadowing_completed learning event", extra={"attempt_id": attempt_id})
 
     def get_shadowing_attempt(self, attempt_id: int) -> dict[str, Any] | None:
         with self.engine.connect() as connection:
@@ -2027,6 +2086,22 @@ class Repository:
                 ),
                 params,
             ).mappings().one()
+        # §5.11: only a genuine new row is a new learning action. The merge-save
+        # branch above returns before reaching here, so re-saving an existing word
+        # never fires a second event. Best-effort like every other adapter: a failed
+        # index must not turn a successful save into a failed one.
+        try:
+            self._record_learning_event(
+                kind="vocabulary_saved",
+                source_table="vocabulary",
+                source_id=int(row["id"]),
+                subject_kind="vocabulary_word",
+                subject_key=str(row["id"]),
+                occurred_at=row["created_at"],
+                payload={"word": row["word"], "reading": row["reading"], "meaning": row["meaning"]},
+            )
+        except Exception:
+            logger.exception("Failed to record vocabulary_saved learning event", extra={"vocabulary_id": row["id"]})
         return self._vocabulary_row(row), False
 
     def list_vocabulary(self, *, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
@@ -2077,8 +2152,27 @@ class Repository:
             ).mappings().one_or_none()
             if current is None:
                 return None
-            new_box = min(int(current["box"]) + 1, 6) if correct else 1
+            box_before = int(current["box"])
+            new_box = min(box_before + 1, 6) if correct else 1
             next_review_at = datetime.now(UTC) + self._REVIEW_INTERVALS[new_box]
+            # §5.11: vocabulary.box/review_count/next_review_at stay the scheduling
+            # projection the review flow reads; this insert is the immutable fact log
+            # that projection alone cannot answer "which attempt, when, correct or not"
+            # from, since a counter cannot be unwound into individual past events.
+            attempt = connection.execute(
+                text(
+                    """INSERT INTO vocabulary_review_attempt
+                       (vocabulary_id, correct, box_before, box_after)
+                       VALUES (:vocabulary_id, :correct, :box_before, :box_after)
+                       RETURNING id, created_at"""
+                ),
+                {
+                    "vocabulary_id": vocabulary_id,
+                    "correct": correct,
+                    "box_before": box_before,
+                    "box_after": new_box,
+                },
+            ).mappings().one()
             row = connection.execute(
                 text(
                     """UPDATE vocabulary
@@ -2088,4 +2182,19 @@ class Repository:
                 ),
                 {"box": new_box, "next_review_at": next_review_at, "id": vocabulary_id},
             ).mappings().one()
+        try:
+            self._record_learning_event(
+                kind="vocabulary_reviewed",
+                source_table="vocabulary_review_attempt",
+                source_id=int(attempt["id"]),
+                subject_kind="vocabulary_word",
+                subject_key=str(vocabulary_id),
+                occurred_at=attempt["created_at"],
+                payload={"correct": correct, "box_before": box_before, "box_after": new_box},
+            )
+        except Exception:
+            logger.exception(
+                "Failed to record vocabulary_reviewed learning event",
+                extra={"vocabulary_id": vocabulary_id, "attempt_id": attempt["id"]},
+            )
         return self._vocabulary_row(row)

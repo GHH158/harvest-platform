@@ -106,6 +106,35 @@ def test_learning_event_payload_is_validated_by_kind() -> None:
         validated_learning_event_payload("unknown_kind", {})
 
 
+def test_m1b_adapter_payloads_are_validated_by_kind() -> None:
+    """§5.11 M1-B: vocabulary_saved, vocabulary_reviewed and shadowing_completed join
+    the same discriminated union as the M1 kinds — no shared/loose event shape."""
+    from app.learning_events import validated_learning_event_payload
+    from pydantic import ValidationError
+
+    saved = validated_learning_event_payload(
+        "vocabulary_saved", {"word": "検証", "reading": "けんしょう", "meaning": "验证"}
+    )
+    assert saved == {"word": "検証", "reading": "けんしょう", "meaning": "验证"}
+
+    reviewed = validated_learning_event_payload(
+        "vocabulary_reviewed", {"correct": True, "box_before": 1, "box_after": 2}
+    )
+    assert reviewed == {"correct": True, "box_before": 1, "box_after": 2}
+
+    shadowing = validated_learning_event_payload("shadowing_completed", {"score": 0.83})
+    assert shadowing == {"score": 0.83}
+
+    # Privacy boundary (§5.11): audio_path/asr_text are not part of the schema at all,
+    # so a caller cannot accidentally smuggle them in even if it tried.
+    with pytest.raises(ValidationError):
+        validated_learning_event_payload(
+            "shadowing_completed", {"score": 0.83, "asr_text": "雨ですね。"}
+        )
+    with pytest.raises(ValidationError):
+        validated_learning_event_payload("vocabulary_saved", {"word": "検証", "meaning": "验证"})
+
+
 def test_grammar_evidence_fingerprint_is_deterministic_and_changes_with_evidence() -> None:
     evidence = [
         {"kind": "correction", "id": 17, "created_at": "ignored", "reason_zh": "ignored"},

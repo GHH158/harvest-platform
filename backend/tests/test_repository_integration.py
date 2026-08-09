@@ -1315,3 +1315,354 @@ def test_grammar_catalogue_keeps_unseen_levels_and_prioritizes_existing_evidence
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM grammar_point WHERE key = :key"), {"key": priority_key})
         engine.dispose()
+
+
+@pytest.mark.integration
+def test_vocabulary_saved_and_reviewed_events_dual_write_and_converge_on_delete() -> None:
+    """§5.11 M1-B: a genuine new save fires vocabulary_saved (a merge-save does not);
+    every review submission both appends an immutable vocabulary_review_attempt row and
+    fires vocabulary_reviewed; deleting the word cascades to both event kinds."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    word = f"検証{uuid.uuid4().hex[:8]}"
+
+    try:
+        row, already_saved = repository.add_vocabulary(
+            word=word, reading="けんしょう", meaning="验证", part_of_speech=None, context=None
+        )
+        assert already_saved is False
+        vocabulary_id = int(row["id"])
+
+        with engine.connect() as connection:
+            saved_event = connection.execute(
+                text(
+                    """SELECT kind, subject_kind, subject_key, occurred_at, payload
+                       FROM learning_event WHERE source_table = 'vocabulary' AND source_id = :id"""
+                ),
+                {"id": vocabulary_id},
+            ).mappings().one()
+        assert saved_event["kind"] == "vocabulary_saved"
+        assert saved_event["subject_kind"] == "vocabulary_word"
+        assert saved_event["subject_key"] == str(vocabulary_id)
+        assert saved_event["payload"] == {"word": word, "reading": "けんしょう", "meaning": "验证"}
+
+        # Re-saving the same word merges instead of inserting a new row, and must not
+        # fire a second vocabulary_saved event for the same source_id.
+        _, already_saved_again = repository.add_vocabulary(
+            word=word, reading=None, meaning="验证（补充）", part_of_speech="动词", context=None
+        )
+        assert already_saved_again is True
+        with engine.connect() as connection:
+            saved_event_count = connection.execute(
+                text(
+                    "SELECT count(*) FROM learning_event WHERE source_table = 'vocabulary' AND source_id = :id"
+                ),
+                {"id": vocabulary_id},
+            ).scalar_one()
+        assert saved_event_count == 1
+
+        updated = repository.record_vocabulary_review(vocabulary_id, correct=True)
+        assert updated is not None
+        assert updated["box"] == 2
+        second = repository.record_vocabulary_review(vocabulary_id, correct=False)
+        assert second is not None
+        assert second["box"] == 1
+
+        with engine.connect() as connection:
+            review_attempts = connection.execute(
+                text(
+                    """SELECT correct, box_before, box_after FROM vocabulary_review_attempt
+                       WHERE vocabulary_id = :id ORDER BY id"""
+                ),
+                {"id": vocabulary_id},
+            ).mappings().all()
+            reviewed_events = connection.execute(
+                text(
+                    """SELECT le.subject_key, le.occurred_at, le.payload, vra.created_at AS attempt_created_at
+                       FROM learning_event le
+                       JOIN vocabulary_review_attempt vra ON vra.id = le.source_id
+                       WHERE le.source_table = 'vocabulary_review_attempt'
+                       ORDER BY le.id"""
+                ),
+            ).mappings().all()
+        assert [dict(row) for row in review_attempts] == [
+            {"correct": True, "box_before": 1, "box_after": 2},
+            {"correct": False, "box_before": 2, "box_after": 1},
+        ]
+        assert len(reviewed_events) == 2
+        for event in reviewed_events:
+            assert event["subject_key"] == str(vocabulary_id)
+            # occurred_at is the review attempt's own timestamp, not learning_event's.
+            assert event["occurred_at"] == event["attempt_created_at"]
+        assert [event["payload"] for event in reviewed_events] == [
+            {"correct": True, "box_before": 1, "box_after": 2},
+            {"correct": False, "box_before": 2, "box_after": 1},
+        ]
+
+        assert repository.delete_vocabulary(vocabulary_id) is True
+        with engine.connect() as connection:
+            remaining_attempts = connection.execute(
+                text("SELECT count(*) FROM vocabulary_review_attempt WHERE vocabulary_id = :id"),
+                {"id": vocabulary_id},
+            ).scalar_one()
+            remaining_saved_events = connection.execute(
+                text("SELECT count(*) FROM learning_event WHERE source_table = 'vocabulary' AND source_id = :id"),
+                {"id": vocabulary_id},
+            ).scalar_one()
+            remaining_reviewed_events = connection.execute(
+                text(
+                    """SELECT count(*) FROM learning_event
+                       WHERE source_table = 'vocabulary_review_attempt'
+                         AND subject_key = :subject_key"""
+                ),
+                {"subject_key": str(vocabulary_id)},
+            ).scalar_one()
+        assert remaining_attempts == 0
+        assert remaining_saved_events == 0
+        assert remaining_reviewed_events == 0
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM vocabulary WHERE word = :word"), {"word": word})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_shadowing_completed_event_uses_submission_time_and_score_only_payload() -> None:
+    """§5.11 M1-B: occurred_at is when the recording was submitted, not when scoring
+    finished; payload never carries audio_path or asr_text, only the derived score."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    material_id, tts_job_id = repository.create_material_with_job(
+        title="M1-B shadowing event test",
+        source_type="paste",
+        source_ref=None,
+        job_kind="tts",
+        payload={"text": "雨です。"},
+    )
+    shadowing_job_id: int | None = None
+    try:
+        repository.complete_reading(
+            material_id=material_id,
+            local_path="/tmp/m1b-shadowing.mp3",
+            oss_key="materials/test/m1b-shadowing.mp3",
+            bytes_count=100,
+            duration_ms=1_000,
+            segments=[{"idx": 0, "text_ja": "雨です。", "start_ms": 0, "end_ms": 1_000}],
+        )
+        segment_id = repository.get_segments(material_id)[0]["id"]
+        attempt_id, shadowing_job_id = repository.create_shadowing_submission(segment_id, "/private/rec.m4a")
+        submitted_at = repository.get_shadowing_attempt(attempt_id)["created_at"]
+
+        repository.complete_shadowing_attempt(
+            attempt_id,
+            "雨ですね、とても静かです。",
+            [{"word": "雨", "match": True}],
+            0.83,
+        )
+
+        with engine.connect() as connection:
+            event = connection.execute(
+                text(
+                    """SELECT kind, subject_kind, subject_key, occurred_at, payload
+                       FROM learning_event WHERE source_table = 'shadowing_attempt' AND source_id = :id"""
+                ),
+                {"id": attempt_id},
+            ).mappings().one()
+        assert event["kind"] == "shadowing_completed"
+        assert event["subject_kind"] == "segment"
+        assert event["subject_key"] == str(segment_id)
+        assert event["occurred_at"] == submitted_at
+        assert event["payload"] == {"score": pytest.approx(0.83)}
+        assert "audio_path" not in event["payload"]
+        assert "asr_text" not in event["payload"]
+
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": shadowing_job_id})
+        shadowing_job_id = None
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
+        with engine.connect() as connection:
+            remaining = connection.execute(
+                text("SELECT count(*) FROM learning_event WHERE source_table = 'shadowing_attempt' AND source_id = :id"),
+                {"id": attempt_id},
+            ).scalar_one()
+        assert remaining == 0
+        material_id = None
+    finally:
+        with engine.begin() as connection:
+            if shadowing_job_id is not None:
+                connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": shadowing_job_id})
+            if material_id is not None:
+                connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
+            connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": tts_job_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_vocabulary_and_shadowing_event_failures_do_not_block_the_main_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    word = f"検証{uuid.uuid4().hex[:8]}"
+
+    def fail_event_write(**_: Any) -> bool:
+        raise RuntimeError("simulated event index failure")
+
+    monkeypatch.setattr(repository, "_record_learning_event", fail_event_write)
+    try:
+        row, already_saved = repository.add_vocabulary(
+            word=word, reading=None, meaning="验证", part_of_speech=None, context=None
+        )
+        assert already_saved is False
+        vocabulary_id = int(row["id"])
+
+        updated = repository.record_vocabulary_review(vocabulary_id, correct=True)
+        assert updated is not None
+        assert updated["box"] == 2
+        with engine.connect() as connection:
+            attempt_count = connection.execute(
+                text("SELECT count(*) FROM vocabulary_review_attempt WHERE vocabulary_id = :id"),
+                {"id": vocabulary_id},
+            ).scalar_one()
+        assert attempt_count == 1
+        with engine.connect() as connection:
+            event_count = connection.execute(
+                text(
+                    """SELECT count(*) FROM learning_event
+                       WHERE (source_table = 'vocabulary' OR source_table = 'vocabulary_review_attempt')
+                         AND subject_key = :subject_key"""
+                ),
+                {"subject_key": str(vocabulary_id)},
+            ).scalar_one()
+        assert event_count == 0
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM vocabulary WHERE word = :word"), {"word": word})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_backfill_covers_vocabulary_saved_and_shadowing_completed_but_not_reviewed() -> None:
+    """§5.11 M1-B: vocabulary and completed shadowing attempts are safe to backfill
+    because each source row was already an immutable fact; a pre-existing
+    vocabulary_review_attempt row must never be backfilled into an event, and the
+    whole pass must be idempotent."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    word = f"回填{uuid.uuid4().hex[:8]}"
+    material_id, tts_job_id = repository.create_material_with_job(
+        title="M1-B backfill test",
+        source_type="paste",
+        source_ref=None,
+        job_kind="tts",
+        payload={"text": "雨です。"},
+    )
+    shadowing_job_id: int | None = None
+    try:
+        # Simulate pre-existing legacy rows written before this adapter existed, by
+        # inserting directly and skipping the repository methods that dual-write.
+        with engine.begin() as connection:
+            vocabulary_id = connection.execute(
+                text(
+                    """INSERT INTO vocabulary (word, reading, meaning)
+                       VALUES (:word, '回填', '回填测试') RETURNING id"""
+                ),
+                {"word": word},
+            ).scalar_one()
+
+        repository.complete_reading(
+            material_id=material_id,
+            local_path="/tmp/m1b-backfill.mp3",
+            oss_key="materials/test/m1b-backfill.mp3",
+            bytes_count=100,
+            duration_ms=1_000,
+            segments=[{"idx": 0, "text_ja": "雨です。", "start_ms": 0, "end_ms": 1_000}],
+        )
+        segment_id = repository.get_segments(material_id)[0]["id"]
+        attempt_id, shadowing_job_id = repository.create_shadowing_submission(segment_id, "/private/legacy.m4a")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """UPDATE shadowing_attempt
+                       SET status = 'ready', score = 0.5, asr_text = '雨ですね。'
+                       WHERE id = :id"""
+                ),
+                {"id": attempt_id},
+            )
+            review_attempt_id = connection.execute(
+                text(
+                    """INSERT INTO vocabulary_review_attempt (vocabulary_id, correct, box_before, box_after)
+                       VALUES (:vocabulary_id, true, 1, 2) RETURNING id"""
+                ),
+                {"vocabulary_id": vocabulary_id},
+            ).scalar_one()
+
+        touched = repository.backfill_learning_events()
+        assert isinstance(touched, list)
+
+        with engine.connect() as connection:
+            vocabulary_saved_count = connection.execute(
+                text("SELECT count(*) FROM learning_event WHERE source_table = 'vocabulary' AND source_id = :id"),
+                {"id": vocabulary_id},
+            ).scalar_one()
+            shadowing_completed_count = connection.execute(
+                text(
+                    "SELECT count(*) FROM learning_event WHERE source_table = 'shadowing_attempt' AND source_id = :id"
+                ),
+                {"id": attempt_id},
+            ).scalar_one()
+            reviewed_count = connection.execute(
+                text(
+                    "SELECT count(*) FROM learning_event WHERE source_table = 'vocabulary_review_attempt' AND source_id = :id"
+                ),
+                {"id": review_attempt_id},
+            ).scalar_one()
+        assert vocabulary_saved_count == 1
+        assert shadowing_completed_count == 1
+        # The explicit non-backfill declaration in §5.11: no history to replay.
+        assert reviewed_count == 0
+
+        # Idempotent: running it again must not duplicate either backfilled kind.
+        repository.backfill_learning_events()
+        with engine.connect() as connection:
+            vocabulary_saved_count_again = connection.execute(
+                text("SELECT count(*) FROM learning_event WHERE source_table = 'vocabulary' AND source_id = :id"),
+                {"id": vocabulary_id},
+            ).scalar_one()
+            shadowing_completed_count_again = connection.execute(
+                text(
+                    "SELECT count(*) FROM learning_event WHERE source_table = 'shadowing_attempt' AND source_id = :id"
+                ),
+                {"id": attempt_id},
+            ).scalar_one()
+        assert vocabulary_saved_count_again == 1
+        assert shadowing_completed_count_again == 1
+    finally:
+        with engine.begin() as connection:
+            if shadowing_job_id is not None:
+                connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": shadowing_job_id})
+            connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
+            connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": tts_job_id})
+            connection.execute(text("DELETE FROM vocabulary WHERE word = :word"), {"word": word})
+        engine.dispose()

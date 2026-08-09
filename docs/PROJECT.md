@@ -577,6 +577,21 @@ CREATE TABLE vocabulary (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 复习尝试:不可变事实表(M1-B,§5.11)。vocabulary.box/review_count/next_review_at
+-- 仍是排期用的可变投影,继续被 §5.9 的调度逻辑直接读写;这张表只多加一层历史,
+-- 不取代那三列,否则每次复习都要重算调度状态,读路径变慢且没有必要。
+-- 上线前发生的复习没有这张表,过去次数无法拆回逐次事实,不做倒推。
+CREATE TABLE vocabulary_review_attempt (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    vocabulary_id BIGINT NOT NULL REFERENCES vocabulary(id) ON DELETE CASCADE,
+    correct       BOOLEAN NOT NULL,
+    box_before    INT NOT NULL,
+    box_after     INT NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_vocabulary_review_attempt_word
+    ON vocabulary_review_attempt(vocabulary_id, created_at DESC);
+
 -- 语法目录:索引而非教材内容
 CREATE TABLE grammar_point (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -635,11 +650,12 @@ CREATE INDEX idx_companion_grammar_point
 CREATE TABLE learning_event (
     id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     schema_version TEXT NOT NULL DEFAULT 'learning-event-v1',
-    kind           TEXT NOT NULL,       -- correction_item | companion_question (更多见 §5.11)
+    kind           TEXT NOT NULL,       -- correction_item | companion_question | vocabulary_saved
+                                         -- | vocabulary_reviewed | shadowing_completed(§5.11)
     source_table   TEXT NOT NULL,       -- 原始行所在表,用于追溯与幂等回填
     source_id      BIGINT NOT NULL,
-    subject_kind   TEXT NOT NULL,       -- grammar_point(当前唯一取值,为未来扩展保留)
-    subject_key    TEXT NOT NULL,       -- 如 grammar_point.key
+    subject_kind   TEXT NOT NULL,       -- grammar_point | vocabulary_word | segment(§5.11)
+    subject_key    TEXT NOT NULL,       -- 如 grammar_point.key、vocabulary.id、segment.id
     actor          TEXT NOT NULL DEFAULT 'user',
     confidence     REAL,                -- 仅存校准过的置信值;当前模型归类没有校准,保持 NULL
     occurred_at    TIMESTAMPTZ NOT NULL,-- 原始事件真实发生时间,不是这行写入时间
@@ -654,8 +670,11 @@ CREATE INDEX idx_learning_event_subject
     WHERE rejected_at IS NULL;
 CREATE INDEX idx_learning_event_source ON learning_event(source_table, source_id);
 
--- source_table/source_id 是多态逻辑引用,无法使用单个外键。实现必须在
--- chat_correction_item / companion_message 删除触发器中同步清理对应事件。
+-- source_table/source_id 是多态逻辑引用,无法使用单个外键。每新增一个可能产生
+-- learning_event 的来源表,都要在该表的删除触发器里调用同一个
+-- delete_learning_events_for_source() 函数(schema.sql 定义),让来源行删除时
+-- 事件同步收敛。当前已覆盖 chat_correction_item / companion_message / vocabulary /
+-- vocabulary_review_attempt / shadowing_attempt。
 ```
 
 > **延续上一个项目验证过的约定**:枚举字段一律 TEXT、不加 CHECK 约束(§7.3 已写明);`updated_at` 由触发器统一维护,不要在应用层再手动设置一遍——两套机制并存容易在验收时对不上。
@@ -1103,7 +1122,7 @@ Output
 
 ### 5.11 全局学习事件契约(M1)
 
-本节是 §13.9 M1 的精确契约,按项目自己的规矩先于实现落地。范围只覆盖这次要定的三件事:证据可撤销、事件信封与旧数据回填、系统提示词目录的动态构造。M1 清单里的其余条目(生词/跟读适配器全量接入、通用 LearnerMemory / LearnerState、决策 trace)不在本次契约内,留到实现时再各自回写。
+本节是 §13.9 M1 的精确契约,按项目自己的规矩先于实现落地。第一纵向切片定过三件事:证据可撤销、事件信封与旧数据回填、系统提示词目录的动态构造。本次(M1-B)在同一套信封上追加生词存词、生词复习与跟读结果三个适配器,并新增 `vocabulary_review_attempt` 事实表。M1 清单里剩下的条目(通用 `LearnerMemory`、`LearnerState` 投影、决策 trace、多角色/圆桌)仍不在本次契约内,留到各自实现前再回写。
 
 #### 为什么是「薄信封 + 按 kind 校验的载荷」
 
@@ -1111,27 +1130,58 @@ Output
 
 折中是:`learning_event` 表本身只有信封字段(见 §4.2 DDL)——谁、关于什么、什么时候、要不要紧、算不算数;`payload` 是 JSONB,但**形状按 `kind` 在应用层(Pydantic 判别联合)校验,不是数据库约束**。新增一种 `kind` 是往判别联合里加一个分支,不改表结构,呼应 `schema_version` 与"事件类型只做可向后兼容的追加"。
 
-M1 首批只需要两种 `kind`,对应已经在跑的证据来源:
+当前定义五种 `kind`,前两种对应第一切片已经在跑的证据来源,后三种是本次(M1-B)新增:
 
 ```text
 kind="correction_item"
   source_table="chat_correction_item"
+  subject_kind="grammar_point"   subject_key=grammar_point.key
   payload = {"original": str, "replacement": str, "reason_zh": str, "category": str}
   confidence = null  # 当前模型归类没有校准值,不用 1.0 制造虚假确定性
 
 kind="companion_question"
   source_table="companion_message"
+  subject_kind="grammar_point"   subject_key=grammar_point.key
   payload = {"question": str, "material_id": int|null, "segment_id": int|null}
   confidence = null
+
+kind="vocabulary_saved"
+  source_table="vocabulary"
+  subject_kind="vocabulary_word"   subject_key=str(vocabulary.id)
+  payload = {"word": str, "reading": str|null, "meaning": str}
+  confidence = null
+  # 只在真正新增一行时触发;§5.9 的合并存词(已有的词只补空字段)不算一次新的
+  # 学习行为,不生成新事件——否则重新查一次老词会被误记成"又学了一遍"。
+
+kind="vocabulary_reviewed"
+  source_table="vocabulary_review_attempt"      # 新事实表,见下文
+  subject_kind="vocabulary_word"   subject_key=str(vocabulary.id)
+  payload = {"correct": bool, "box_before": int, "box_after": int}
+  confidence = null
+
+kind="shadowing_completed"
+  source_table="shadowing_attempt"
+  subject_kind="segment"   subject_key=str(segment.id)
+  payload = {"score": float}
+  confidence = null
+  # 只在 shadowing_attempt.status='ready'(评分成功)时触发;失败尝试不是一次
+  # 完成的练习,不生成事件。不写 audio_path 或 asr_text——原始录音与转写文本
+  # 仍只留在 shadowing_attempt,详见下文的隐私边界。
 ```
 
-`vocabulary_review`、`shadowing_attempt` 等留给 M1 清单里"扩展到全部入口"那一步,届时各自定义 payload 形状,不在本次预先猜测。
+#### 生词复习缺一张不可变事实表,新增 `vocabulary_review_attempt`
+
+`vocabulary` 上的 `box` / `review_count` / `next_review_at` 是 Leitner 调度用的聚合状态,只回答"现在该不该复习",答不出"哪一次、对没对、从几级到几级"——这类问题在 M0 就已经没有历史可查,`review_count` 只是一个计数器,推不出每一次具体发生了什么。`learning_event` 要求 `occurred_at` 是来源行的真实时间(见下条),而聚合列没有这个真实时间可取。
+
+因此新增 `vocabulary_review_attempt`(DDL 见 §4.2):每次提交复习结果先插入一行不可变记录,再照旧更新 `vocabulary` 的三个调度列;`vocabulary_reviewed` 事件的 `source_table` 指向这张新表,不是 `vocabulary`。两条路径都要写,缺一都不完整:只写事实表而不更新调度列,复习功能本身就断了;只更新调度列不写事实表,又回到原来无历史可查的状态。
+
+**上线前发生的复习不可回填,`backfill_learning_events()` 明确不处理 `vocabulary_reviewed`。** 用 `review_count` 反推出 N 条历史事件,时间只能瞎猜、对错只能瞎猜,这不是回填而是编造——比不回填更糟,因为使用者会把编造的记录当真事实信任。这段历史就是回答不出来,如实留空。`vocabulary_saved` 和 `shadowing_completed` 不受影响:它们的来源表本身逐行都是不可变事实(`vocabulary` 一词一行、`shadowing_attempt` 一次尝试一行),`created_at` 是真实发生时间,可以安全回填。
 
 #### `occurred_at` 与 `created_at` 必须分开,否则回填会撒谎
 
-`occurred_at` 取自来源行的真实时间(纠错事件用所属 `chat_correction.created_at`,陪读问题用 `companion_message.created_at`);`created_at` 是这一行 `learning_event` 自己的写入时间。回填历史数据时两者会明显不同——**所有"最近撞见""需要留意"的排序与判断必须用 `occurred_at`,不能用 `created_at`**,否则一次回填任务会让所有旧证据看起来像刚刚发生。`backfilled=true` 标记来源,不参与业务判断,只用于审计。
+`occurred_at` 取自来源行的真实时间——纠错事件用所属 `chat_correction.created_at`,陪读问题用 `companion_message.created_at`,`vocabulary_saved` 用 `vocabulary.created_at`,`vocabulary_reviewed` 用 `vocabulary_review_attempt.created_at`,`shadowing_completed` 用 `shadowing_attempt.created_at`(即**提交跟读录音的时间,不是评分算完的时间**——评分是异步 job,排队和处理耗时不是学习行为本身发生的时间,用它会让快忘掉的证据在队列拥堵时显得比实际更"新")。`created_at` 是这一行 `learning_event` 自己的写入时间。回填历史数据时两者会明显不同——**所有"最近撞见""需要留意"的排序与判断必须用 `occurred_at`,不能用 `created_at`**,否则一次回填任务会让所有旧证据看起来像刚刚发生。`backfilled=true` 标记来源,不参与业务判断,只用于审计。
 
-服务启动在建表和同步语法目录后执行幂等 `backfill_learning_events()`:从 `chat_correction_item.grammar_key` 与 `companion_grammar_evidence` 重建缺失的 v1 事件,`ON CONFLICT DO NOTHING`,并修复「已有有效事件但投影行缺失」的主体;健康状态下重复启动不重算。回填是切换读取路径的前置条件,失败时启动失败并保留旧库原状,不能带着空事件表继续提供一个看似正常但忘掉历史的系统。新聊天的来源事实先提交,事件索引再用独立事务写入;后者失败只记录错误,不得回滚用户消息、纠错和助手回复,之后可从来源表重放修复。
+服务启动在建表和同步语法目录后执行幂等 `backfill_learning_events()`:从 `chat_correction_item.grammar_key`、`companion_grammar_evidence`、`vocabulary` 全表与 `shadowing_attempt WHERE status='ready'` 重建缺失的 v1 事件,`ON CONFLICT DO NOTHING`,并修复「已有有效事件但投影行缺失」的主体;健康状态下重复启动不重算,重复执行同一批来源行不产生重复事件。回填是切换读取路径的前置条件,失败时启动失败并保留旧库原状,不能带着空事件表继续提供一个看似正常但忘掉历史的系统。`vocabulary_reviewed` 不在回填范围内,理由见上条。新的来源事实(聊天消息、陪读回答、生词、复习提交、跟读评分)先提交,事件索引再用独立事务写入;后者失败只记录错误,不得回滚已经成立的主路径结果——存词、提交复习、完成跟读都不能因为事件记录失败而失败,之后可从来源表重放修复。
 
 #### 撤销:证据可以被判定为误标,而不必删除整条纠错
 
@@ -1144,6 +1194,14 @@ kind="companion_question"
 界面入口放在语法详情页(`GrammarDetailView`),每条证据(写错的原句 / 问过的问题)旁边一个「标错了」——不动聊天或陪读的界面,不扩大改动面。成功后保留明确的「已忽略…… / 撤销」入口,不能让证据立即消失后只剩一个用户无法触达的 `unreject` API。
 
 **遗留读取路径的收尾**:`grammar_encounter` 的投影查询改为 `JOIN learning_event` 按 `subject_key` 关联。切换前必须完成上述幂等回填;`chat_correction_item.grammar_key` 与 `companion_grammar_evidence` 两张表继续写入(向后兼容、便于审计和重新回填),但**不再是投影的读取路径**。两种来源行删除时由数据库触发器清理多态事件引用,业务层再重算受影响投影,避免级联删除留下幽灵证据。
+
+生词与跟读这三种 `kind` **本次不建 reject/unreject、也不建任何读取投影**——`vocabulary_saved` / `vocabulary_reviewed` / `shadowing_completed` 目前没有消费者,纯粹是为将来的 `LearnerMemory` / `LearnerState` 预先积累事实索引。「标错了」这类撤销入口只在真正有投影读取事件、错误关联会显式影响使用者可见状态时才有意义;凭空加一个没人读的撤销按钮是抢跑,留到真正的消费者出现再回写。
+
+#### 生词与跟读适配器的删除收敛与隐私边界
+
+- **删除收敛**(§7.3 接口闸第 5 条「删除后重算」的具体落实):`vocabulary` 与 `shadowing_attempt` 的删除触发器复用既有的 `delete_learning_events_for_source()` 函数,分别清理 `source_table='vocabulary'` 与 `source_table='shadowing_attempt'` 的事件。`vocabulary_review_attempt.vocabulary_id` 是 `ON DELETE CASCADE`,删词连带删掉它名下所有复习尝试;那些尝试各自的触发器再清理对应的 `vocabulary_reviewed` 事件——删一个词,连带的存词事件和全部复习事件跟着收敛,不留孤儿行。跟读没有独立的删除入口,靠 `segment → shadowing_attempt` 的既有级联触达。
+- **跟读的隐私边界**:`shadowing_completed` 的 `payload` 只有 `score`。`shadowing_attempt.audio_path`(本地录音文件路径)与 `asr_text`(转写出的完整原文,可能包含练习之外的口误或私人内容)**不得**复制进事件——录音和转写原文只留在 `shadowing_attempt` 一处,事件层不重复存一份可识别使用者说了什么的内容。要看原文或听录音,查 `shadowing_attempt` 本身,不查事件表。
+- 生词侧不存在等价的隐私顾虑:`vocabulary_saved` 的 `word` / `reading` / `meaning` 是词典内容,不是使用者的私人文本;`context`(记忆提示)之所以不放进 payload,是因为它对"这个词什么时候被学会了"这件事没有增量信息,不是隐私考虑,单纯不重复存。
 
 #### 系统提示词动态构造,但当前保留完整轻量目录
 
@@ -1451,6 +1509,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-08 | 完成 §13.10 Alice 方法论正式审计:覆盖官网序章、15 个工程章节、5 个产品观章节、附录和 7 篇实践故事,建立「直接采用 / 转译采用 / 证据后采用 / 明确排除」矩阵。将接口版本、调用来源、隐私默认、最小权限、撤销与成本加入共同验收闸;细化 M1–M6 的角色隔离、情绪/执行双通道、中心化圆桌、虚构声明和动态场景一致性;明确不照搬通用朋友圈、数值好感、虚拟消费、过早五层基础设施与大规模 Agent 阵容;记录本地密钥/学习历史静态保护和现有 Markdown 标题强调条的待审计风险。M1 继续只允许先设计契约,尚未进入编码 |
 | 2026-08-08 | M1 精确契约定稿(§4.2 `learning_event` 表、§5.11):按讨论中判断优先级排定的三件事——①证据可撤销,新增 `rejected_at`,撤销一条误标的语法关联不必删除整条纠错,模型当初的判断保留为历史事实,用户的否定是新事实而非编辑;②`learning_event` 定为薄信封(id/kind/来源引用/主体/`occurred_at`/`confidence`)+ 按 `kind` 在应用层校验的 JSONB `payload`,不做跨来源的共享字段,避免接口闸第 6 条警告的含混 event 结构;`occurred_at` 与写入时间 `created_at` 严格分开,回填不得让旧证据看起来像刚发生;③系统提示词里的语法目录改为按 `grammar_encounter` 现状动态裁剪,不再无差别携带全部条目,此条不依赖 `learning_event`,可独立先行实现。`chat_correction_item.grammar_key` 与 `companion_grammar_evidence` 降为遗留写入路径,投影改读 `learning_event`,避免同一份事实两个查询入口分叉。本次只定稿契约,未写代码 |
 | 2026-08-09 | M1 第一纵向子切片进入实现并完成阻断审查修正:新增版本化 `learning_event`、按 `kind` 的 Pydantic 判别载荷、纠错/陪读双写、幂等旧数据回填、来源删除触发清理、证据 reject/unreject 与 iOS 撤销入口;事件索引从聊天主事务拆开,失败不回滚真实对话。推翻上一版「等级覆盖率解锁 + 40 条硬上限」的目录裁剪——实测当前 N5 已占 38 条,解锁后只给 N4 留 2 个位置,会让高级使用者的第一次真实错误永远无法登记;改为完整保留当前 67 条轻量目录,仅用学习状态调整顺序。后端 158 项常规测试、独立临时 PostgreSQL 16 项集成测试与 iOS 42 项测试全部通过。此切片不代表 M1 完成,生词/复习、跟读、通用 LearnerMemory / LearnerState 和决策 trace 尚未实施 |
+| 2026-08-09 | M1-B:生词存词/复习与跟读结果接入事件契约(§5.11),先定精确契约再实现。`_record_learning_event` 从写死 `grammar_point` 改为接受任意 `subject_kind`,新增 `vocabulary_saved`(来源 `vocabulary`,仅新增行触发,合并存词不算)、`vocabulary_reviewed`(来源新表 `vocabulary_review_attempt`)、`shadowing_completed`(来源 `shadowing_attempt`,仅评分成功触发,`payload` 只含 `score`,不复制 `audio_path`/`asr_text`)三种 kind,均沿用「来源事实先提交、事件索引后台最佳努力写入」与既有删除触发器收敛的模式。新增 `vocabulary_review_attempt` 作为复习的不可变事实表,`vocabulary.box/review_count/next_review_at` 仍是调度用的可变投影,两者都写、缺一不可;`backfill_learning_events()` 扩展到回填 `vocabulary_saved` 与状态 `ready` 的 `shadowing_completed`,明确不回填 `vocabulary_reviewed`——上线前的复习次数无法拆回逐次事实,如实记为不可回填而非编造。跟读 `occurred_at` 取录音提交时间,不取异步评分完成时间。三种新 kind 本次不建 reject/unreject 或任何读取投影,只做事实索引,留给未来消费者。新增 2 项契约单测与 4 项独立 PostgreSQL 集成测试(幂等回填两次不重复、删除级联收敛、事件写入失败隔离、`occurred_at` 时间语义)。原生沙盒无 Postgres/Docker/Homebrew,改用 `pgserver`(纯 Python 分发的可嵌入 PostgreSQL 16 二进制,不依赖 root 或系统安装)在本机拉起一个独立临时实例验证:后端全部 179 项测试(含新增 4 项与既有 16 项集成测试)全部通过,重复跑两次结果一致,测试结束后动态表(`vocabulary` / `vocabulary_review_attempt` / `shadowing_attempt` / `learning_event`)均清零、无孤儿行,`ruff` 通过。iOS 未改动。`LearnerMemory`、通用 `LearnerState`、决策 trace 与多角色/圆桌仍未实施 |
 
 ---
 
@@ -1673,7 +1732,7 @@ Harvest 不应只是阅读、聊天、查词、语法等 AI 功能的集合,也�
 
 目标:用一套逻辑契约连接所有学习入口,同时保留原业务表作为事实原文。
 
-> `learning_event` 的精确表结构、旧数据回填、证据撤销与系统提示词目录契约见 §4.2 / §5.11,已经进入第一纵向子切片实现。`LearnerMemory`、通用 `LearnerState`、决策 trace 与生词/跟读适配器仍是概念性描述,进入编码前还要各自回写精确契约。
+> `learning_event` 的精确表结构、旧数据回填、证据撤销、系统提示词目录契约与生词/跟读适配器见 §4.2 / §5.11,均已落地实现。`LearnerMemory`、通用 `LearnerState`、决策 trace 与多角色/圆桌仍是概念性描述,进入编码前还要各自回写精确契约。
 
 - 定义统一 `LearningEvent`:稳定 id、`kind`、`source_table/source_id`、`occurred_at`、`subject_kind/subject_key`、`actor` 与必要的置信信息;
 - 契约从第一版就带 `schema_version` 与兼容策略;事件类型只做可向后兼容的追加,不得让每个入口发明自己的字段组合。这里的领域事件用于事实索引和重放,与未来 UI 流式事件是两套接口,不得混用;
