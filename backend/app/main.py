@@ -1356,6 +1356,10 @@ def preview_role_perspective(role_id: str, payload: RolePreviewRequest) -> dict:
             reason="单角色预览未产生可读取的结构化观点",
             duration_ms=int((time.perf_counter() - started) * 1000),
             decision_context=error.decision_context,
+            detail={
+                "repair_used": error.decision_context.get("repair_used", False),
+                "generation_calls": error.decision_context.get("generation_calls", 1),
+            },
         )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
     except Exception as error:
@@ -1381,6 +1385,8 @@ def preview_role_perspective(role_id: str, payload: RolePreviewRequest) -> dict:
             "claim_type": perspective.claim_type,
             "focus_tags": perspective.focus_tags,
             "attempted_providers": context.get("attempted_providers", []),
+            "repair_used": context.get("repair_used", False),
+            "generation_calls": context.get("generation_calls", 1),
         },
     )
     return {"role": role.public_profile(), "perspective": perspective.model_dump()}

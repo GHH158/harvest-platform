@@ -15,8 +15,10 @@ from typing import Any
 from app.config import ROOT_DIR, get_settings
 from app.main import app
 from app.role_blind import (
+    BLIND_WITHHELD_FIELDS,
     ROLE_BLIND_PROTOCOL_VERSION,
     candidate_role_ids,
+    split_perspective_for_blind_review,
     summarize_role_traces,
 )
 from app.roles import ROLE_MANIFEST_VERSION, ROLE_PERSPECTIVE_PROMPT_VERSION
@@ -114,6 +116,11 @@ def main() -> int:
         "started_at": started_at.isoformat(),
         "manifest_version": ROLE_MANIFEST_VERSION,
         "prompt_version": ROLE_PERSPECTIVE_PROMPT_VERSION,
+        "withheld_fields": list(BLIND_WITHHELD_FIELDS),
+        "review_note_zh": (
+            "按关注角度与表达方式判断每位候选是谁；"
+            f"{'、'.join(BLIND_WITHHELD_FIELDS)} 已移入答案键，因为服务端会强制它匹配角色。"
+        ),
         "completed_calls": 0,
         "cases": [],
     }
@@ -161,11 +168,12 @@ def main() -> int:
                         "context_zh": case["context_zh"],
                     },
                 )
+                withheld: dict[str, Any] = {}
                 if response.is_success:
-                    candidate_result: dict[str, Any] = {
-                        "status": "ok",
-                        "perspective": response.json()["perspective"],
-                    }
+                    shown, withheld = split_perspective_for_blind_review(
+                        response.json()["perspective"]
+                    )
+                    candidate_result: dict[str, Any] = {"status": "ok", "perspective": shown}
                 else:
                     candidate_result = {
                         "status": "failed",
@@ -173,7 +181,10 @@ def main() -> int:
                         "error_zh": "这位匿名候选没有产生可评审的结构化观点。",
                     }
                 case_result["candidates"][candidate] = candidate_result
-                key_artifact["candidate_roles"][case["id"]][candidate] = role_id
+                key_artifact["candidate_roles"][case["id"]][candidate] = {
+                    "role_id": role_id,
+                    "withheld": withheld,
+                }
                 blind_artifact["completed_calls"] += 1
                 blind_artifact["updated_at"] = datetime.now(UTC).isoformat()
                 _write_private_json(blind_path, blind_artifact)
@@ -184,6 +195,21 @@ def main() -> int:
         new_rows = [row for row in after_rows if row["id"] not in before_ids]
 
     trace_verification = summarize_role_traces(new_rows, expected_calls=EXPECTED_CALLS)
+    # A leaked answer key voids the whole run (§5.14), so prove the sheet is clean
+    # before it is ever opened rather than trusting the split upstream.
+    leaked = sorted(
+        {
+            field
+            for case in blind_artifact["cases"]
+            for candidate in case["candidates"].values()
+            for field in candidate.get("perspective", {})
+            if field in BLIND_WITHHELD_FIELDS
+        }
+    )
+    if leaked:
+        raise RuntimeError(
+            f"匿名评审表泄漏了答案键字段 {leaked}，本轮作废；修好拆分后必须重新取得调用授权。"
+        )
     successful_calls = sum(
         candidate["status"] == "ok"
         for case in blind_artifact["cases"]

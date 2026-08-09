@@ -11,6 +11,7 @@ from app.role_blind import (
     ROLE_BLIND_PARTICIPANTS,
     ROLE_BLIND_PROTOCOL_VERSION,
     candidate_role_ids,
+    split_perspective_for_blind_review,
     summarize_role_traces,
 )
 from app.roles import (
@@ -155,8 +156,29 @@ def test_format_repair_tracks_the_model_that_produced_the_final_perspective() ->
         "prompt_version": ROLE_PERSPECTIVE_PROMPT_VERSION,
         "manifest_version": ROLE_MANIFEST_VERSION,
         "attempted_providers": ["dashscope", "deepseek"],
+        "repair_used": True,
+        "generation_calls": 2,
     }
     assert "_decision_context" not in perspective.model_dump()
+
+
+def test_unaided_perspective_is_distinguishable_from_a_repaired_one() -> None:
+    """The endpoint enforces the primary focus tag, so "30/30 aligned" proves nothing.
+
+    Whether the model reached that on its own has to be recorded separately.
+    """
+
+    role = role_definition("aoi")
+    assert role is not None
+
+    class CompliantLLM:
+        def reply_with_metadata(self, messages: list[dict[str, str]], **options: Any) -> LLMReply:
+            return LLMReply(perspective_json(), "dashscope", "qwen3.7-max", ("dashscope",))
+
+    perspective = generate_role_perspective(CompliantLLM(), role, [])  # type: ignore[arg-type]
+
+    assert perspective.decision_context["repair_used"] is False
+    assert perspective.decision_context["generation_calls"] == 1
 
 
 def test_role_alignment_mismatch_is_repaired_with_the_roles_own_focus() -> None:
@@ -286,3 +308,56 @@ def test_blind_trace_summary_rejects_missing_or_stale_prompt_records() -> None:
     assert summary["recorded_traces"] == 30
     assert stale["complete"] is False
     assert any("prompt_version" in issue for issue in stale["issues"])
+
+
+def test_blind_trace_summary_separates_unaided_alignment_from_repaired() -> None:
+    rows = [
+        {
+            "status": "ok",
+            "model_provider": "dashscope",
+            "prompt_version": ROLE_PERSPECTIVE_PROMPT_VERSION,
+            "subject_key": role_id,
+            "detail": {"repair_used": index < 2},
+        }
+        for role_id in ROLE_BLIND_PARTICIPANTS
+        for index in range(10)
+    ]
+
+    summary = summarize_role_traces(rows, expected_calls=30)
+
+    # Six repaired calls are still a complete run — one repair is inside the contract —
+    # but the reviewer has to be able to see them.
+    assert summary["repair_used_calls"] == 6
+    assert summary["unaided_alignment_calls"] == 24
+    assert summary["complete"] is True
+
+
+def test_blind_sheet_withholds_the_server_enforced_focus_tags_only() -> None:
+    """§5.14: focus_tags is validated against the role manifest, so showing it to the
+    reviewer hands over the mapping. claim_type stays — judging honest hedging is part
+    of the review."""
+
+    perspective = json.loads(perspective_json())
+
+    shown, withheld = split_perspective_for_blind_review(perspective)
+
+    assert withheld == {"focus_tags": perspective["focus_tags"]}
+    assert "focus_tags" not in shown
+    assert shown["claim_type"] == perspective["claim_type"]
+    assert shown["headline_zh"] == perspective["headline_zh"]
+    assert shown["analysis_zh"] == perspective["analysis_zh"]
+    assert set(shown) | set(withheld) == set(perspective)
+
+
+def test_every_participants_primary_tag_would_identify_it_if_shown() -> None:
+    """The reason the field is withheld, stated as a test rather than a comment."""
+
+    primary = {
+        role_id: set(role.primary_focus_tags)
+        for role_id in ROLE_BLIND_PARTICIPANTS
+        if (role := role_definition(role_id)) is not None
+    }
+
+    for role_id, tags in primary.items():
+        others = set().union(*(other for key, other in primary.items() if key != role_id))
+        assert tags - others, f"{role_id} 的主视角标签与其他角色完全重合，盲测将无法区分"

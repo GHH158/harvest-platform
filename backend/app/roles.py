@@ -292,13 +292,28 @@ def _reply_with_metadata(
     return LLMReply(content=llm.reply(messages, **options), provider=None, model=None)
 
 
-def _decision_context(response: LLMReply, role: RoleDefinition) -> dict[str, Any]:
+def _decision_context(
+    response: LLMReply,
+    role: RoleDefinition,
+    *,
+    repair_used: bool,
+) -> dict[str, Any]:
+    """`repair_used` is the difference between a role that held its own lens and one
+    the server had to pull back into it.
+
+    The endpoint rejects any output missing the role's primary focus tag, so a blind
+    run's "30/30 stayed in lens" is true by construction and says nothing. Only this
+    flag distinguishes a prompt that works from one that merely survives correction.
+    """
+
     return {
         "model_provider": response.provider,
         "model_name": response.model,
         "prompt_version": ROLE_PERSPECTIVE_PROMPT_VERSION,
         "manifest_version": role.manifest_version,
         "attempted_providers": list(response.attempted_providers),
+        "repair_used": repair_used,
+        "generation_calls": 2 if repair_used else 1,
     }
 
 
@@ -306,8 +321,10 @@ def _attach_decision_context(
     perspective: RolePerspective,
     response: LLMReply,
     role: RoleDefinition,
+    *,
+    repair_used: bool,
 ) -> RolePerspective:
-    perspective._decision_context = _decision_context(response, role)
+    perspective._decision_context = _decision_context(response, role, repair_used=repair_used)
     return perspective
 
 
@@ -341,7 +358,9 @@ def generate_role_perspective(
         max_tokens=1_000,
     )
     try:
-        return _attach_decision_context(_parse_role_perspective(response.content, role), response, role)
+        return _attach_decision_context(
+            _parse_role_perspective(response.content, role), response, role, repair_used=False
+        )
     except RoleOutputError as first_error:
         required_tags = " / ".join(role.primary_focus_tags)
         repair_messages = [
@@ -370,15 +389,18 @@ def generate_role_perspective(
             raise RoleOutputError(
                 f"{first_error}；格式修复调用失败：{repair_error}",
                 failure_stage="repair_call",
-                decision_context=_decision_context(response, role),
+                decision_context=_decision_context(response, role, repair_used=True),
             ) from repair_error
         try:
             return _attach_decision_context(
-                _parse_role_perspective(repaired_response.content, role), repaired_response, role
+                _parse_role_perspective(repaired_response.content, role),
+                repaired_response,
+                role,
+                repair_used=True,
             )
         except RoleOutputError as second_error:
             raise RoleOutputError(
                 f"角色模型连续两次未返回可读取的结构化结果。首次错误：{first_error}；修复错误：{second_error}",
                 failure_stage=second_error.failure_stage,
-                decision_context=_decision_context(repaired_response, role),
+                decision_context=_decision_context(repaired_response, role, repair_used=True),
             ) from second_error

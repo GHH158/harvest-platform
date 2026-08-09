@@ -579,11 +579,17 @@ def test_role_catalogue_and_single_preview_keep_identity_server_owned(
                 "prompt_version": "role-perspective-v2",
                 "manifest_version": "role-manifest-v1",
                 "attempted_providers": ["dashscope", "deepseek"],
+                "repair_used": False,
+                "generation_calls": 1,
             },
+            # repair_used reaches the trace so a blind run can report how often the
+            # role held its own lens without the server pulling it back (§5.14).
             "detail": {
                 "claim_type": "usage_tendency",
                 "focus_tags": ["naturalness", "register"],
                 "attempted_providers": ["dashscope", "deepseek"],
+                "repair_used": False,
+                "generation_calls": 1,
             },
         }
     ]

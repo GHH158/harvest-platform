@@ -10,6 +10,26 @@ from .roles import ROLE_PERSPECTIVE_PROMPT_VERSION
 ROLE_BLIND_PROTOCOL_VERSION = "m2-blind-v2"
 ROLE_BLIND_PARTICIPANTS = ("aoi", "kei", "lin")
 
+# `focus_tags` is the answer key, not an observation. The endpoint rejects any
+# output whose tags miss the role's own primary tag, so 葵 always carries
+# naturalness/register, 圭 grammar_structure and 林 chinese_transfer — and since each
+# case has exactly one candidate per role, a reviewer who sees the tags recovers the
+# whole mapping without reading a word. M2 asks whether the *lens and wording* are
+# distinguishable (§13.9), so the tags go to the answer key and the prose does not.
+# `claim_type` stays visible: judging whether unsupported claims were honestly marked
+# as inference or uncertainty is one of the things the reviewer is there to do.
+BLIND_WITHHELD_FIELDS = ("focus_tags",)
+
+
+def split_perspective_for_blind_review(
+    perspective: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split one structured perspective into (shown to reviewer, kept in answer key)."""
+
+    shown = {key: value for key, value in perspective.items() if key not in BLIND_WITHHELD_FIELDS}
+    withheld = {key: value for key, value in perspective.items() if key in BLIND_WITHHELD_FIELDS}
+    return shown, withheld
+
 
 def candidate_role_ids(case_id: str) -> tuple[str, ...]:
     """Return a stable but non-obvious candidate order for one blind-test case.
@@ -47,6 +67,11 @@ def summarize_role_traces(
         expected_for_role = expected_calls // len(ROLE_BLIND_PARTICIPANTS)
         if subjects[role_id] != expected_for_role:
             issues.append(f"角色 {role_id} 应有 {expected_for_role} 条 trace，实际 {subjects[role_id]} 条。")
+    # Reported, never used to fail the run: one repair round is inside the §5.14
+    # contract. It is here because "30/30 carried the primary tag" is true by
+    # construction, so the only honest measure of whether role-perspective-v2 works
+    # is how often the model got there without being corrected.
+    repaired = sum(1 for row in traces if bool((row.get("detail") or {}).get("repair_used")))
     return {
         "expected_calls": expected_calls,
         "recorded_traces": len(traces),
@@ -54,6 +79,8 @@ def summarize_role_traces(
         "providers": dict(sorted(providers.items())),
         "prompt_versions": prompt_versions,
         "subjects": dict(sorted(subjects.items())),
+        "repair_used_calls": repaired,
+        "unaided_alignment_calls": len(traces) - repaired,
         "complete": not issues,
         "issues": issues,
     }

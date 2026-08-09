@@ -109,6 +109,11 @@ CREATE TABLE IF NOT EXISTS chat_message (
     content       TEXT NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Stays in the baseline despite being an INSERT (§7.5): it must run before the
+-- foreign key below, and that same foreign key is what makes it permanently a
+-- no-op. ON DELETE CASCADE means chat_message can never again hold a session_id
+-- without a chat_session row, so no later run can match anything. The guard here
+-- is a constraint rather than a WHERE clause.
 INSERT INTO chat_session (id, topic)
 SELECT DISTINCT session_id,
     CASE WHEN session_id = 'personal' THEN '旧版聊天' ELSE '旧版聊天 · ' || session_id END
@@ -250,12 +255,7 @@ ALTER TABLE grammar_encounter ADD COLUMN IF NOT EXISTS last_source TEXT;
 ALTER TABLE grammar_encounter ADD COLUMN IF NOT EXISTS last_evidence_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE grammar_encounter ADD COLUMN IF NOT EXISTS browsed_at TIMESTAMPTZ;
 ALTER TABLE grammar_encounter ADD COLUMN IF NOT EXISTS status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
-UPDATE grammar_encounter SET last_source = first_source WHERE last_source IS NULL;
-UPDATE grammar_encounter SET browsed_at = created_at
-WHERE browsed_at IS NULL AND (first_source = 'browse' OR last_source = 'browse');
--- Before status_source existed, only an explicit user action could create understood.
-UPDATE grammar_encounter SET status_source = 'manual'
-WHERE status = 'understood' AND status_source <> 'manual';
+-- The three provenance backfills for pre-M0 rows moved to migrations/0002 (§7.5).
 -- CREATE TRIGGER has no IF NOT EXISTS, and this file re-runs on every startup.
 DROP TRIGGER IF EXISTS trg_grammar_encounter_updated ON grammar_encounter;
 CREATE TRIGGER trg_grammar_encounter_updated BEFORE UPDATE ON grammar_encounter
@@ -384,8 +384,9 @@ CREATE TABLE IF NOT EXISTS learner_memory (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (kind, subject_kind, subject_key)
 );
-DROP INDEX IF EXISTS idx_learner_memory_active;
-CREATE INDEX idx_learner_memory_active
+-- Redefinition of this index moved to migrations/0004 (§7.5); the baseline only
+-- has to create it once for a fresh database.
+CREATE INDEX IF NOT EXISTS idx_learner_memory_active
     ON learner_memory(kind, latest_evidence_at DESC);
 DROP TRIGGER IF EXISTS trg_learner_memory_updated ON learner_memory;
 CREATE TRIGGER trg_learner_memory_updated BEFORE UPDATE ON learner_memory
@@ -406,13 +407,7 @@ CREATE TABLE IF NOT EXISTS learner_memory_preference (
 DROP TRIGGER IF EXISTS trg_learner_memory_preference_updated ON learner_memory_preference;
 CREATE TRIGGER trg_learner_memory_preference_updated BEFORE UPDATE ON learner_memory_preference
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
--- One-time, idempotent migration from M1-C's combined row shape.
-INSERT INTO learner_memory_preference (kind, subject_kind, subject_key, dismissed_at)
-SELECT kind, subject_kind, subject_key, dismissed_at
-FROM learner_memory WHERE dismissed_at IS NOT NULL
-ON CONFLICT (kind, subject_kind, subject_key) DO UPDATE SET
-    dismissed_at = LEAST(learner_memory_preference.dismissed_at, EXCLUDED.dismissed_at);
-UPDATE learner_memory SET dismissed_at = NULL WHERE dismissed_at IS NOT NULL;
+-- The one-time move of dismissed_at into this table lives in migrations/0003 (§7.5).
 
 -- Background decision records (M1-D, full contract in §5.13). Event indexing,
 -- projection rebuilds and memory derivation are all designed to fail without

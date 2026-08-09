@@ -2196,6 +2196,12 @@ def test_decision_trace_records_success_and_locates_the_failing_stage(
             connection.execute(text("DELETE FROM learner_memory"))
             connection.execute(text("DELETE FROM learner_memory_preference"))
             connection.execute(text("DELETE FROM decision_trace"))
+            # §11.6: deleting the material removes the companion evidence and, via the
+            # trigger, its learning_event — but the grammar_encounter projection is
+            # rebuilt by the application layer, which nothing here calls. The leftover
+            # verb-te row then sorted ahead of another test's N4 point on the next run
+            # against the same database.
+            connection.execute(text("DELETE FROM grammar_encounter"))
         engine.dispose()
 
 
