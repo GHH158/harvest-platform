@@ -389,3 +389,30 @@ CREATE INDEX IF NOT EXISTS idx_learner_memory_active
 DROP TRIGGER IF EXISTS trg_learner_memory_updated ON learner_memory;
 CREATE TRIGGER trg_learner_memory_updated BEFORE UPDATE ON learner_memory
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Background decision records (M1-D, full contract in §5.13). Event indexing,
+-- projection rebuilds and memory derivation are all designed to fail without
+-- taking the user's action down with them; the price is that they fail silently.
+-- This table is their account of themselves: who ran, under which rule version,
+-- about which subject, whether it worked, and which stage broke. Metadata and
+-- references only — never the learner's own text, which stays in the source
+-- tables that evidence_refs points at (§5.13 privacy boundary).
+CREATE TABLE IF NOT EXISTS decision_trace (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    schema_version TEXT NOT NULL DEFAULT 'decision-trace-v1',
+    call_source    TEXT NOT NULL,
+    status         TEXT NOT NULL,   -- ok | failed
+    failure_stage  TEXT,
+    reason         TEXT NOT NULL,
+    rule_version   TEXT,
+    subject_kind   TEXT,
+    subject_key    TEXT,
+    evidence_refs  JSONB NOT NULL DEFAULT '[]'::jsonb,
+    duration_ms    INTEGER NOT NULL,
+    detail         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_decision_trace_recent
+    ON decision_trace(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_decision_trace_failed
+    ON decision_trace(call_source, created_at DESC) WHERE status = 'failed';

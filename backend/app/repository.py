@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,6 +13,7 @@ from sqlalchemy import Engine, text
 from .grammar_catalogue import catalogue_rows
 from .learner_memory import (
     LEARNER_MEMORY_SCHEMA_VERSION,
+    RECURRING_ERROR_RULE_VERSION,
     RECURRING_ERROR_WINDOW_DAYS,
     build_memory_guidance,
     derive_recurring_error_memories,
@@ -24,6 +26,11 @@ logger = logging.getLogger(__name__)
 # §5.11: JLPT levels from most to least basic. Learning state may change prompt
 # ordering, but it must never hide an unseen point from recurrence detection.
 GRAMMAR_LEVEL_ORDER = ("N5", "N4", "N3", "N2", "N1")
+
+# §5.13: background decision records. Traces are diagnostics, not facts, so they
+# expire; the learning history they describe stays in the source tables.
+DECISION_TRACE_SCHEMA_VERSION = "decision-trace-v1"
+DECISION_TRACE_RETENTION_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,141 @@ class Job:
 class Repository:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
+
+    def _record_decision_trace(
+        self,
+        *,
+        call_source: str,
+        status: str,
+        reason: str,
+        duration_ms: int,
+        failure_stage: str | None = None,
+        rule_version: str | None = None,
+        subject_kind: str | None = None,
+        subject_key: str | None = None,
+        evidence_refs: list[Any] | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """Record what a background enhancement path just did (§5.13).
+
+        Swallows its own failures on purpose: observability must never become a new
+        way for the thing it observes to break. A disk hiccup here should cost a
+        diagnostic row, not turn "the memory rebuild failed but chat was fine" into
+        "chat failed too". Written in its own transaction for the same reason.
+
+        `reason` and `detail` carry metadata only — never the learner's own text.
+        Follow `evidence_refs` back to the source tables when the original wording
+        is needed; copying it here would create a second place to protect and
+        delete, and this table has no deletion trigger following the sources.
+        """
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """INSERT INTO decision_trace
+                           (schema_version, call_source, status, failure_stage, reason,
+                            rule_version, subject_kind, subject_key, evidence_refs,
+                            duration_ms, detail)
+                           VALUES (:schema_version, :call_source, :status, :failure_stage,
+                                   :reason, :rule_version, :subject_kind, :subject_key,
+                                   CAST(:evidence_refs AS JSONB), :duration_ms,
+                                   CAST(:detail AS JSONB))"""
+                    ),
+                    {
+                        "schema_version": DECISION_TRACE_SCHEMA_VERSION,
+                        "call_source": call_source,
+                        "status": status,
+                        "failure_stage": failure_stage,
+                        "reason": reason,
+                        "rule_version": rule_version,
+                        "subject_kind": subject_kind,
+                        "subject_key": subject_key,
+                        "evidence_refs": json.dumps(evidence_refs or [], ensure_ascii=False),
+                        "duration_ms": duration_ms,
+                        "detail": json.dumps(detail or {}, ensure_ascii=False),
+                    },
+                )
+        except Exception:
+            logger.exception("Failed to record decision trace", extra={"call_source": call_source})
+
+    def _record_event_with_trace(
+        self,
+        *,
+        call_source: str,
+        subject_kind: str,
+        subject_key: str,
+        source_id: int,
+        event: dict[str, Any],
+    ) -> None:
+        """Index one adapter's event, best-effort, and say so in the trace (§5.13).
+
+        The single-event adapters (saved word, review attempt, finished shadowing)
+        all share this shape: the source fact is already committed, so a failure
+        here costs the index entry and nothing else.
+        """
+        started = time.perf_counter()
+        try:
+            self._record_learning_event(**event)
+        except Exception:
+            logger.exception(f"Failed to record {event['kind']} learning event", extra={"source_id": source_id})
+            self._record_decision_trace(
+                call_source=call_source,
+                status="failed",
+                failure_stage="insert_event",
+                reason=f"{event['kind']} 事件写入失败，来源行已提交且不受影响",
+                rule_version=LEARNING_EVENT_SCHEMA_VERSION,
+                subject_kind=subject_kind,
+                subject_key=subject_key,
+                evidence_refs=[source_id],
+                duration_ms=int((time.perf_counter() - started) * 1000),
+            )
+            return
+        self._record_decision_trace(
+            call_source=call_source,
+            status="ok",
+            reason=f"已索引 {event['kind']} 事件",
+            rule_version=LEARNING_EVENT_SCHEMA_VERSION,
+            subject_kind=subject_kind,
+            subject_key=subject_key,
+            evidence_refs=[source_id],
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+
+    def list_decision_traces(
+        self,
+        *,
+        call_source: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        conditions: list[str] = []
+        parameters: dict[str, Any] = {"limit": limit}
+        if call_source is not None:
+            conditions.append("call_source = :call_source")
+            parameters["call_source"] = call_source
+        if status is not None:
+            conditions.append("status = :status")
+            parameters["status"] = status
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    f"""SELECT * FROM decision_trace {where}
+                        ORDER BY created_at DESC, id DESC LIMIT :limit"""
+                ),
+                parameters,
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def prune_decision_traces(self, *, retention_days: int = DECISION_TRACE_RETENTION_DAYS) -> int:
+        """Diagnostics are not facts: every real learning fact lives in the source
+        tables and `learning_event`, so dropping old traces loses no history."""
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                text("DELETE FROM decision_trace WHERE created_at < now() - make_interval(days => :days)"),
+                {"days": retention_days},
+            )
+        return result.rowcount
 
     def _record_learning_event(
         self,
@@ -103,6 +245,7 @@ class Repository:
         existed, so backfilling them replays real history, not a guess.
         """
 
+        started = time.perf_counter()
         with self.engine.begin() as connection:
             correction_keys = connection.execute(
                 text(
@@ -225,6 +368,17 @@ class Repository:
         # rebuild belongs here too — quietly, since a missing memory must not stop
         # the service from starting the way a missing event index would.
         self._rebuild_learner_memories_quietly()
+        # Startup is the natural place to expire diagnostics (§5.13): traces describe
+        # history, they are not history, so dropping old ones loses no learning fact.
+        pruned = self.prune_decision_traces()
+        self._record_decision_trace(
+            call_source="learning_event_backfill",
+            status="ok",
+            reason=f"回填后需重算投影的主体 {len(keys)} 个，裁剪过期 trace {pruned} 行",
+            rule_version=LEARNING_EVENT_SCHEMA_VERSION,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            detail={"reconciled": len(keys), "pruned_traces": pruned},
+        )
         return keys
 
     def find_material_by_source_url(self, url: str) -> dict[str, Any] | None:
@@ -765,12 +919,28 @@ class Repository:
             )
         # Event indexing, projection and memory are enhancements. They run only after
         # the chat transaction commits and cannot make a successful turn look failed.
-        for event in pending_learning_events:
-            try:
-                self._record_learning_event(**event)
+        # Which is exactly why they leave a trace (§5.13): silent best-effort work
+        # otherwise gives nobody a way to ask why a point never registered.
+        if pending_learning_events:
+            started = time.perf_counter()
+            indexed = 0
+            failure_stage: str | None = None
+            for event in pending_learning_events:
+                try:
+                    self._record_learning_event(**event)
+                except Exception:
+                    logger.exception(
+                        "Failed to record correction learning event",
+                        extra={"source_id": event["source_id"], "subject_key": event["subject_key"]},
+                    )
+                    failure_stage = failure_stage or "insert_event"
+                    continue
+                indexed += 1
                 # Only the grammar association feeds the grammar skeleton; the
                 # category event exists for the fact layer and has no projection.
-                if event["subject_kind"] == "grammar_point":
+                if event["subject_kind"] != "grammar_point":
+                    continue
+                try:
                     self.mark_grammar_encounter(
                         str(event["subject_key"]),
                         status="encountered",
@@ -778,13 +948,23 @@ class Repository:
                         note=str(event["payload"]["original"]),
                         invalidate_explanation=True,
                     )
-            except Exception:
-                logger.exception(
-                    "Failed to record correction learning event",
-                    extra={"source_id": event["source_id"], "subject_key": event["subject_key"]},
-                )
-        if pending_learning_events:
+                except Exception:
+                    logger.exception(
+                        "Failed to project correction onto the grammar skeleton",
+                        extra={"subject_key": event["subject_key"]},
+                    )
+                    failure_stage = failure_stage or "project_grammar"
             self._rebuild_learner_memories_quietly()
+            self._record_decision_trace(
+                call_source="chat_correction_index",
+                status="failed" if failure_stage else "ok",
+                failure_stage=failure_stage,
+                reason=f"索引 {indexed}/{len(pending_learning_events)} 条纠错事件",
+                rule_version=LEARNING_EVENT_SCHEMA_VERSION,
+                evidence_refs=[int(event["source_id"]) for event in pending_learning_events],
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                detail={"indexed": indexed, "expected": len(pending_learning_events)},
+            )
         return dict(user), stored_correction, dict(assistant)
 
     def chat_corrections(
@@ -980,12 +1160,31 @@ class Repository:
 
         Memory is personalisation on top of a chat turn or a deletion that already
         succeeded; per the degradation gate, losing it costs a paragraph of prompt
-        context, not the user's action. The next rebuild repairs it from events.
+        context, not the user's action. The next rebuild repairs it from events —
+        and either way §5.13 gets a row saying which happened.
         """
+        started = time.perf_counter()
         try:
-            self.rebuild_learner_memories()
+            subject_keys = self.rebuild_learner_memories()
         except Exception:
             logger.exception("Failed to rebuild learner memories")
+            self._record_decision_trace(
+                call_source="learner_memory_rebuild",
+                status="failed",
+                failure_stage="derive",
+                reason="记忆重算失败，聊天与删除主流程未受影响",
+                rule_version=RECURRING_ERROR_RULE_VERSION,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+            )
+            return
+        self._record_decision_trace(
+            call_source="learner_memory_rebuild",
+            status="ok",
+            reason=f"重算后有效记忆 {len(subject_keys)} 条",
+            rule_version=RECURRING_ERROR_RULE_VERSION,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            detail={"memories": len(subject_keys), "subject_keys": subject_keys},
+        )
 
     def list_learner_memories(self, *, include_dismissed: bool = True) -> list[dict[str, Any]]:
         where = "" if include_dismissed else "WHERE dismissed_at IS NULL"
@@ -1414,18 +1613,21 @@ class Repository:
         # queue latency is not when the learning action itself happened. asr_text and
         # audio_path never enter the payload: only the derived score does, so the
         # event never duplicates a recording or its full private transcript.
-        try:
-            self._record_learning_event(
-                kind="shadowing_completed",
-                source_table="shadowing_attempt",
-                source_id=attempt_id,
-                subject_kind="segment",
-                subject_key=str(attempt["segment_id"]),
-                occurred_at=attempt["created_at"],
-                payload={"score": score},
-            )
-        except Exception:
-            logger.exception("Failed to record shadowing_completed learning event", extra={"attempt_id": attempt_id})
+        self._record_event_with_trace(
+            call_source="shadowing_completed_index",
+            subject_kind="segment",
+            subject_key=str(attempt["segment_id"]),
+            source_id=attempt_id,
+            event={
+                "kind": "shadowing_completed",
+                "source_table": "shadowing_attempt",
+                "source_id": attempt_id,
+                "subject_kind": "segment",
+                "subject_key": str(attempt["segment_id"]),
+                "occurred_at": attempt["created_at"],
+                "payload": {"score": score},
+            },
+        )
 
     def get_shadowing_attempt(self, attempt_id: int) -> dict[str, Any] | None:
         with self.engine.connect() as connection:
@@ -1946,24 +2148,52 @@ class Repository:
                 if inserted is not None:
                     inserted_keys.append(key)
         assert message_data is not None
-        for key in inserted_keys:
-            self._record_learning_event(
-                kind="companion_question",
-                source_table="companion_message",
-                source_id=message_id,
-                subject_key=key,
-                occurred_at=message_data["created_at"],
-                payload={
-                    "question": message_data["content"],
-                    "material_id": message_data["material_id"],
-                    "segment_id": message_data["segment_id"],
-                },
+        started = time.perf_counter()
+        try:
+            for key in inserted_keys:
+                self._record_learning_event(
+                    kind="companion_question",
+                    source_table="companion_message",
+                    source_id=message_id,
+                    subject_key=key,
+                    occurred_at=message_data["created_at"],
+                    payload={
+                        "question": message_data["content"],
+                        "material_id": message_data["material_id"],
+                        "segment_id": message_data["segment_id"],
+                    },
+                )
+                self.mark_grammar_encounter(
+                    key,
+                    status="encountered",
+                    source="companion",
+                    invalidate_explanation=True,
+                )
+        except Exception:
+            # The caller already treats this whole path as supplementary to the
+            # teaching answer; the trace is so the gap is answerable afterwards.
+            self._record_decision_trace(
+                call_source="companion_grammar_index",
+                status="failed",
+                failure_stage="insert_event",
+                reason="陪读语法证据登记失败，教学回答未受影响",
+                rule_version=LEARNING_EVENT_SCHEMA_VERSION,
+                subject_kind="grammar_point",
+                evidence_refs=[message_id],
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                detail={"expected": len(inserted_keys)},
             )
-            self.mark_grammar_encounter(
-                key,
-                status="encountered",
-                source="companion",
-                invalidate_explanation=True,
+            raise
+        if inserted_keys:
+            self._record_decision_trace(
+                call_source="companion_grammar_index",
+                status="ok",
+                reason=f"登记 {len(inserted_keys)} 个明确询问的语法点",
+                rule_version=LEARNING_EVENT_SCHEMA_VERSION,
+                subject_kind="grammar_point",
+                evidence_refs=[message_id],
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                detail={"subject_keys": inserted_keys},
             )
         return inserted_keys
 
@@ -2259,18 +2489,21 @@ class Repository:
         # branch above returns before reaching here, so re-saving an existing word
         # never fires a second event. Best-effort like every other adapter: a failed
         # index must not turn a successful save into a failed one.
-        try:
-            self._record_learning_event(
-                kind="vocabulary_saved",
-                source_table="vocabulary",
-                source_id=int(row["id"]),
-                subject_kind="vocabulary_word",
-                subject_key=str(row["id"]),
-                occurred_at=row["created_at"],
-                payload={"word": row["word"], "reading": row["reading"], "meaning": row["meaning"]},
-            )
-        except Exception:
-            logger.exception("Failed to record vocabulary_saved learning event", extra={"vocabulary_id": row["id"]})
+        self._record_event_with_trace(
+            call_source="vocabulary_saved_index",
+            subject_kind="vocabulary_word",
+            subject_key=str(row["id"]),
+            source_id=int(row["id"]),
+            event={
+                "kind": "vocabulary_saved",
+                "source_table": "vocabulary",
+                "source_id": int(row["id"]),
+                "subject_kind": "vocabulary_word",
+                "subject_key": str(row["id"]),
+                "occurred_at": row["created_at"],
+                "payload": {"word": row["word"], "reading": row["reading"], "meaning": row["meaning"]},
+            },
+        )
         return self._vocabulary_row(row), False
 
     def list_vocabulary(self, *, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
@@ -2351,19 +2584,19 @@ class Repository:
                 ),
                 {"box": new_box, "next_review_at": next_review_at, "id": vocabulary_id},
             ).mappings().one()
-        try:
-            self._record_learning_event(
-                kind="vocabulary_reviewed",
-                source_table="vocabulary_review_attempt",
-                source_id=int(attempt["id"]),
-                subject_kind="vocabulary_word",
-                subject_key=str(vocabulary_id),
-                occurred_at=attempt["created_at"],
-                payload={"correct": correct, "box_before": box_before, "box_after": new_box},
-            )
-        except Exception:
-            logger.exception(
-                "Failed to record vocabulary_reviewed learning event",
-                extra={"vocabulary_id": vocabulary_id, "attempt_id": attempt["id"]},
-            )
+        self._record_event_with_trace(
+            call_source="vocabulary_reviewed_index",
+            subject_kind="vocabulary_word",
+            subject_key=str(vocabulary_id),
+            source_id=int(attempt["id"]),
+            event={
+                "kind": "vocabulary_reviewed",
+                "source_table": "vocabulary_review_attempt",
+                "source_id": int(attempt["id"]),
+                "subject_kind": "vocabulary_word",
+                "subject_key": str(vocabulary_id),
+                "occurred_at": attempt["created_at"],
+                "payload": {"correct": correct, "box_before": box_before, "box_after": new_box},
+            },
+        )
         return self._vocabulary_row(row)

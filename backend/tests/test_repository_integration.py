@@ -1929,3 +1929,185 @@ def test_backfill_indexes_every_correction_category_and_rebuilds_memories() -> N
             connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
             connection.execute(text("DELETE FROM learner_memory"))
         engine.dispose()
+
+
+@pytest.mark.integration
+def test_decision_trace_records_success_and_locates_the_failing_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§5.13 / M1 pass condition: a silent background path must leave enough metadata
+    to find the entry point, the rule version and the stage that broke."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    session_id = f"test-{uuid.uuid4()}"
+    with engine.begin() as connection:
+        # decision_trace is global diagnostics, not scoped to a session, so other
+        # tests in the same database leave rows behind. Start from a known state.
+        connection.execute(text("DELETE FROM decision_trace"))
+    try:
+        repository.create_chat_session(
+            session_id=session_id, topic="trace", starter_id=None, assistant_content="始めましょう。"
+        )
+        repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="随时",
+            assistant_content="いつでも",
+            correction=_correction("随时", "いつでも", "word_choice"),
+        )
+
+        indexed = repository.list_decision_traces(call_source="chat_correction_index")
+        assert len(indexed) == 1
+        assert indexed[0]["status"] == "ok"
+        assert indexed[0]["failure_stage"] is None
+        assert indexed[0]["rule_version"] == "learning-event-v1"
+        assert indexed[0]["detail"] == {"indexed": 1, "expected": 1}
+        assert indexed[0]["duration_ms"] >= 0
+        # The memory rebuild that follows the turn is accounted for separately.
+        rebuilds = repository.list_decision_traces(call_source="learner_memory_rebuild")
+        assert rebuilds and rebuilds[0]["status"] == "ok"
+
+        # Now break the rebuild and confirm the failure is attributable.
+        def fail_rebuild(**_: Any) -> list[str]:
+            raise RuntimeError("simulated failure")
+
+        monkeypatch.setattr(repository, "rebuild_learner_memories", fail_rebuild)
+        repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="随时2",
+            assistant_content="いつでも",
+            correction=_correction("随时2", "いつでも", "word_choice"),
+        )
+
+        failed = repository.list_decision_traces(status="failed")
+        assert len(failed) == 1
+        assert failed[0]["call_source"] == "learner_memory_rebuild"
+        assert failed[0]["failure_stage"] == "derive"
+        assert failed[0]["rule_version"] == "recurring-error-pattern-v1"
+        # The chat turn itself still succeeded and was still indexed.
+        assert len(repository.list_decision_traces(call_source="chat_correction_index")) == 2
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM learner_memory"))
+            connection.execute(text("DELETE FROM decision_trace"))
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_decision_trace_never_stores_the_learner_text_and_expires() -> None:
+    """§5.13 privacy boundary and retention: the trace holds references and counts,
+    not the sentence the learner wrote, and old rows are pruned at startup."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    session_id = f"test-{uuid.uuid4()}"
+    secret = f"私密句子{uuid.uuid4().hex}"
+    with engine.begin() as connection:
+        # decision_trace is global diagnostics, not scoped to a session, so other
+        # tests in the same database leave rows behind. Start from a known state.
+        connection.execute(text("DELETE FROM decision_trace"))
+    try:
+        repository.create_chat_session(
+            session_id=session_id, topic="隐私", starter_id=None, assistant_content="始めましょう。"
+        )
+        repository.complete_chat_turn(
+            session_id=session_id,
+            user_content=secret,
+            assistant_content="修正",
+            correction=_correction(secret, "修正", "grammar"),
+        )
+
+        with engine.connect() as connection:
+            dumped = connection.execute(
+                text("SELECT reason, detail::text, evidence_refs::text FROM decision_trace")
+            ).mappings().all()
+        assert dumped
+        for row in dumped:
+            for value in row.values():
+                assert secret not in str(value)
+
+        # Retention: a row older than the window goes, a fresh one stays.
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """INSERT INTO decision_trace
+                       (call_source, status, reason, duration_ms, created_at)
+                       VALUES ('learner_memory_rebuild', 'ok', '旧记录', 1,
+                               now() - make_interval(days => 31))"""
+                )
+            )
+        before = len(repository.list_decision_traces(limit=200))
+        assert repository.prune_decision_traces() == 1
+        assert len(repository.list_decision_traces(limit=200)) == before - 1
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM learner_memory"))
+            connection.execute(text("DELETE FROM decision_trace"))
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_trace_write_failure_cannot_break_the_operation_it_observes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§5.13: observability must not become a new failure mode for the thing it
+    observes — a broken trace would otherwise take the degradation gate down too."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    word = f"検証{uuid.uuid4().hex[:8]}"
+    with engine.begin() as connection:
+        # decision_trace is global diagnostics, not scoped to a session, so other
+        # tests in the same database leave rows behind. Start from a known state.
+        connection.execute(text("DELETE FROM decision_trace"))
+    try:
+        # A malformed trace (duration_ms is NOT NULL) makes the insert fail inside
+        # the recorder. It must absorb that itself and return normally.
+        repository._record_decision_trace(
+            call_source="learner_memory_rebuild",
+            status="ok",
+            reason="故意写坏的 trace",
+            duration_ms=None,  # type: ignore[arg-type]
+        )
+        assert repository.list_decision_traces() == []
+
+        # With tracing broken for every call, the observed operation still succeeds
+        # and its learning event is still indexed.
+        original = Repository._record_decision_trace
+        monkeypatch.setattr(
+            Repository,
+            "_record_decision_trace",
+            lambda self, **kwargs: original(self, **{**kwargs, "duration_ms": None}),
+        )
+        row, already_saved = repository.add_vocabulary(
+            word=word, reading=None, meaning="验证", part_of_speech=None, context=None
+        )
+
+        assert already_saved is False
+        assert row["word"] == word
+        with engine.connect() as connection:
+            indexed = connection.execute(
+                text("SELECT count(*) FROM learning_event WHERE source_table = 'vocabulary' AND source_id = :id"),
+                {"id": int(row["id"])},
+            ).scalar_one()
+        assert indexed == 1
+        assert repository.list_decision_traces() == []
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM vocabulary WHERE word = :word"), {"word": word})
+            connection.execute(text("DELETE FROM decision_trace"))
+        engine.dispose()

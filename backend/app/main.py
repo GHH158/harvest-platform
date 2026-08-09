@@ -1272,6 +1272,25 @@ def restore_learner_memory(memory_id: int) -> dict:
     return updated
 
 
+@app.get("/learner/traces")
+def list_decision_traces(
+    call_source: str | None = Query(default=None, max_length=64),
+    status_filter: str | None = Query(default=None, alias="status", pattern="^(ok|failed)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[dict]:
+    """What the silent background paths actually did (§5.13).
+
+    A troubleshooting entry point, not a user-facing one: the third acceptance gate
+    says the interface must not put scheduling and table management in front of the
+    learner, so this stays backend-only.
+    """
+    return repository().list_decision_traces(
+        call_source=call_source,
+        status=status_filter,
+        limit=limit,
+    )
+
+
 @app.get("/vocabulary")
 def list_vocabulary() -> list[dict]:
     return repository().list_vocabulary()
