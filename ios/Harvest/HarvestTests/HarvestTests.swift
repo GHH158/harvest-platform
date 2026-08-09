@@ -499,6 +499,43 @@ struct HarvestTests {
         #expect(StubURLProtocol.requestedRequests.allSatisfy { $0.httpMethod == "POST" })
     }
 
+    @Test func learnerMemoryDecodesExplainableAndDismissedState() throws {
+        let memory = try JSONDecoder().decode(LearnerMemory.self, from: """
+        {"id":5,"kind":"recurring_error_pattern","subject_kind":"correction_category","subject_key":"naturalness","content":"最近在自然度上反复被纠正。","reason":"90 天内有 4 条依据。","confidence":"moderate","evidence_count":4,"evidence_refs":[21,22,23,24],"rule_version":"recurring-error-pattern-v1","latest_evidence_at":"2026-08-09T10:00:00Z","dismissed_at":"2026-08-09T11:00:00Z"}
+        """.data(using: .utf8)!)
+
+        #expect(memory.subjectKind == "correction_category")
+        #expect(memory.evidenceCount == 4)
+        #expect(memory.evidenceRefs == [21, 22, 23, 24])
+        #expect(memory.isDismissed)
+    }
+
+    @Test func learnerMemoryControlsUseListDismissAndRestoreEndpoints() async throws {
+        resetStub()
+        let baseURL = URL(string: "https://harvest.example")!
+        let listURL = baseURL.appending(path: "learner/memories")
+        let dismissURL = baseURL.appending(path: "learner/memories/5/dismiss")
+        let restoreURL = baseURL.appending(path: "learner/memories/5/restore")
+        let active = """
+        {"id":5,"kind":"recurring_error_pattern","subject_kind":"correction_category","subject_key":"naturalness","content":"最近在自然度上反复被纠正。","reason":"90 天内有 4 条依据。","confidence":"moderate","evidence_count":4,"evidence_refs":[21,22,23,24],"rule_version":"recurring-error-pattern-v1","latest_evidence_at":"2026-08-09T10:00:00Z","dismissed_at":null}
+        """
+        let dismissed = active.replacingOccurrences(of: "\"dismissed_at\":null", with: "\"dismissed_at\":\"2026-08-09T11:00:00Z\"")
+        StubURLProtocol.responses[listURL] = "[\(active)]".data(using: .utf8)!
+        StubURLProtocol.responses[dismissURL] = dismissed.data(using: .utf8)!
+        StubURLProtocol.responses[restoreURL] = active.data(using: .utf8)!
+        let client = APIClient(baseURL: baseURL, session: stubSession())
+
+        let listed = try await client.learnerMemories()
+        let muted = try await client.dismissLearnerMemory(id: 5)
+        let restored = try await client.restoreLearnerMemory(id: 5)
+
+        #expect(listed.first?.id == 5)
+        #expect(muted.isDismissed)
+        #expect(!restored.isDismissed)
+        #expect(StubURLProtocol.requestedURLs == [listURL, dismissURL, restoreURL])
+        #expect(StubURLProtocol.requestedRequests.map(\.httpMethod) == ["GET", "POST", "POST"])
+    }
+
     @Test func topicDeckShowsEveryTopicBeforeRepeatingAndAvoidsImmediateRepeat() {
         let topics = (0..<16).map {
             ChatTopic(id: "topic-\($0)", category: "分类", titleJA: "テーマ\($0)", hintZH: "主题\($0)")

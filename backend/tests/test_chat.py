@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from app import main
 from app.chat import (
+    CHAT_PROMPT_VERSION,
     CHAT_SYSTEM_PROMPT,
     ChatOutputError,
     assistant_content,
@@ -16,6 +17,7 @@ from app.chat import (
     topic_for,
 )
 from app.learner_memory import build_memory_guidance
+from app.llm import LLMReply
 from app.prompts import INTERACTIVE_TEACHING_CORE_PROMPT
 from fastapi import HTTPException
 
@@ -133,6 +135,30 @@ def test_invalid_output_gets_exactly_one_repair_attempt() -> None:
     ]
     assert "Repair the supplied model output" in llm.calls[1][0]["content"]
     assert llm.calls[1][1]["content"] == "not json"
+
+
+def test_repaired_chat_turn_tracks_the_model_that_produced_the_final_contract() -> None:
+    class MetadataLLM:
+        def __init__(self) -> None:
+            self.responses = iter(
+                [
+                    LLMReply("not json", "dashscope", "qwen3.7-max", ("dashscope",)),
+                    LLMReply(model_json(), "deepseek", "deepseek-v4-flash", ("dashscope", "deepseek")),
+                ]
+            )
+
+        def reply_with_metadata(self, messages: list[dict[str, str]], **options: Any) -> LLMReply:
+            return next(self.responses)
+
+    turn = generate_chat_turn(MetadataLLM(), [])  # type: ignore[arg-type]
+    turn = suppress_follow_up(turn, [{"role": "assistant", "content": "何ですか？"}])
+
+    assert turn.decision_context == {
+        "model_provider": "deepseek",
+        "model_name": "deepseek-v4-flash",
+        "prompt_version": CHAT_PROMPT_VERSION,
+        "attempted_providers": ["dashscope", "deepseek"],
+    }
 
 
 def test_two_invalid_outputs_return_explicit_error() -> None:

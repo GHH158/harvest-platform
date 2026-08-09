@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from .grammar_catalogue import GRAMMAR_CATALOGUE
-from .llm import LLMService
+from .llm import LLMReply, LLMService
 from .prompts import INTERACTIVE_TEACHING_CORE_PROMPT
 
 CorrectionCategory = Literal["grammar", "word_choice", "naturalness", "register", "orthography"]
+CHAT_PROMPT_VERSION = "chat-turn-v1"
 
 
 class StarterTopic(BaseModel):
@@ -186,6 +187,7 @@ class ChatModelTurn(BaseModel):
     # Optional on purpose: a required question made every single turn end in one, which
     # turned conversation into interrogation (measured: 18 of 18 replies).
     follow_up_ja: str | None = Field(default=None, max_length=1_000)
+    _decision_context: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     @field_validator("reply_ja")
     @classmethod
@@ -200,6 +202,10 @@ class ChatModelTurn(BaseModel):
     def strip_optional_text(cls, value: str | None) -> str | None:
         stripped = (value or "").strip()
         return stripped or None
+
+    @property
+    def decision_context(self) -> dict[str, Any]:
+        return dict(self._decision_context)
 
 
 class ChatOutputError(RuntimeError):
@@ -320,14 +326,16 @@ def parse_chat_turn(raw: str) -> ChatModelTurn:
 
 
 def generate_chat_turn(llm: LLMService, messages: list[dict[str, str]]) -> ChatModelTurn:
-    raw = llm.reply(
+    response = _reply_with_metadata(
+        llm,
         messages,
         enable_thinking=False,
         json_mode=True,
         max_tokens=1_200,
     )
+    raw = response.content
     try:
-        return parse_chat_turn(raw)
+        return _attach_decision_context(parse_chat_turn(raw), response)
     except ChatOutputError as first_error:
         repair_messages = [
             {
@@ -340,18 +348,43 @@ def generate_chat_turn(llm: LLMService, messages: list[dict[str, str]]) -> ChatM
             },
             {"role": "user", "content": raw[:12_000]},
         ]
-        repaired = llm.reply(
+        repaired_response = _reply_with_metadata(
+            llm,
             repair_messages,
             enable_thinking=False,
             json_mode=True,
             max_tokens=1_200,
         )
+        repaired = repaired_response.content
         try:
-            return parse_chat_turn(repaired)
+            return _attach_decision_context(parse_chat_turn(repaired), repaired_response)
         except ChatOutputError as second_error:
             raise ChatOutputError(
                 f"聊天模型连续两次未返回可读取的结构化结果。首次错误：{first_error}；修复错误：{second_error}"
             ) from second_error
+
+
+def _reply_with_metadata(
+    llm: LLMService,
+    messages: list[dict[str, str]],
+    **options: Any,
+) -> LLMReply:
+    metadata_reply = getattr(llm, "reply_with_metadata", None)
+    if callable(metadata_reply):
+        return metadata_reply(messages, **options)
+    # Lightweight test doubles and one-release integrations may only implement the
+    # old reply() contract. Keep them working, but make the missing route explicit.
+    return LLMReply(content=llm.reply(messages, **options), provider=None, model=None)
+
+
+def _attach_decision_context(turn: ChatModelTurn, response: LLMReply) -> ChatModelTurn:
+    turn._decision_context = {
+        "model_provider": response.provider,
+        "model_name": response.model,
+        "prompt_version": CHAT_PROMPT_VERSION,
+        "attempted_providers": list(response.attempted_providers),
+    }
+    return turn
 
 
 def assistant_content(turn: ChatModelTurn) -> str:

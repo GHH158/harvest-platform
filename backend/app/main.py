@@ -814,7 +814,11 @@ def post_companion(payload: CompanionRequest) -> dict:
     )
     if turn.grammar_keys:
         try:
-            repo.record_companion_grammar_evidence(int(user["id"]), turn.grammar_keys)
+            repo.record_companion_grammar_evidence(
+                int(user["id"]),
+                turn.grammar_keys,
+                decision_context=turn.decision_context,
+            )
         except Exception:
             # Personalisation is supplementary: a failed evidence projection must not
             # make a successful teaching answer look failed to the learner.
@@ -913,6 +917,7 @@ def post_chat_message(session_id: str, payload: ChatMessageCreate) -> dict:
         user_content=message,
         assistant_content=assistant_content(turn),
         correction=correction_payload(turn),
+        decision_context=turn.decision_context,
     )
     return {"user": user, "correction": correction, "assistant": assistant}
 
@@ -969,6 +974,7 @@ def post_chat(payload: ChatRequest) -> dict:
         assistant_content=assistant_content(turn),
         correction=correction_payload(turn),
         create_session_topic=topic,
+        decision_context=turn.decision_context,
     )
     return {"user": user, "correction": correction, "assistant": assistant}
 

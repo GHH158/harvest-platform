@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from .config import Settings
+
+
+@dataclass(frozen=True)
+class LLMReply:
+    """One successful response plus the route that actually produced it."""
+
+    content: str
+    provider: str | None
+    model: str | None
+    attempted_providers: tuple[str, ...] = ()
 
 
 class LLMService:
@@ -25,16 +36,39 @@ class LLMService:
         json_mode: bool = False,
         max_tokens: int | None = None,
     ) -> str:
+        return self.reply_with_metadata(
+            messages,
+            enable_thinking=enable_thinking,
+            json_mode=json_mode,
+            max_tokens=max_tokens,
+        ).content
+
+    def reply_with_metadata(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        enable_thinking: bool | None = None,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+    ) -> LLMReply:
         providers = self._provider_order()
         errors: list[str] = []
+        attempted: list[str] = []
         for index, provider in enumerate(providers):
+            attempted.append(provider)
             try:
-                return self._reply_with(
+                content = self._reply_with(
                     provider,
                     messages,
                     enable_thinking=enable_thinking,
                     json_mode=json_mode,
                     max_tokens=max_tokens,
+                )
+                return LLMReply(
+                    content=content,
+                    provider=provider,
+                    model=self._model_for(provider),
+                    attempted_providers=tuple(attempted),
                 )
             except (httpx.HTTPError, RuntimeError) as error:
                 errors.append(f"{provider}: {error}")
@@ -42,6 +76,11 @@ class LLMService:
                 if is_last or not self.settings.llm_fallback_on_error:
                     raise RuntimeError("；".join(errors)) from error
         raise RuntimeError("没有可用的文本模型。")
+
+    def _model_for(self, provider: str) -> str:
+        if provider == "dashscope":
+            return self.settings.dashscope_chat_model
+        return self.settings.deepseek_model
 
     def _provider_order(self) -> list[str]:
         configured = self.settings.llm_provider.strip().lower()
@@ -73,11 +112,11 @@ class LLMService:
         if provider == "dashscope":
             base_url = self.settings.dashscope_chat_base_url
             api_key = self.settings.dashscope_api_key
-            model = self.settings.dashscope_chat_model
+            model = self._model_for(provider)
         else:
             base_url = self.settings.deepseek_base_url
             api_key = self.settings.deepseek_api_key
-            model = self.settings.deepseek_model
+            model = self._model_for(provider)
         assert api_key
         payload: dict[str, Any] = {
             "model": model,

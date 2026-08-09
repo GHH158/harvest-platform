@@ -362,9 +362,10 @@ CREATE TRIGGER trg_shadowing_attempt_learning_event_delete
 -- Learner memory (M1-C, full contract in §5.12). A claim about the *person* spanning
 -- many objects — "recently keeps being corrected on particles" — as opposed to
 -- LearnerState, which is per-object (grammar_encounter already is one). Every column
--- here is recomputed from learning_event by a fixed rule, with exactly one exception:
--- dismissed_at is the learner's explicit rejection, a new fact rather than something
--- derivable from evidence, so a rebuild must never clear it.
+-- here is recomputed from learning_event by a fixed rule. The learner's separate
+-- "do not use this category" preference lives below, so deleting source evidence can
+-- remove every derived sentence and stale evidence reference without forgetting that
+-- explicit preference.
 CREATE TABLE IF NOT EXISTS learner_memory (
     id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     schema_version     TEXT NOT NULL DEFAULT 'learner-memory-v1',
@@ -378,17 +379,40 @@ CREATE TABLE IF NOT EXISTS learner_memory (
     evidence_refs      JSONB NOT NULL,  -- learning_event ids, so every claim is traceable
     rule_version       TEXT NOT NULL,
     latest_evidence_at TIMESTAMPTZ NOT NULL,  -- from the event's occurred_at, not write time
-    dismissed_at       TIMESTAMPTZ,
+    dismissed_at       TIMESTAMPTZ,  -- legacy migration column; runtime reads the preference table
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (kind, subject_kind, subject_key)
 );
-CREATE INDEX IF NOT EXISTS idx_learner_memory_active
-    ON learner_memory(kind, latest_evidence_at DESC)
-    WHERE dismissed_at IS NULL;
+DROP INDEX IF EXISTS idx_learner_memory_active;
+CREATE INDEX idx_learner_memory_active
+    ON learner_memory(kind, latest_evidence_at DESC);
 DROP TRIGGER IF EXISTS trg_learner_memory_updated ON learner_memory;
 CREATE TRIGGER trg_learner_memory_updated BEFORE UPDATE ON learner_memory
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- A suppression preference contains no learner sentence or evidence reference. It may
+-- outlive a currently supported memory so that the system does not start mentioning the
+-- same category again when evidence later returns.
+CREATE TABLE IF NOT EXISTS learner_memory_preference (
+    kind         TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_key  TEXT NOT NULL,
+    dismissed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (kind, subject_kind, subject_key)
+);
+DROP TRIGGER IF EXISTS trg_learner_memory_preference_updated ON learner_memory_preference;
+CREATE TRIGGER trg_learner_memory_preference_updated BEFORE UPDATE ON learner_memory_preference
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+-- One-time, idempotent migration from M1-C's combined row shape.
+INSERT INTO learner_memory_preference (kind, subject_kind, subject_key, dismissed_at)
+SELECT kind, subject_kind, subject_key, dismissed_at
+FROM learner_memory WHERE dismissed_at IS NOT NULL
+ON CONFLICT (kind, subject_kind, subject_key) DO UPDATE SET
+    dismissed_at = LEAST(learner_memory_preference.dismissed_at, EXCLUDED.dismissed_at);
+UPDATE learner_memory SET dismissed_at = NULL WHERE dismissed_at IS NOT NULL;
 
 -- Background decision records (M1-D, full contract in §5.13). Event indexing,
 -- projection rebuilds and memory derivation are all designed to fail without
@@ -407,11 +431,17 @@ CREATE TABLE IF NOT EXISTS decision_trace (
     rule_version   TEXT,
     subject_kind   TEXT,
     subject_key    TEXT,
+    model_provider TEXT,
+    model_name     TEXT,
+    prompt_version TEXT,
     evidence_refs  JSONB NOT NULL DEFAULT '[]'::jsonb,
     duration_ms    INTEGER NOT NULL,
     detail         JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE decision_trace ADD COLUMN IF NOT EXISTS model_provider TEXT;
+ALTER TABLE decision_trace ADD COLUMN IF NOT EXISTS model_name TEXT;
+ALTER TABLE decision_trace ADD COLUMN IF NOT EXISTS prompt_version TEXT;
 CREATE INDEX IF NOT EXISTS idx_decision_trace_recent
     ON decision_trace(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_decision_trace_failed

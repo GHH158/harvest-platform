@@ -57,6 +57,9 @@ class Repository:
         rule_version: str | None = None,
         subject_kind: str | None = None,
         subject_key: str | None = None,
+        model_provider: str | None = None,
+        model_name: str | None = None,
+        prompt_version: str | None = None,
         evidence_refs: list[Any] | None = None,
         detail: dict[str, Any] | None = None,
     ) -> None:
@@ -78,10 +81,11 @@ class Repository:
                     text(
                         """INSERT INTO decision_trace
                            (schema_version, call_source, status, failure_stage, reason,
-                            rule_version, subject_kind, subject_key, evidence_refs,
-                            duration_ms, detail)
+                            rule_version, subject_kind, subject_key, model_provider,
+                            model_name, prompt_version, evidence_refs, duration_ms, detail)
                            VALUES (:schema_version, :call_source, :status, :failure_stage,
                                    :reason, :rule_version, :subject_kind, :subject_key,
+                                   :model_provider, :model_name, :prompt_version,
                                    CAST(:evidence_refs AS JSONB), :duration_ms,
                                    CAST(:detail AS JSONB))"""
                     ),
@@ -94,6 +98,9 @@ class Repository:
                         "rule_version": rule_version,
                         "subject_kind": subject_kind,
                         "subject_key": subject_key,
+                        "model_provider": model_provider,
+                        "model_name": model_name,
+                        "prompt_version": prompt_version,
                         "evidence_refs": json.dumps(evidence_refs or [], ensure_ascii=False),
                         "duration_ms": duration_ms,
                         "detail": json.dumps(detail or {}, ensure_ascii=False),
@@ -236,13 +243,10 @@ class Repository:
         method before serving requests. Newly inserted keys and active events whose
         projection is missing are repaired; a healthy repeat startup is a no-op.
 
-        `vocabulary_reviewed` is deliberately absent (§5.11): `vocabulary` only ever
-        held aggregate scheduling state (`box`/`review_count`), never a per-attempt
-        history, so there is nothing real to replay — reviews before
-        `vocabulary_review_attempt` existed have no recoverable event and must not be
-        fabricated from the current count. `vocabulary_saved` and `shadowing_completed`
-        are safe: their source rows were already one-row-per-fact before this method
-        existed, so backfilling them replays real history, not a guess.
+        Reviews before `vocabulary_review_attempt` existed have no recoverable event
+        and must not be fabricated from aggregate `review_count`. Every attempt row
+        that does exist is one real post-migration fact and is replayed normally,
+        together with saved words and completed shadowing attempts.
         """
 
         started = time.perf_counter()
@@ -289,6 +293,28 @@ class Repository:
                               )
                        FROM chat_correction_item ci
                        JOIN chat_correction c ON c.id = ci.correction_id
+                       ON CONFLICT (source_table, source_id, subject_kind, subject_key)
+                       DO NOTHING"""
+                ),
+                {"schema_version": LEARNING_EVENT_SCHEMA_VERSION},
+            )
+            # Reviews that predate vocabulary_review_attempt cannot be reconstructed
+            # from vocabulary.review_count. Every row that does exist in the immutable
+            # attempt table is real, though, and must repair a failed event write.
+            connection.execute(
+                text(
+                    """INSERT INTO learning_event
+                       (schema_version, kind, source_table, source_id, subject_kind,
+                        subject_key, actor, confidence, occurred_at, backfilled, payload)
+                       SELECT :schema_version, 'vocabulary_reviewed', 'vocabulary_review_attempt',
+                              vra.id, 'vocabulary_word', vra.vocabulary_id::text, 'user', NULL,
+                              vra.created_at, true,
+                              jsonb_build_object(
+                                  'correct', vra.correct,
+                                  'box_before', vra.box_before,
+                                  'box_after', vra.box_after
+                              )
+                       FROM vocabulary_review_attempt vra
                        ON CONFLICT (source_table, source_id, subject_kind, subject_key)
                        DO NOTHING"""
                 ),
@@ -816,6 +842,7 @@ class Repository:
         assistant_content: str,
         correction: dict[str, Any] | None,
         create_session_topic: str | None = None,
+        decision_context: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any]]:
         pending_learning_events: list[dict[str, Any]] = []
         with self.engine.begin() as connection:
@@ -963,7 +990,14 @@ class Repository:
                 rule_version=LEARNING_EVENT_SCHEMA_VERSION,
                 evidence_refs=[int(event["source_id"]) for event in pending_learning_events],
                 duration_ms=int((time.perf_counter() - started) * 1000),
-                detail={"indexed": indexed, "expected": len(pending_learning_events)},
+                model_provider=(decision_context or {}).get("model_provider"),
+                model_name=(decision_context or {}).get("model_name"),
+                prompt_version=(decision_context or {}).get("prompt_version"),
+                detail={
+                    "indexed": indexed,
+                    "expected": len(pending_learning_events),
+                    "attempted_providers": (decision_context or {}).get("attempted_providers", []),
+                },
             )
         return dict(user), stored_correction, dict(assistant)
 
@@ -1100,6 +1134,7 @@ class Repository:
                        FROM learning_event
                        WHERE schema_version = :schema_version
                          AND kind = 'correction_item'
+                         AND subject_kind = 'correction_category'
                          AND rejected_at IS NULL
                          AND occurred_at >= :cutoff"""
                 ),
@@ -1124,8 +1159,8 @@ class Repository:
                              evidence_refs = EXCLUDED.evidence_refs,
                              rule_version = EXCLUDED.rule_version,
                              latest_evidence_at = EXCLUDED.latest_evidence_at"""
-                        # dismissed_at is absent from both the insert and the update on
-                        # purpose: it is the learner's own decision, not a derivable fact.
+                        # Legacy dismissed_at is absent on purpose. Runtime suppression
+                        # lives in learner_memory_preference, outside derived content.
                     ),
                     {
                         "schema_version": LEARNER_MEMORY_SCHEMA_VERSION,
@@ -1141,14 +1176,13 @@ class Repository:
                         "latest_evidence_at": draft.latest_evidence_at,
                     },
                 )
-            # Unsupported memories go, except dismissed ones: "stop telling me this"
-            # is a standing decision, and deleting it would let the system speak up
-            # again as soon as the evidence came back (§5.12).
+            # Every memory row is derived content, so unsupported rows always go.
+            # The learner's standing "do not use this category" decision lives in
+            # learner_memory_preference and contains no copied sentence/evidence ids.
             connection.execute(
                 text(
                     """DELETE FROM learner_memory
                        WHERE kind = 'recurring_error_pattern'
-                         AND dismissed_at IS NULL
                          AND NOT (subject_key = ANY(:supported))"""
                 ),
                 {"supported": [draft.subject_key for draft in drafts]},
@@ -1187,31 +1221,68 @@ class Repository:
         )
 
     def list_learner_memories(self, *, include_dismissed: bool = True) -> list[dict[str, Any]]:
-        where = "" if include_dismissed else "WHERE dismissed_at IS NULL"
+        where = "" if include_dismissed else "WHERE preference.dismissed_at IS NULL"
         with self.engine.connect() as connection:
             rows = connection.execute(
                 text(
-                    f"""SELECT * FROM learner_memory {where}
-                        ORDER BY evidence_count DESC, latest_evidence_at DESC, id"""
+                    f"""SELECT memory.*, preference.dismissed_at AS preference_dismissed_at
+                        FROM learner_memory memory
+                        LEFT JOIN learner_memory_preference preference
+                          ON preference.kind = memory.kind
+                         AND preference.subject_kind = memory.subject_kind
+                         AND preference.subject_key = memory.subject_key
+                        {where}
+                        ORDER BY memory.evidence_count DESC, memory.latest_evidence_at DESC,
+                                 memory.id"""
                 )
             ).mappings().all()
-        return [dict(row) for row in rows]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            data["dismissed_at"] = data.pop("preference_dismissed_at")
+            result.append(data)
+        return result
 
     def set_learner_memory_dismissed(self, memory_id: int, *, dismissed: bool) -> dict[str, Any] | None:
-        """Idempotent mute/unmute. Only `dismissed_at` moves — the derived facts and
-        the evidence behind them stay exactly as they were (§5.12, same shape as the
-        evidence reject/unreject in §5.11)."""
+        """Idempotently change the separate, content-free suppression preference."""
         with self.engine.begin() as connection:
-            row = connection.execute(
+            target = connection.execute(
                 text(
-                    """UPDATE learner_memory
-                       SET dismissed_at = CASE WHEN :dismissed THEN COALESCE(dismissed_at, now()) END
-                       WHERE id = :memory_id
-                       RETURNING *"""
+                    """SELECT kind, subject_kind, subject_key
+                       FROM learner_memory WHERE id = :memory_id"""
                 ),
-                {"memory_id": memory_id, "dismissed": dismissed},
+                {"memory_id": memory_id},
             ).mappings().one_or_none()
-        return dict(row) if row is not None else None
+            if target is None:
+                return None
+            identity = {
+                "kind": target["kind"],
+                "subject_kind": target["subject_kind"],
+                "subject_key": target["subject_key"],
+            }
+            if dismissed:
+                connection.execute(
+                    text(
+                        """INSERT INTO learner_memory_preference
+                           (kind, subject_kind, subject_key)
+                           VALUES (:kind, :subject_kind, :subject_key)
+                           ON CONFLICT (kind, subject_kind, subject_key) DO NOTHING"""
+                    ),
+                    identity,
+                )
+            else:
+                connection.execute(
+                    text(
+                        """DELETE FROM learner_memory_preference
+                           WHERE kind = :kind AND subject_kind = :subject_kind
+                             AND subject_key = :subject_key"""
+                    ),
+                    identity,
+                )
+        return next(
+            (memory for memory in self.list_learner_memories() if int(memory["id"]) == memory_id),
+            None,
+        )
 
     def recent_correction_guidance(self, *, max_characters: int = 600) -> str:
         """Light personalisation for a new chat turn, now sourced from memories.
@@ -2116,7 +2187,13 @@ class Repository:
                 )
         return self.get_grammar_point(key)
 
-    def record_companion_grammar_evidence(self, message_id: int, keys: list[str]) -> list[str]:
+    def record_companion_grammar_evidence(
+        self,
+        message_id: int,
+        keys: list[str],
+        *,
+        decision_context: dict[str, Any] | None = None,
+    ) -> list[str]:
         """Links an explicit learner question to known points, idempotently."""
         inserted_keys: list[str] = []
         message_data: dict[str, Any] | None = None
@@ -2179,9 +2256,15 @@ class Repository:
                 reason="陪读语法证据登记失败，教学回答未受影响",
                 rule_version=LEARNING_EVENT_SCHEMA_VERSION,
                 subject_kind="grammar_point",
+                model_provider=(decision_context or {}).get("model_provider"),
+                model_name=(decision_context or {}).get("model_name"),
+                prompt_version=(decision_context or {}).get("prompt_version"),
                 evidence_refs=[message_id],
                 duration_ms=int((time.perf_counter() - started) * 1000),
-                detail={"expected": len(inserted_keys)},
+                detail={
+                    "expected": len(inserted_keys),
+                    "attempted_providers": (decision_context or {}).get("attempted_providers", []),
+                },
             )
             raise
         if inserted_keys:
@@ -2191,9 +2274,15 @@ class Repository:
                 reason=f"登记 {len(inserted_keys)} 个明确询问的语法点",
                 rule_version=LEARNING_EVENT_SCHEMA_VERSION,
                 subject_kind="grammar_point",
+                model_provider=(decision_context or {}).get("model_provider"),
+                model_name=(decision_context or {}).get("model_name"),
+                prompt_version=(decision_context or {}).get("prompt_version"),
                 evidence_refs=[message_id],
                 duration_ms=int((time.perf_counter() - started) * 1000),
-                detail={"subject_keys": inserted_keys},
+                detail={
+                    "subject_keys": inserted_keys,
+                    "attempted_providers": (decision_context or {}).get("attempted_providers", []),
+                },
             )
         return inserted_keys
 

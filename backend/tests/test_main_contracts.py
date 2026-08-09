@@ -437,7 +437,7 @@ class CompanionRepository:
             {"id": 1, "role": "user", "content": "之前的问题", "created_at": "now"},
             {"id": 2, "role": "assistant", "content": "之前的回答", "created_at": "now"},
         ]
-        self.grammar_links: list[tuple[int, list[str]]] = []
+        self.grammar_links: list[tuple[int, list[str], dict[str, Any] | None]] = []
 
     def get_material(self, material_id: int) -> dict[str, Any]:
         return {"id": material_id}
@@ -458,8 +458,14 @@ class CompanionRepository:
     def grammar_catalogue_for_prompt(self) -> list[tuple[str, str, str, str, str]]:
         return [("verb-te", "～て", "て形与连接", "N5", "动词变形")]
 
-    def record_companion_grammar_evidence(self, message_id: int, keys: list[str]) -> list[str]:
-        self.grammar_links.append((message_id, keys))
+    def record_companion_grammar_evidence(
+        self,
+        message_id: int,
+        keys: list[str],
+        *,
+        decision_context: dict[str, Any] | None = None,
+    ) -> list[str]:
+        self.grammar_links.append((message_id, keys, decision_context))
         return keys
 
 
@@ -500,7 +506,18 @@ def test_companion_records_only_valid_explicit_grammar_keys(monkeypatch: pytest.
     result = main.post_companion(main.CompanionRequest(material_id=7, segment_id=3, question="这里为什么用て形？"))
 
     assert result["assistant"]["content"] == "这里是て形。"
-    assert repository.grammar_links == [(3, ["verb-te"])]
+    assert repository.grammar_links == [
+        (
+            3,
+            ["verb-te"],
+            {
+                "model_provider": None,
+                "model_name": None,
+                "prompt_version": "companion-turn-v1",
+                "attempted_providers": [],
+            },
+        )
+    ]
 
 
 def test_dictionary_prompt_ranks_the_chinese_difference_first() -> None:

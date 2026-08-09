@@ -5,6 +5,10 @@ struct SettingsView: View {
     let isOnboarding: Bool
     @State private var endpoint = ""
     @State private var errorMessage: String?
+    @State private var memories: [LearnerMemory] = []
+    @State private var isLoadingMemories = false
+    @State private var memoryErrorMessage: String?
+    @State private var updatingMemoryIDs: Set<Int> = []
 
     init(isOnboarding: Bool) {
         self.isOnboarding = isOnboarding
@@ -73,6 +77,10 @@ struct SettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(DesignTokens.accent)
                 }
+
+                if !isOnboarding, configuration.endpoint != nil {
+                    memorySection
+                }
             }
             .padding(DesignTokens.pageInset)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -85,11 +93,112 @@ struct SettingsView: View {
                 endpoint = configuration.endpoint?.absoluteString ?? ""
             }
         }
+        .task(id: configuration.endpoint) {
+            guard !isOnboarding else { return }
+            await loadMemories()
+        }
+    }
+
+    @ViewBuilder
+    private var memorySection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SectionHeader(
+                title: "系统记住的内容",
+                caption: "这些有依据的判断会轻量影响聊天，你可以随时停用。"
+            )
+            CardView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if isLoadingMemories {
+                        HStack(spacing: 10) {
+                            ProgressView().controlSize(.small).tint(DesignTokens.accent)
+                            Text("正在读取…")
+                                .font(.footnote)
+                                .foregroundStyle(DesignTokens.muted)
+                        }
+                    } else if let memoryErrorMessage {
+                        Text(memoryErrorMessage)
+                            .font(.footnote)
+                            .foregroundStyle(DesignTokens.muted)
+                        Button("重试") { Task { await loadMemories() } }
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(DesignTokens.accent)
+                    } else if memories.isEmpty {
+                        Text("暂时没有需要长期保留的学习倾向。")
+                            .font(.footnote)
+                            .foregroundStyle(DesignTokens.muted)
+                    } else {
+                        ForEach(memories) { memory in
+                            memoryRow(memory)
+                            if memory.id != memories.last?.id {
+                                Divider().overlay(DesignTokens.separator)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func memoryRow(_ memory: LearnerMemory) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(memory.content)
+                .font(.subheadline)
+                .foregroundStyle(memory.isDismissed ? DesignTokens.muted : DesignTokens.ink)
+            Text("\(memory.reason) · \(memory.evidenceCount) 条依据")
+                .font(.caption)
+                .foregroundStyle(DesignTokens.muted)
+            Button(memory.isDismissed ? "重新用于聊天" : "不再用于聊天") {
+                Task { await toggleMemory(memory) }
+            }
+            .font(.caption.weight(.medium))
+            .foregroundStyle(DesignTokens.accent)
+            .disabled(updatingMemoryIDs.contains(memory.id))
+            .opacity(updatingMemoryIDs.contains(memory.id) ? 0.5 : 1)
+        }
+    }
+
+    @MainActor
+    private func loadMemories() async {
+        guard let endpoint = configuration.endpoint else {
+            memories = []
+            return
+        }
+        isLoadingMemories = true
+        memoryErrorMessage = nil
+        defer { isLoadingMemories = false }
+        do {
+            memories = try await APIClient(baseURL: endpoint).learnerMemories()
+        } catch {
+            memoryErrorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func toggleMemory(_ memory: LearnerMemory) async {
+        guard let endpoint = configuration.endpoint else { return }
+        updatingMemoryIDs.insert(memory.id)
+        memoryErrorMessage = nil
+        defer { updatingMemoryIDs.remove(memory.id) }
+        do {
+            let client = APIClient(baseURL: endpoint)
+            let updated = if memory.isDismissed {
+                try await client.restoreLearnerMemory(id: memory.id)
+            } else {
+                try await client.dismissLearnerMemory(id: memory.id)
+            }
+            if let index = memories.firstIndex(where: { $0.id == updated.id }) {
+                memories[index] = updated
+            }
+        } catch {
+            memoryErrorMessage = error.localizedDescription
+        }
     }
 
     private func clearConnection() {
         configuration.clearEndpoint()
         endpoint = ""
         errorMessage = nil
+        memories = []
+        memoryErrorMessage = nil
     }
 }

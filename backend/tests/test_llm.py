@@ -46,11 +46,14 @@ def test_auto_provider_falls_back_to_deepseek(monkeypatch: pytest.MonkeyPatch) -
     service = LLMService(settings)
 
     try:
-        answer = service.reply([{"role": "user", "content": "こんにちは"}])
+        answer = service.reply_with_metadata([{"role": "user", "content": "こんにちは"}])
     finally:
         service.close()
 
-    assert answer == "DeepSeek 回答"
+    assert answer.content == "DeepSeek 回答"
+    assert answer.provider == "deepseek"
+    assert answer.model == "deepseek-v4-flash"
+    assert answer.attempted_providers == ("dashscope", "deepseek")
     assert len(calls) == 2
     assert models == ["qwen3.7-max", "deepseek-v4-flash"]
 

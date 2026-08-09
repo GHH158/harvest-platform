@@ -1,11 +1,13 @@
 import pytest
 from app.companion import (
+    COMPANION_PROMPT_VERSION,
     COMPANION_SYSTEM_PROMPT,
     CompanionOutputError,
     build_companion_messages,
     generate_companion_turn,
     parse_companion_turn,
 )
+from app.llm import LLMReply
 from app.prompts import INTERACTIVE_TEACHING_CORE_PROMPT
 
 
@@ -76,6 +78,34 @@ def test_companion_output_gets_one_format_repair() -> None:
     assert turn.answer_markdown == "修好的回答"
     assert len(llm.calls) == 2
     assert all(call["json_mode"] is True for call in llm.calls)
+
+
+def test_repaired_companion_turn_tracks_the_final_model_and_prompt_version() -> None:
+    class MetadataLLM:
+        def __init__(self) -> None:
+            self.responses = iter(
+                [
+                    LLMReply("plain answer", "dashscope", "qwen3.7-max", ("dashscope",)),
+                    LLMReply(
+                        '{"answer_markdown":"修好的回答","grammar_keys":[]}',
+                        "deepseek",
+                        "deepseek-v4-flash",
+                        ("dashscope", "deepseek"),
+                    ),
+                ]
+            )
+
+        def reply_with_metadata(self, messages: list[dict[str, str]], **values: object) -> LLMReply:
+            return next(self.responses)
+
+    turn = generate_companion_turn(MetadataLLM(), [])  # type: ignore[arg-type]
+
+    assert turn.decision_context == {
+        "model_provider": "deepseek",
+        "model_name": "deepseek-v4-flash",
+        "prompt_version": COMPANION_PROMPT_VERSION,
+        "attempted_providers": ["dashscope", "deepseek"],
+    }
 
 
 def test_companion_output_fails_after_one_bad_repair() -> None:

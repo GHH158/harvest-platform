@@ -1558,6 +1558,17 @@ def test_vocabulary_and_shadowing_event_failures_do_not_block_the_main_path(
                 {"subject_key": str(vocabulary_id)},
             ).scalar_one()
         assert event_count == 0
+        repository.backfill_learning_events()
+        with engine.connect() as connection:
+            repaired_count = connection.execute(
+                text(
+                    """SELECT count(*) FROM learning_event
+                       WHERE (source_table = 'vocabulary' OR source_table = 'vocabulary_review_attempt')
+                         AND subject_key = :subject_key"""
+                ),
+                {"subject_key": str(vocabulary_id)},
+            ).scalar_one()
+        assert repaired_count == 2
     finally:
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM vocabulary WHERE word = :word"), {"word": word})
@@ -1565,11 +1576,9 @@ def test_vocabulary_and_shadowing_event_failures_do_not_block_the_main_path(
 
 
 @pytest.mark.integration
-def test_backfill_covers_vocabulary_saved_and_shadowing_completed_but_not_reviewed() -> None:
-    """§5.11 M1-B: vocabulary and completed shadowing attempts are safe to backfill
-    because each source row was already an immutable fact; a pre-existing
-    vocabulary_review_attempt row must never be backfilled into an event, and the
-    whole pass must be idempotent."""
+def test_backfill_covers_real_vocabulary_attempts_and_completed_shadowing() -> None:
+    """§5.11: no reviews are fabricated from legacy aggregate counters, while every
+    row that actually exists in vocabulary_review_attempt is a real replayable fact."""
     database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
     if not database_url:
         pytest.skip("requires HARVEST_TEST_DATABASE_URL")
@@ -1647,8 +1656,7 @@ def test_backfill_covers_vocabulary_saved_and_shadowing_completed_but_not_review
             ).scalar_one()
         assert vocabulary_saved_count == 1
         assert shadowing_completed_count == 1
-        # The explicit non-backfill declaration in §5.11: no history to replay.
-        assert reviewed_count == 0
+        assert reviewed_count == 1
 
         # Idempotent: running it again must not duplicate either backfilled kind.
         repository.backfill_learning_events()
@@ -1663,8 +1671,16 @@ def test_backfill_covers_vocabulary_saved_and_shadowing_completed_but_not_review
                 ),
                 {"id": attempt_id},
             ).scalar_one()
+            reviewed_count_again = connection.execute(
+                text(
+                    "SELECT count(*) FROM learning_event "
+                    "WHERE source_table = 'vocabulary_review_attempt' AND source_id = :id"
+                ),
+                {"id": review_attempt_id},
+            ).scalar_one()
         assert vocabulary_saved_count_again == 1
         assert shadowing_completed_count_again == 1
+        assert reviewed_count_again == 1
     finally:
         with engine.begin() as connection:
             if shadowing_job_id is not None:
@@ -1756,6 +1772,71 @@ def test_learner_memory_forms_from_real_corrections_and_converges_on_delete() ->
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
             connection.execute(text("DELETE FROM learner_memory"))
+            connection.execute(text("DELETE FROM learner_memory_preference"))
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_grammar_association_does_not_double_count_a_correction_memory() -> None:
+    """One correction may have category and grammar subjects, but a person-level
+    category memory counts the real correction once, not once per projection target."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    grammar_key = f"test-memory-count-{uuid.uuid4().hex}"
+    session_id = f"test-{uuid.uuid4()}"
+    with engine.begin() as connection:
+        point_id = connection.execute(
+            text(
+                """INSERT INTO grammar_point
+                   (key, title_ja, title_zh, level, category, sort_order)
+                   VALUES (:key, '～検証', '验证点', 'N5', '测试', 999999)
+                   RETURNING id"""
+            ),
+            {"key": grammar_key},
+        ).scalar_one()
+    try:
+        repository.create_chat_session(
+            session_id=session_id, topic="去重", starter_id=None, assistant_content="始めましょう。"
+        )
+        for index in range(2):
+            repository.complete_chat_turn(
+                session_id=session_id,
+                user_content=f"誤り{index}",
+                assistant_content="修正",
+                correction=_correction(f"誤り{index}", "修正", "grammar", grammar_key),
+            )
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    """SELECT count(*) FROM learning_event
+                       WHERE kind = 'correction_item' AND payload->>'category' = 'grammar'"""
+                )
+            ).scalar_one() == 4
+        # Two real corrections remain below the threshold even though each has two
+        # projection targets in learning_event.
+        assert repository.list_learner_memories() == []
+
+        repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="誤り2",
+            assistant_content="修正",
+            correction=_correction("誤り2", "修正", "grammar", grammar_key),
+        )
+        memories = repository.list_learner_memories()
+        assert len(memories) == 1
+        assert memories[0]["evidence_count"] == 3
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM learner_memory"))
+            connection.execute(text("DELETE FROM learner_memory_preference"))
+            connection.execute(text("DELETE FROM grammar_point WHERE id = :id"), {"id": point_id})
         engine.dispose()
 
 
@@ -1811,6 +1892,56 @@ def test_dismissed_memory_survives_rebuild_and_stays_out_of_the_prompt() -> None
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
             connection.execute(text("DELETE FROM learner_memory"))
+            connection.execute(text("DELETE FROM learner_memory_preference"))
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_deleting_dismissed_memory_evidence_removes_private_content_but_keeps_preference() -> None:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    session_id = f"test-{uuid.uuid4()}"
+    try:
+        repository.create_chat_session(
+            session_id=session_id, topic="删除收敛", starter_id=None, assistant_content="始めましょう。"
+        )
+        for index in range(3):
+            repository.complete_chat_turn(
+                session_id=session_id,
+                user_content=f"私密原句{index}",
+                assistant_content="修正",
+                correction=_correction(f"私密原句{index}", "修正", "register"),
+            )
+        memory_id = int(repository.list_learner_memories()[0]["id"])
+        repository.set_learner_memory_dismissed(memory_id, dismissed=True)
+
+        assert repository.delete_chat_session(session_id) is True
+        session_id = ""
+        assert repository.list_learner_memories() == []
+        with engine.connect() as connection:
+            preference = connection.execute(
+                text(
+                    """SELECT kind, subject_kind, subject_key
+                       FROM learner_memory_preference
+                       WHERE subject_key = 'register'"""
+                )
+            ).mappings().one()
+        assert dict(preference) == {
+            "kind": "recurring_error_pattern",
+            "subject_kind": "correction_category",
+            "subject_key": "register",
+        }
+    finally:
+        with engine.begin() as connection:
+            if session_id:
+                connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM learner_memory"))
+            connection.execute(text("DELETE FROM learner_memory_preference"))
         engine.dispose()
 
 
@@ -1852,6 +1983,7 @@ def test_memory_rebuild_failure_does_not_break_a_chat_turn(
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
             connection.execute(text("DELETE FROM learner_memory"))
+            connection.execute(text("DELETE FROM learner_memory_preference"))
         engine.dispose()
 
 
@@ -1928,6 +2060,7 @@ def test_backfill_indexes_every_correction_category_and_rebuilds_memories() -> N
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
             connection.execute(text("DELETE FROM learner_memory"))
+            connection.execute(text("DELETE FROM learner_memory_preference"))
         engine.dispose()
 
 
@@ -1945,6 +2078,7 @@ def test_decision_trace_records_success_and_locates_the_failing_stage(
     apply_schema(engine)
     repository = Repository(engine)
     session_id = f"test-{uuid.uuid4()}"
+    material_id: int | None = None
     with engine.begin() as connection:
         # decision_trace is global diagnostics, not scoped to a session, so other
         # tests in the same database leave rows behind. Start from a known state.
@@ -1958,6 +2092,12 @@ def test_decision_trace_records_success_and_locates_the_failing_stage(
             user_content="随时",
             assistant_content="いつでも",
             correction=_correction("随时", "いつでも", "word_choice"),
+            decision_context={
+                "model_provider": "deepseek",
+                "model_name": "deepseek-v4-flash",
+                "prompt_version": "chat-turn-v1",
+                "attempted_providers": ["dashscope", "deepseek"],
+            },
         )
 
         indexed = repository.list_decision_traces(call_source="chat_correction_index")
@@ -1965,11 +2105,43 @@ def test_decision_trace_records_success_and_locates_the_failing_stage(
         assert indexed[0]["status"] == "ok"
         assert indexed[0]["failure_stage"] is None
         assert indexed[0]["rule_version"] == "learning-event-v1"
-        assert indexed[0]["detail"] == {"indexed": 1, "expected": 1}
+        assert indexed[0]["model_provider"] == "deepseek"
+        assert indexed[0]["model_name"] == "deepseek-v4-flash"
+        assert indexed[0]["prompt_version"] == "chat-turn-v1"
+        assert indexed[0]["detail"] == {
+            "indexed": 1,
+            "expected": 1,
+            "attempted_providers": ["dashscope", "deepseek"],
+        }
         assert indexed[0]["duration_ms"] >= 0
         # The memory rebuild that follows the turn is accounted for separately.
         rebuilds = repository.list_decision_traces(call_source="learner_memory_rebuild")
         assert rebuilds and rebuilds[0]["status"] == "ok"
+
+        material_id, _ = repository.create_material_with_job(
+            title="trace companion",
+            source_type="paste",
+            source_ref=None,
+            job_kind="tts",
+            payload={"text": "読んでいます。"},
+        )
+        question = repository.add_companion_message(material_id, None, "user", "为什么使用て形？")
+        repository.record_companion_grammar_evidence(
+            int(question["id"]),
+            ["verb-te"],
+            decision_context={
+                "model_provider": "dashscope",
+                "model_name": "qwen3.7-max",
+                "prompt_version": "companion-turn-v1",
+                "attempted_providers": ["dashscope"],
+            },
+        )
+        companion = repository.list_decision_traces(call_source="companion_grammar_index")
+        assert len(companion) == 1
+        assert companion[0]["model_provider"] == "dashscope"
+        assert companion[0]["model_name"] == "qwen3.7-max"
+        assert companion[0]["prompt_version"] == "companion-turn-v1"
+        assert companion[0]["detail"]["attempted_providers"] == ["dashscope"]
 
         # Now break the rebuild and confirm the failure is attributable.
         def fail_rebuild(**_: Any) -> list[str]:
@@ -1993,7 +2165,10 @@ def test_decision_trace_records_success_and_locates_the_failing_stage(
     finally:
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            if material_id is not None:
+                connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
             connection.execute(text("DELETE FROM learner_memory"))
+            connection.execute(text("DELETE FROM learner_memory_preference"))
             connection.execute(text("DELETE FROM decision_trace"))
         engine.dispose()
 
@@ -2052,6 +2227,7 @@ def test_decision_trace_never_stores_the_learner_text_and_expires() -> None:
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
             connection.execute(text("DELETE FROM learner_memory"))
+            connection.execute(text("DELETE FROM learner_memory_preference"))
             connection.execute(text("DELETE FROM decision_trace"))
         engine.dispose()
 
