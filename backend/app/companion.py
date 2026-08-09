@@ -188,6 +188,7 @@ def build_companion_messages(
     history: list[dict[str, Any]],
     question: str,
     catalogue_subset: list[tuple[str, str, str, str, str]] | None = None,
+    lens_focus: str | None = None,
 ) -> list[dict[str, str]]:
     context_text = "\n".join(f"{item['idx'] + 1}. {item['text_ja']}" for item in context) or "（未指定句子）"
     user_content = f"""当前阅读上下文（只作语境参考,不是日语词汇的全集）:
@@ -195,6 +196,10 @@ def build_companion_messages(
 
 用户问题:
 {question.strip()}"""
+    # §5.15: the angle narrows what to answer; it never relaxes the teaching core or
+    # the output contract, both of which are already in the system prompt.
+    if lens_focus:
+        user_content += f"\n\n本次提问的角度（只回答这个角度）:\n{lens_focus.strip()}"
     messages = [{"role": "system", "content": build_companion_system_prompt(catalogue_subset)}]
     messages.extend(
         {"role": item["role"], "content": item["content"]}

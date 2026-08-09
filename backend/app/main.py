@@ -37,6 +37,7 @@ from .companion import build_companion_messages, generate_companion_turn
 from .config import ROOT_DIR, get_settings
 from .db import apply_schema, make_engine
 from .furigana import ruby_segments
+from .lenses import LENS_PROMPT_VERSION, lens_by_id, public_lenses, render_lens_question
 from .llm import LLMService
 from .omni import relay_voice_teacher
 from .repository import Repository
@@ -69,7 +70,17 @@ class MaterialCreate(BaseModel):
 class CompanionRequest(BaseModel):
     material_id: int
     segment_id: int | None = None
-    question: str = Field(min_length=1, max_length=4_000)
+    #: §5.15: free question, or a lens id, exactly one of them. `question` wins when
+    #: both arrive, because a typed question is always more specific than a tap.
+    question: str | None = Field(default=None, min_length=1, max_length=4_000)
+    lens: str | None = Field(default=None, max_length=40)
+    focus_text: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def needs_a_question_or_a_lens(self) -> CompanionRequest:
+        if not (self.question or "").strip() and not (self.lens or "").strip():
+            raise ValueError("请给出问题，或选择一个提问角度。")
+        return self
 
 
 class ChatRequest(BaseModel):
@@ -806,6 +817,12 @@ def _llm_error(error: Exception) -> HTTPException:
     return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error))
 
 
+@app.get("/companion/lenses")
+def list_companion_lenses() -> list[dict]:
+    """§5.15 reading angles. The client sends an id; wording stays server-side."""
+    return public_lenses()
+
+
 @app.get("/companion/{material_id}")
 def get_companion_messages(material_id: int) -> list[dict]:
     if repository().get_material(material_id) is None:
@@ -821,13 +838,25 @@ def post_companion(payload: CompanionRequest) -> dict:
     context = repo.segment_context(payload.material_id, payload.segment_id) if payload.segment_id else []
     if payload.segment_id and not context:
         raise HTTPException(status_code=404, detail="该材料中不存在这句话。")
-    user = repo.add_companion_message(payload.material_id, payload.segment_id, "user", payload.question.strip())
+    typed = (payload.question or "").strip()
+    lens = None
+    if not typed:
+        lens = lens_by_id(payload.lens or "")
+        if lens is None:
+            # No silent fallback: an unknown angle must not answer as if it were a
+            # plain lookup, or "did this angle take effect" becomes unanswerable.
+            raise HTTPException(status_code=422, detail="未知的提问角度。")
+    question = typed or render_lens_question(lens, payload.focus_text)
+    user = repo.add_companion_message(
+        payload.material_id, payload.segment_id, "user", question, lens=lens.id if lens else None
+    )
     history = repo.companion_messages(payload.material_id)[-12:-1]
     messages = build_companion_messages(
         context=context,
         history=history,
-        question=payload.question,
+        question=question,
         catalogue_subset=repo.grammar_catalogue_for_prompt(),
+        lens_focus=lens.focus_zh if lens else None,
     )
     try:
         turn = generate_companion_turn(llm_service(), messages)
@@ -844,7 +873,13 @@ def post_companion(payload: CompanionRequest) -> dict:
             repo.record_companion_grammar_evidence(
                 int(user["id"]),
                 turn.grammar_keys,
-                decision_context=turn.decision_context,
+                # §5.15: without the angle and its version, "the model got worse" and
+                # "we reworded an angle" look identical in the trace.
+                decision_context={
+                    **turn.decision_context,
+                    "lens": lens.id if lens else None,
+                    "lens_prompt_version": LENS_PROMPT_VERSION if lens else None,
+                },
             )
         except Exception:
             # Personalisation is supplementary: a failed evidence projection must not

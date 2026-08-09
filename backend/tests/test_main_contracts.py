@@ -447,9 +447,15 @@ class CompanionRepository:
         return [{"id": segment_id, "idx": 0, "text_ja": "雨です。"}]
 
     def add_companion_message(
-        self, material_id: int, segment_id: int | None, role: str, content: str
+        self, material_id: int, segment_id: int | None, role: str, content: str, lens: str | None = None
     ) -> dict[str, Any]:
-        message = {"id": len(self.messages) + 1, "role": role, "content": content, "created_at": "now"}
+        message = {
+            "id": len(self.messages) + 1,
+            "role": role,
+            "content": content,
+            "lens": lens,
+            "created_at": "now",
+        }
         self.messages.append(message)
         return message
 
@@ -516,6 +522,9 @@ def test_companion_records_only_valid_explicit_grammar_keys(monkeypatch: pytest.
                 "model_name": None,
                 "prompt_version": "companion-turn-v1",
                 "attempted_providers": [],
+                # A freely typed question carries no angle (§5.15).
+                "lens": None,
+                "lens_prompt_version": None,
             },
         )
     ]

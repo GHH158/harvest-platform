@@ -707,12 +707,27 @@ class Repository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
-    def add_companion_message(self, material_id: int, segment_id: int | None, role: str, content: str) -> dict[str, Any]:
+    def add_companion_message(
+        self,
+        material_id: int,
+        segment_id: int | None,
+        role: str,
+        content: str,
+        lens: str | None = None,
+    ) -> dict[str, Any]:
+        """`lens` is the §5.15 reading angle; NULL means a freely typed question."""
+
         with self.engine.begin() as connection:
             row = connection.execute(
-                text("""INSERT INTO companion_message (material_id, segment_id, role, content)
-                VALUES (:material_id, :segment_id, :role, :content) RETURNING *"""),
-                {"material_id": material_id, "segment_id": segment_id, "role": role, "content": content},
+                text("""INSERT INTO companion_message (material_id, segment_id, role, content, lens)
+                VALUES (:material_id, :segment_id, :role, :content, :lens) RETURNING *"""),
+                {
+                    "material_id": material_id,
+                    "segment_id": segment_id,
+                    "role": role,
+                    "content": content,
+                    "lens": lens,
+                },
             ).mappings().one()
         return dict(row)
 

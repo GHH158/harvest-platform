@@ -25,6 +25,14 @@ struct CompanionComposerState: Equatable {
         return value
     }
 
+    /// §5.15: an angle carries no draft text, so it only has to claim the in-flight
+    /// slot. Whatever the learner had half-typed stays untouched in the field.
+    mutating func beginSendingLens() -> Bool {
+        guard !isSending else { return false }
+        isSending = true
+        return true
+    }
+
     mutating func completeSending() {
         pendingQuestion = nil
         isSending = false
@@ -450,13 +458,16 @@ struct CompanionView: View {
     @AppStorage("showFurigana") private var showFurigana = false
     @State private var showManualLookup = false
     @State private var lookupWord: LookupWord?
+    @State private var lenses: [QuestionLens] = []
 
     init(materialID: Int, segment: Segment, focusText: String? = nil) {
         self.materialID = materialID
         self.segment = segment
         self.focusText = focusText
-        let initialDraft = focusText.map { "请解释「\($0)」在这句话里的意思和用法。" } ?? ""
-        _composer = State(initialValue: CompanionComposerState(draft: initialDraft))
+        // §11.9: never pre-fill the field. A ready-made sentence is cheaper to send
+        // than to clear, so every question became the same word lookup and the
+        // learner stopped asking anything else. Angles are offered instead (§5.15).
+        _composer = State(initialValue: CompanionComposerState(draft: ""))
     }
 
     private var client: APIClient? {
@@ -474,6 +485,9 @@ struct CompanionView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, DesignTokens.pageInset)
                     .padding(.top, 8)
+            }
+            if !lenses.isEmpty {
+                lensBar
             }
             composerBar
         }
@@ -630,9 +644,36 @@ struct CompanionView: View {
         }
     }
 
+    /// §5.15: one tap sends that angle. Shown whenever the learner can still ask —
+    /// the point is that the options are visible before you have a question in mind,
+    /// which an empty box does not achieve any better than a pre-filled one did.
+    private var lensBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(lenses) { lens in
+                    Button {
+                        Task { await send(lens: lens.id) }
+                    } label: {
+                        Text(lens.labelZH)
+                            .font(.subheadline)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 7)
+                            .background(DesignTokens.surface, in: Capsule())
+                            .overlay { Capsule().stroke(DesignTokens.separator, lineWidth: 0.5) }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(composer.isSending)
+                    .opacity(composer.isSending ? 0.45 : 1)
+                }
+            }
+            .padding(.horizontal, DesignTokens.pageInset)
+        }
+        .padding(.top, 10)
+    }
+
     private var composerBar: some View {
         HStack(alignment: .bottom, spacing: 10) {
-            TextField("这句哪里不明白？", text: $composer.draft, axis: .vertical)
+            TextField("或者，直接问你想问的", text: $composer.draft, axis: .vertical)
                 .lineLimit(1...5)
                 .focused($isInputFocused)
                 .submitLabel(.send)
@@ -673,16 +714,25 @@ struct CompanionView: View {
             errorMessage = "请先在设置中填写服务地址。"
             return
         }
+        let client = APIClient(baseURL: endpoint)
         do {
-            messages = try await APIClient(baseURL: endpoint).companion(materialID: materialID)
+            messages = try await client.companion(materialID: materialID)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
+        // Angles are an addition, not a precondition: if this call fails the learner
+        // can still type a question, so it must not surface as an error.
+        lenses = (try? await client.companionLenses()) ?? []
     }
 
-    @MainActor private func send() async {
-        guard let value = composer.beginSending() else { return }
+    @MainActor private func send(lens: String? = nil) async {
+        if lens == nil {
+            guard composer.beginSending() != nil else { return }
+        } else {
+            guard composer.beginSendingLens() else { return }
+        }
+        let question = lens == nil ? composer.pendingQuestion : nil
         isInputFocused = false
         errorMessage = nil
         guard let endpoint = configuration.endpoint else {
@@ -695,7 +745,9 @@ struct CompanionView: View {
             let reply = try await APIClient(baseURL: endpoint).sendCompanion(
                 materialID: materialID,
                 segmentID: segment.id,
-                question: value
+                question: question,
+                lens: lens,
+                focusText: focusText
             )
             messages += [reply.user, reply.assistant]
             composer.completeSending()

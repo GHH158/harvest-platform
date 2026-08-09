@@ -92,6 +92,18 @@ struct Token: Codable, Identifiable, Hashable {
     }
 }
 
+/// §5.15: a reading question angle. Only the id travels back to the server; the
+/// wording of the question and its prompt focus stay server-side.
+struct QuestionLens: Codable, Identifiable, Hashable {
+    let id: String
+    let labelZH: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case labelZH = "label_zh"
+    }
+}
+
 struct ConversationMessage: Codable, Identifiable, Hashable {
     let id: Int
     let sessionID: String?

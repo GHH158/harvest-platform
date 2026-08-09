@@ -236,14 +236,28 @@ struct APIClient {
         try await get("companion/\(materialID)")
     }
 
-    func sendCompanion(materialID: Int, segmentID: Int, question: String) async throws -> ChatReply {
+    func companionLenses() async throws -> [QuestionLens] {
+        try await get("companion/lenses")
+    }
+
+    /// §5.15: send a typed `question`, or a `lens` id for a one-tap angle. The server
+    /// renders the angle's wording so it is defined in exactly one place.
+    func sendCompanion(
+        materialID: Int,
+        segmentID: Int,
+        question: String? = nil,
+        lens: String? = nil,
+        focusText: String? = nil
+    ) async throws -> ChatReply {
         var request = URLRequest(url: baseURL.appending(path: "companion"))
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "material_id": materialID, "segment_id": segmentID, "question": question,
-        ])
+        var body: [String: Any] = ["material_id": materialID, "segment_id": segmentID]
+        if let question, !question.isEmpty { body["question"] = question }
+        if let lens { body["lens"] = lens }
+        if let focusText, !focusText.isEmpty { body["focus_text"] = focusText }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return try await send(request)
     }
 
