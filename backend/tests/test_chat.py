@@ -9,13 +9,13 @@ from app.chat import (
     CHAT_SYSTEM_PROMPT,
     ChatOutputError,
     assistant_content,
-    build_correction_guidance,
     chat_messages,
     generate_chat_turn,
     parse_chat_turn,
     suppress_follow_up,
     topic_for,
 )
+from app.learner_memory import build_memory_guidance
 from app.prompts import INTERACTIVE_TEACHING_CORE_PROMPT
 from fastapi import HTTPException
 
@@ -165,26 +165,27 @@ def test_context_only_contains_recent_twenty_messages_and_chinese_rule() -> None
     assert "- grammar" in messages[0]["content"]
 
 
-def test_recent_guidance_ranks_three_categories_and_caps_length() -> None:
-    rows: list[dict[str, str]] = []
-    for category, count in (("grammar", 4), ("naturalness", 3), ("register", 2), ("orthography", 1)):
-        rows.extend(
-            {
-                "category": category,
-                "original_fragment": f"{category}-old",
-                "replacement": f"{category}-new",
-                "reason_zh": "很长的原因" * 100,
-            }
-            for _ in range(count)
-        )
+def test_memory_guidance_keeps_three_memories_and_caps_length() -> None:
+    """§4.3's injection budget survives the move to learner_memory (§5.12): at most
+    three entries, 600 characters, however long a single memory happens to be."""
+    memories = [
+        {"content": f"最近在{label}上反复被纠正" + "很长的例子" * 100}
+        for label in ("语法", "自然度", "语体", "书写")
+    ]
 
-    guidance = build_correction_guidance(rows, max_characters=600)
+    guidance = build_memory_guidance(memories, max_characters=600)
 
     assert len(guidance) <= 600
-    assert "grammar（近期 4 次）" in guidance
-    assert "naturalness（近期 3 次）" in guidance
-    assert "register（近期 2 次）" in guidance
-    assert "orthography" not in guidance
+    assert guidance.count("\n") == 2
+    assert "语法" in guidance
+    assert "自然度" in guidance
+    assert "语体" in guidance
+    assert "书写" not in guidance
+
+
+def test_memory_guidance_is_empty_without_memories() -> None:
+    # Cold start: no memories yet must inject nothing rather than an empty bullet.
+    assert build_memory_guidance([]) == ""
 
 
 class ChatRepository:

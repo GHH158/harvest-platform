@@ -9,8 +9,13 @@ from typing import Any
 
 from sqlalchemy import Engine, text
 
-from .chat import build_correction_guidance
 from .grammar_catalogue import catalogue_rows
+from .learner_memory import (
+    LEARNER_MEMORY_SCHEMA_VERSION,
+    RECURRING_ERROR_WINDOW_DAYS,
+    build_memory_guidance,
+    derive_recurring_error_memories,
+)
 from .learning_events import LEARNING_EVENT_SCHEMA_VERSION, validated_learning_event_payload
 from .text import canonical_source_key
 
@@ -122,6 +127,30 @@ class Repository:
                 ),
                 {"schema_version": LEARNING_EVENT_SCHEMA_VERSION},
             ).scalars().all()
+            # The category subject exists for every correction, including the ones the
+            # model could not tie to a grammar point (§5.11); without this the fact
+            # layer would only remember grammar-shaped mistakes.
+            connection.execute(
+                text(
+                    """INSERT INTO learning_event
+                       (schema_version, kind, source_table, source_id, subject_kind,
+                        subject_key, actor, confidence, occurred_at, backfilled, payload)
+                       SELECT :schema_version, 'correction_item', 'chat_correction_item',
+                              ci.id, 'correction_category', ci.category, 'user', NULL,
+                              c.created_at, true,
+                              jsonb_build_object(
+                                  'original', ci.original_fragment,
+                                  'replacement', ci.replacement,
+                                  'reason_zh', ci.reason_zh,
+                                  'category', ci.category
+                              )
+                       FROM chat_correction_item ci
+                       JOIN chat_correction c ON c.id = ci.correction_id
+                       ON CONFLICT (source_table, source_id, subject_kind, subject_key)
+                       DO NOTHING"""
+                ),
+                {"schema_version": LEARNING_EVENT_SCHEMA_VERSION},
+            )
             companion_keys = connection.execute(
                 text(
                     """INSERT INTO learning_event
@@ -192,6 +221,10 @@ class Repository:
         )
         for key in keys:
             self.reconcile_grammar_projection(key)
+        # Memories are derived from the events this backfill just repaired, so the
+        # rebuild belongs here too — quietly, since a missing memory must not stop
+        # the service from starting the way a missing event index would.
+        self._rebuild_learner_memories_quietly()
         return keys
 
     def find_material_by_source_url(self, url: str) -> dict[str, Any] | None:
@@ -581,6 +614,7 @@ class Repository:
         if deleted is not None:
             for key in touched_keys:
                 self.reconcile_grammar_projection(key)
+            self._rebuild_learner_memories_quietly()
         return deleted is not None
 
     def add_chat_message(self, session_id: str, role: str, content: str) -> dict[str, Any]:
@@ -681,6 +715,28 @@ class Repository:
                         },
                     ).mappings().one()
                     items.append(dict(stored_item))
+                    payload = {
+                        "original": stored_item["original"],
+                        "replacement": stored_item["replacement"],
+                        "reason_zh": stored_item["reason_zh"],
+                        "category": stored_item["category"],
+                    }
+                    # Every correction is a fact worth indexing, whether or not the
+                    # model could pin it to a grammar point (§5.11): word-choice and
+                    # naturalness corrections almost never carry a grammar_key, and
+                    # gating the event on one would leave the fact layer remembering
+                    # only the mistakes that happen to fit the grammar skeleton.
+                    pending_learning_events.append(
+                        {
+                            "kind": "correction_item",
+                            "source_table": "chat_correction_item",
+                            "source_id": int(stored_item["id"]),
+                            "subject_kind": "correction_category",
+                            "subject_key": str(stored_item["category"]),
+                            "occurred_at": correction_row["created_at"],
+                            "payload": payload,
+                        }
+                    )
                     # A real mistake is the main path into the grammar skeleton (§12.1).
                     if key := item.get("grammar_key"):
                         pending_learning_events.append(
@@ -688,14 +744,10 @@ class Repository:
                                 "kind": "correction_item",
                                 "source_table": "chat_correction_item",
                                 "source_id": int(stored_item["id"]),
+                                "subject_kind": "grammar_point",
                                 "subject_key": str(key),
                                 "occurred_at": correction_row["created_at"],
-                                "payload": {
-                                    "original": stored_item["original"],
-                                    "replacement": stored_item["replacement"],
-                                    "reason_zh": stored_item["reason_zh"],
-                                    "category": stored_item["category"],
-                                },
+                                "payload": payload,
                             }
                         )
                 stored_correction = dict(correction_row)
@@ -711,23 +763,28 @@ class Repository:
                 text("UPDATE chat_session SET topic = topic WHERE id = :session_id"),
                 {"session_id": session_id},
             )
-        # Event indexing and projection are enhancements. They run only after the
-        # chat transaction commits and cannot make a successful turn look failed.
+        # Event indexing, projection and memory are enhancements. They run only after
+        # the chat transaction commits and cannot make a successful turn look failed.
         for event in pending_learning_events:
             try:
                 self._record_learning_event(**event)
-                self.mark_grammar_encounter(
-                    str(event["subject_key"]),
-                    status="encountered",
-                    source="correction",
-                    note=str(event["payload"]["original"]),
-                    invalidate_explanation=True,
-                )
+                # Only the grammar association feeds the grammar skeleton; the
+                # category event exists for the fact layer and has no projection.
+                if event["subject_kind"] == "grammar_point":
+                    self.mark_grammar_encounter(
+                        str(event["subject_key"]),
+                        status="encountered",
+                        source="correction",
+                        note=str(event["payload"]["original"]),
+                        invalidate_explanation=True,
+                    )
             except Exception:
                 logger.exception(
                     "Failed to record correction learning event",
                     extra={"source_id": event["source_id"], "subject_key": event["subject_key"]},
                 )
+        if pending_learning_events:
+            self._rebuild_learner_memories_quietly()
         return dict(user), stored_correction, dict(assistant)
 
     def chat_corrections(
@@ -841,20 +898,132 @@ class Repository:
         if deleted is not None:
             for key in touched_keys:
                 self.reconcile_grammar_projection(key)
+            self._rebuild_learner_memories_quietly()
         return deleted is not None
 
-    def recent_correction_guidance(self, *, limit: int = 30, max_characters: int = 600) -> str:
+    # ── learner memory (§5.12) ──────────────────────────────────
+
+    def rebuild_learner_memories(self, *, now: datetime | None = None) -> list[str]:
+        """Recompute every derived memory from current evidence (§5.12).
+
+        A full recompute rather than an incremental update, so the result depends
+        only on the events and the rule version: running it twice changes nothing,
+        and evidence that disappeared takes its memory with it without a separate
+        cleanup path. Returns the subject keys that currently hold.
+        """
+        current = now or datetime.now(UTC)
+        cutoff = current - timedelta(days=RECURRING_ERROR_WINDOW_DAYS)
+        with self.engine.begin() as connection:
+            events = connection.execute(
+                text(
+                    """SELECT id, occurred_at, payload
+                       FROM learning_event
+                       WHERE schema_version = :schema_version
+                         AND kind = 'correction_item'
+                         AND rejected_at IS NULL
+                         AND occurred_at >= :cutoff"""
+                ),
+                {"schema_version": LEARNING_EVENT_SCHEMA_VERSION, "cutoff": cutoff},
+            ).mappings().all()
+            drafts = derive_recurring_error_memories([dict(row) for row in events], now=current)
+            for draft in drafts:
+                connection.execute(
+                    text(
+                        """INSERT INTO learner_memory
+                           (schema_version, kind, subject_kind, subject_key, content, reason,
+                            confidence, evidence_count, evidence_refs, rule_version, latest_evidence_at)
+                           VALUES (:schema_version, :kind, :subject_kind, :subject_key, :content,
+                                   :reason, :confidence, :evidence_count, CAST(:evidence_refs AS JSONB),
+                                   :rule_version, :latest_evidence_at)
+                           ON CONFLICT (kind, subject_kind, subject_key) DO UPDATE SET
+                             schema_version = EXCLUDED.schema_version,
+                             content = EXCLUDED.content,
+                             reason = EXCLUDED.reason,
+                             confidence = EXCLUDED.confidence,
+                             evidence_count = EXCLUDED.evidence_count,
+                             evidence_refs = EXCLUDED.evidence_refs,
+                             rule_version = EXCLUDED.rule_version,
+                             latest_evidence_at = EXCLUDED.latest_evidence_at"""
+                        # dismissed_at is absent from both the insert and the update on
+                        # purpose: it is the learner's own decision, not a derivable fact.
+                    ),
+                    {
+                        "schema_version": LEARNER_MEMORY_SCHEMA_VERSION,
+                        "kind": draft.kind,
+                        "subject_kind": draft.subject_kind,
+                        "subject_key": draft.subject_key,
+                        "content": draft.content,
+                        "reason": draft.reason,
+                        "confidence": draft.confidence,
+                        "evidence_count": draft.evidence_count,
+                        "evidence_refs": json.dumps(draft.evidence_refs),
+                        "rule_version": draft.rule_version,
+                        "latest_evidence_at": draft.latest_evidence_at,
+                    },
+                )
+            # Unsupported memories go, except dismissed ones: "stop telling me this"
+            # is a standing decision, and deleting it would let the system speak up
+            # again as soon as the evidence came back (§5.12).
+            connection.execute(
+                text(
+                    """DELETE FROM learner_memory
+                       WHERE kind = 'recurring_error_pattern'
+                         AND dismissed_at IS NULL
+                         AND NOT (subject_key = ANY(:supported))"""
+                ),
+                {"supported": [draft.subject_key for draft in drafts]},
+            )
+        return [draft.subject_key for draft in drafts]
+
+    def _rebuild_learner_memories_quietly(self) -> None:
+        """Best-effort rebuild for call sites whose main job must not fail with it.
+
+        Memory is personalisation on top of a chat turn or a deletion that already
+        succeeded; per the degradation gate, losing it costs a paragraph of prompt
+        context, not the user's action. The next rebuild repairs it from events.
+        """
+        try:
+            self.rebuild_learner_memories()
+        except Exception:
+            logger.exception("Failed to rebuild learner memories")
+
+    def list_learner_memories(self, *, include_dismissed: bool = True) -> list[dict[str, Any]]:
+        where = "" if include_dismissed else "WHERE dismissed_at IS NULL"
         with self.engine.connect() as connection:
             rows = connection.execute(
                 text(
-                    """SELECT ci.category, ci.original_fragment, ci.replacement, ci.reason_zh
-                    FROM chat_correction_item ci
-                    JOIN chat_correction c ON c.id = ci.correction_id
-                    ORDER BY c.created_at DESC, ci.id DESC LIMIT :limit"""
-                ),
-                {"limit": limit},
+                    f"""SELECT * FROM learner_memory {where}
+                        ORDER BY evidence_count DESC, latest_evidence_at DESC, id"""
+                )
             ).mappings().all()
-        return build_correction_guidance(rows, max_characters=max_characters)
+        return [dict(row) for row in rows]
+
+    def set_learner_memory_dismissed(self, memory_id: int, *, dismissed: bool) -> dict[str, Any] | None:
+        """Idempotent mute/unmute. Only `dismissed_at` moves — the derived facts and
+        the evidence behind them stay exactly as they were (§5.12, same shape as the
+        evidence reject/unreject in §5.11)."""
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    """UPDATE learner_memory
+                       SET dismissed_at = CASE WHEN :dismissed THEN COALESCE(dismissed_at, now()) END
+                       WHERE id = :memory_id
+                       RETURNING *"""
+                ),
+                {"memory_id": memory_id, "dismissed": dismissed},
+            ).mappings().one_or_none()
+        return dict(row) if row is not None else None
+
+    def recent_correction_guidance(self, *, max_characters: int = 600) -> str:
+        """Light personalisation for a new chat turn, now sourced from memories.
+
+        This used to read `chat_correction_item` directly and re-derive categories
+        on every call — a leftover read of the very table §5.11 demoted from being
+        a read path. Going through `learner_memory` means the injected sentence is
+        the same one the learner can inspect and switch off.
+        """
+        memories = self.list_learner_memories(include_dismissed=False)
+        return build_memory_guidance(memories, max_characters=max_characters)
 
     def voice_profiles(self) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:

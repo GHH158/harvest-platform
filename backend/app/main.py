@@ -1244,6 +1244,34 @@ def unreject_grammar_evidence(event_id: int) -> dict:
     return {**updated, "evidence": repo.grammar_evidence(str(updated["key"]))}
 
 
+@app.get("/learner/memories")
+def list_learner_memories() -> list[dict]:
+    """What the system currently believes about the learner, and why (§5.12).
+
+    Long-term judgements that shape future teaching have to be inspectable —
+    §13.7 — so every row carries its `reason` and evidence count alongside the
+    sentence that actually gets injected into the prompt.
+    """
+    return repository().list_learner_memories()
+
+
+@app.post("/learner/memories/{memory_id}/dismiss")
+def dismiss_learner_memory(memory_id: int) -> dict:
+    """Stop acting on one memory. Idempotent; the row and its evidence stay."""
+    updated = repository().set_learner_memory_dismissed(memory_id, dismissed=True)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="没有这条记忆。")
+    return updated
+
+
+@app.post("/learner/memories/{memory_id}/restore")
+def restore_learner_memory(memory_id: int) -> dict:
+    updated = repository().set_learner_memory_dismissed(memory_id, dismissed=False)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="没有这条记忆。")
+    return updated
+
+
 @app.get("/vocabulary")
 def list_vocabulary() -> list[dict]:
     return repository().list_vocabulary()

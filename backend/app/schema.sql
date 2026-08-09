@@ -358,3 +358,34 @@ DROP TRIGGER IF EXISTS trg_shadowing_attempt_learning_event_delete ON shadowing_
 CREATE TRIGGER trg_shadowing_attempt_learning_event_delete
     AFTER DELETE ON shadowing_attempt
     FOR EACH ROW EXECUTE FUNCTION delete_learning_events_for_source();
+
+-- Learner memory (M1-C, full contract in §5.12). A claim about the *person* spanning
+-- many objects — "recently keeps being corrected on particles" — as opposed to
+-- LearnerState, which is per-object (grammar_encounter already is one). Every column
+-- here is recomputed from learning_event by a fixed rule, with exactly one exception:
+-- dismissed_at is the learner's explicit rejection, a new fact rather than something
+-- derivable from evidence, so a rebuild must never clear it.
+CREATE TABLE IF NOT EXISTS learner_memory (
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    schema_version     TEXT NOT NULL DEFAULT 'learner-memory-v1',
+    kind               TEXT NOT NULL,   -- recurring_error_pattern (only value so far)
+    subject_kind       TEXT NOT NULL,   -- correction_category
+    subject_key        TEXT NOT NULL,
+    content            TEXT NOT NULL,   -- the sentence shown to the learner AND injected
+    reason             TEXT NOT NULL,   -- which rule produced this, in plain Chinese
+    confidence         TEXT NOT NULL,   -- weak | moderate | strong — ordinal, NOT a probability
+    evidence_count     INT NOT NULL,
+    evidence_refs      JSONB NOT NULL,  -- learning_event ids, so every claim is traceable
+    rule_version       TEXT NOT NULL,
+    latest_evidence_at TIMESTAMPTZ NOT NULL,  -- from the event's occurred_at, not write time
+    dismissed_at       TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (kind, subject_kind, subject_key)
+);
+CREATE INDEX IF NOT EXISTS idx_learner_memory_active
+    ON learner_memory(kind, latest_evidence_at DESC)
+    WHERE dismissed_at IS NULL;
+DROP TRIGGER IF EXISTS trg_learner_memory_updated ON learner_memory;
+CREATE TRIGGER trg_learner_memory_updated BEFORE UPDATE ON learner_memory
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();

@@ -316,7 +316,9 @@ def test_chat_repository_session_correction_filters_and_deletes() -> None:
         assert repository.chat_corrections(category="grammar")[0]["id"] == correction_id
         assert repository.chat_corrections(category="register") == []
         assert repository.chat_corrections(cursor=correction_id, session_id=session_id) == []
-        assert "grammar" in repository.recent_correction_guidance()
+        # One correction is not yet a pattern: §5.12 needs three in a category before
+        # anything is injected, so a single mistake never becomes "反复被纠正".
+        assert repository.recent_correction_guidance() == ""
 
         assert repository.delete_chat_correction(correction_id) is True
         assert repository.chat_corrections(session_id=session_id) == []
@@ -1066,7 +1068,11 @@ def test_learning_event_dual_write_reject_unreject_and_cleanup_on_delete() -> No
                 text(
                     """SELECT id, kind, source_table, source_id, occurred_at, payload
                        FROM learning_event
-                       WHERE source_table = 'chat_correction_item' AND source_id = :source_id"""
+                       WHERE source_table = 'chat_correction_item' AND source_id = :source_id
+                         AND subject_kind = 'grammar_point'"""
+                    # One correction now carries two subjects (§5.11): the grammar
+                    # association tested here, plus a correction_category event that
+                    # exists even when the model gave no grammar_key.
                 ),
                 {"source_id": correction_item_id},
             ).mappings().one()
@@ -1094,7 +1100,8 @@ def test_learning_event_dual_write_reject_unreject_and_cleanup_on_delete() -> No
                 text(
                     """SELECT id, backfilled, occurred_at, payload
                        FROM learning_event
-                       WHERE source_table = 'chat_correction_item' AND source_id = :source_id"""
+                       WHERE source_table = 'chat_correction_item' AND source_id = :source_id
+                         AND subject_kind = 'grammar_point'"""
                 ),
                 {"source_id": correction_item_id},
             ).mappings().one()
@@ -1132,7 +1139,7 @@ def test_learning_event_dual_write_reject_unreject_and_cleanup_on_delete() -> No
             )
             count = connection.execute(
                 text("SELECT count(*) FROM learning_event WHERE source_table = 'chat_correction_item'"
-                     " AND source_id = :source_id"),
+                     " AND source_id = :source_id AND subject_kind = 'grammar_point'"),
                 {"source_id": correction_item_id},
             ).scalar_one()
         assert count == 1
@@ -1665,4 +1672,260 @@ def test_backfill_covers_vocabulary_saved_and_shadowing_completed_but_not_review
             connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
             connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": tts_job_id})
             connection.execute(text("DELETE FROM vocabulary WHERE word = :word"), {"word": word})
+        engine.dispose()
+
+
+def _correction(original: str, replacement: str, category: str, grammar_key: str | None = None):
+    return {
+        "corrected_text": replacement,
+        "summary_zh": "总结",
+        "items": [
+            {
+                "original": original,
+                "replacement": replacement,
+                "reason_zh": "理由",
+                "category": category,
+                **({"grammar_key": grammar_key} if grammar_key else {}),
+            }
+        ],
+    }
+
+
+@pytest.mark.integration
+def test_learner_memory_forms_from_real_corrections_and_converges_on_delete() -> None:
+    """§5.12: three real corrections in one category become one explainable memory;
+    deleting the evidence takes the memory with it. Also covers the §5.11 fix that
+    every correction is indexed, not only the ones carrying a grammar_key — the
+    word_choice corrections used here have none."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    session_id = f"test-{uuid.uuid4()}"
+    try:
+        repository.create_chat_session(
+            session_id=session_id, topic="记忆", starter_id=None, assistant_content="始めましょう。"
+        )
+        correction_ids: list[int] = []
+        for index in range(3):
+            _, correction, _ = repository.complete_chat_turn(
+                session_id=session_id,
+                user_content=f"随时{index}",
+                assistant_content="いつでも",
+                correction=_correction(f"随时{index}", "いつでも", "word_choice"),
+            )
+            assert correction is not None
+            correction_ids.append(int(correction["id"]))
+
+        # A correction with no grammar_key still produced an indexed event.
+        with engine.connect() as connection:
+            category_events = connection.execute(
+                text(
+                    """SELECT count(*) FROM learning_event
+                       WHERE kind = 'correction_item' AND subject_kind = 'correction_category'
+                         AND subject_key = 'word_choice'"""
+                )
+            ).scalar_one()
+        assert category_events == 3
+
+        memories = repository.list_learner_memories()
+        assert len(memories) == 1
+        memory = memories[0]
+        assert memory["subject_key"] == "word_choice"
+        assert memory["evidence_count"] == 3
+        assert memory["confidence"] == "weak"
+        assert "词语选择" in memory["content"]
+        assert len(memory["evidence_refs"]) == 3
+        assert memory["dismissed_at"] is None
+        # The memory is what personalises the next chat turn.
+        assert memory["content"] in repository.recent_correction_guidance()
+
+        # Rebuilding is a full recompute: idempotent, and it does not duplicate rows.
+        repository.rebuild_learner_memories()
+        repository.rebuild_learner_memories()
+        assert len(repository.list_learner_memories()) == 1
+
+        # Drop below the threshold and the memory disappears on its own.
+        assert repository.delete_chat_correction(correction_ids[0]) is True
+        assert repository.list_learner_memories() == []
+        assert repository.recent_correction_guidance() == ""
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM learner_memory"))
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_dismissed_memory_survives_rebuild_and_stays_out_of_the_prompt() -> None:
+    """§5.12: a rebuild may refresh a memory's facts but must never clear the
+    learner's own decision to switch it off."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    session_id = f"test-{uuid.uuid4()}"
+    try:
+        repository.create_chat_session(
+            session_id=session_id, topic="撤销", starter_id=None, assistant_content="始めましょう。"
+        )
+        for index in range(3):
+            repository.complete_chat_turn(
+                session_id=session_id,
+                user_content=f"文{index}",
+                assistant_content="文",
+                correction=_correction(f"文{index}", "文", "naturalness"),
+            )
+        memory_id = int(repository.list_learner_memories()[0]["id"])
+
+        dismissed = repository.set_learner_memory_dismissed(memory_id, dismissed=True)
+        assert dismissed is not None and dismissed["dismissed_at"] is not None
+        # Dismissing takes effect on the very next turn, not just in some list.
+        assert repository.recent_correction_guidance() == ""
+        assert repository.list_learner_memories(include_dismissed=False) == []
+
+        # Idempotent, and a rebuild triggered by new evidence keeps it dismissed.
+        assert repository.set_learner_memory_dismissed(memory_id, dismissed=True) is not None
+        repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="文4",
+            assistant_content="文",
+            correction=_correction("文4", "文", "naturalness"),
+        )
+        after = repository.list_learner_memories()[0]
+        assert after["id"] == memory_id
+        assert after["dismissed_at"] is not None      # the decision survived
+        assert after["evidence_count"] == 4           # but the facts refreshed
+        assert repository.recent_correction_guidance() == ""
+
+        restored = repository.set_learner_memory_dismissed(memory_id, dismissed=False)
+        assert restored is not None and restored["dismissed_at"] is None
+        assert restored["content"] in repository.recent_correction_guidance()
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM learner_memory"))
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_memory_rebuild_failure_does_not_break_a_chat_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Degradation gate: personalisation is an enhancement on top of a turn that
+    already succeeded, so losing it must cost prompt context, not the message."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    session_id = f"test-{uuid.uuid4()}"
+    try:
+        repository.create_chat_session(
+            session_id=session_id, topic="退化", starter_id=None, assistant_content="始めましょう。"
+        )
+
+        def fail_rebuild(**_: Any) -> list[str]:
+            raise RuntimeError("simulated memory rebuild failure")
+
+        monkeypatch.setattr(repository, "rebuild_learner_memories", fail_rebuild)
+        user, correction, assistant = repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="随时",
+            assistant_content="いつでも",
+            correction=_correction("随时", "いつでも", "word_choice"),
+        )
+
+        assert user["content"] == "随时"
+        assert correction is not None
+        assert assistant["content"] == "いつでも"
+        assert repository.list_learner_memories() == []
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM learner_memory"))
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_backfill_indexes_every_correction_category_and_rebuilds_memories() -> None:
+    """Legacy corrections written before the category subject existed must become
+    events too, otherwise the fact layer keeps only grammar-shaped mistakes."""
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    session_id = f"test-{uuid.uuid4()}"
+    try:
+        repository.create_chat_session(
+            session_id=session_id, topic="回填", starter_id=None, assistant_content="始めましょう。"
+        )
+        # Simulate legacy rows: correction items with no learning_event at all.
+        with engine.begin() as connection:
+            for index in range(3):
+                message_id = connection.execute(
+                    text(
+                        """INSERT INTO chat_message (session_id, role, content)
+                           VALUES (:session_id, 'user', :content) RETURNING id"""
+                    ),
+                    {"session_id": session_id, "content": f"旧文{index}"},
+                ).scalar_one()
+                correction_id = connection.execute(
+                    text(
+                        """INSERT INTO chat_correction
+                           (session_id, user_message_id, original_text, corrected_text, summary_zh)
+                           VALUES (:session_id, :message_id, '旧文', '新文', '总结') RETURNING id"""
+                    ),
+                    {"session_id": session_id, "message_id": message_id},
+                ).scalar_one()
+                connection.execute(
+                    text(
+                        """INSERT INTO chat_correction_item
+                           (correction_id, idx, original_fragment, replacement, reason_zh, category)
+                           VALUES (:correction_id, 0, '旧文', '新文', '理由', 'orthography')"""
+                    ),
+                    {"correction_id": correction_id},
+                )
+
+        repository.backfill_learning_events()
+        with engine.connect() as connection:
+            backfilled = connection.execute(
+                text(
+                    """SELECT count(*) FROM learning_event
+                       WHERE subject_kind = 'correction_category' AND subject_key = 'orthography'
+                         AND backfilled = true"""
+                )
+            ).scalar_one()
+        assert backfilled == 3
+
+        memories = repository.list_learner_memories()
+        assert len(memories) == 1
+        assert memories[0]["subject_key"] == "orthography"
+
+        # Running the whole startup path again changes nothing.
+        repository.backfill_learning_events()
+        with engine.connect() as connection:
+            again = connection.execute(
+                text(
+                    """SELECT count(*) FROM learning_event
+                       WHERE subject_kind = 'correction_category' AND subject_key = 'orthography'"""
+                )
+            ).scalar_one()
+        assert again == 3
+        assert len(repository.list_learner_memories()) == 1
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
+            connection.execute(text("DELETE FROM learner_memory"))
         engine.dispose()

@@ -675,6 +675,34 @@ CREATE INDEX idx_learning_event_source ON learning_event(source_table, source_id
 -- delete_learning_events_for_source() 函数(schema.sql 定义),让来源行删除时
 -- 事件同步收敛。当前已覆盖 chat_correction_item / companion_message / vocabulary /
 -- vocabulary_review_attempt / shadowing_attempt。
+
+-- 学习者记忆(M1-C,§5.12 有完整契约)。这是「关于这个人」的跨对象判断,不是
+-- 单个语法点/单个词的状态——后者是 LearnerState,grammar_encounter 已经是一个。
+-- 全部由 learning_event 按固定规则推导,可随时全量重算;唯一不能重算出来的是
+-- dismissed_at,那是使用者的明确否定,属于新事实而非推断。
+CREATE TABLE learner_memory (
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    schema_version     TEXT NOT NULL DEFAULT 'learner-memory-v1',
+    kind               TEXT NOT NULL,   -- recurring_error_pattern(当前唯一,见 §5.12)
+    subject_kind       TEXT NOT NULL,   -- correction_category
+    subject_key        TEXT NOT NULL,   -- 如 grammar / word_choice
+    content            TEXT NOT NULL,   -- 给使用者看的一句中文陈述,不含评价或激励
+    reason             TEXT NOT NULL,   -- 依据什么规则得出,能直接回答「凭什么这么说」
+    confidence         TEXT NOT NULL,   -- weak | moderate | strong;序数,不是概率(§5.12)
+    evidence_count     INT NOT NULL,    -- 支持这条判断的有效事件数,是原始事实
+    evidence_refs      JSONB NOT NULL,  -- learning_event id 列表,可回查到每一条原文
+    rule_version       TEXT NOT NULL,   -- 规则版本;换规则即可识别哪些记忆需重算
+    latest_evidence_at TIMESTAMPTZ NOT NULL,  -- 取自事件 occurred_at,不是本行写入时间
+    dismissed_at       TIMESTAMPTZ,     -- 使用者说「这条不对/别再提」;重算不得清除
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (kind, subject_kind, subject_key)
+);
+CREATE INDEX idx_learner_memory_active
+    ON learner_memory(kind, latest_evidence_at DESC)
+    WHERE dismissed_at IS NULL;
+CREATE TRIGGER trg_learner_memory_updated BEFORE UPDATE ON learner_memory
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 ```
 
 > **延续上一个项目验证过的约定**:枚举字段一律 TEXT、不加 CHECK 约束(§7.3 已写明);`updated_at` 由触发器统一维护,不要在应用层再手动设置一遍——两套机制并存容易在验收时对不上。
@@ -691,7 +719,7 @@ CREATE INDEX idx_learning_event_source ON learning_event(source_table, source_id
 - **个人知识库第一版就是 PostgreSQL 中的完整聊天与结构化纠错**,不引入 pgvector、Embedding 或 RAG。正确且自然的输入只留在聊天历史,不创建 `chat_correction`。**纠错库本身不做复习调度**——`chat_correction` 只供查阅、搜索和新会话的轻量个性化;§5.9 的复习调度只作用于 `vocabulary`,两者不合并
 - **素材库列表 API 是用户状态投影,不是 material 表直出**:`GET /materials` 除时长、来源、创建时间与封面路径外,还要基于当前 job 返回 `progress_percent`、`progress_label`、`eta_minutes`、失败阶段标题、用户可读错误分类、原始错误和 `retryable`;进度是明确的阶段进度,不能伪装成底层云服务未提供的逐字节精度。`POST /materials/{id}/retry` 复用失败 job 的原始 payload 并清空失败状态,不得创建重复 material。
 - 视频与照片素材使用 `media_asset(kind='image', purpose='thumbnail')` 保存本机缩略图;视频在本地转码前后生成一张 JPEG,照片直接复用受控上传副本。`GET /materials/{id}/thumbnail` 只读取数据库登记且仍存在的文件。纯文本/网页材料由 iOS 使用一致的排版占位封面,不为装饰额外调用图片或 AI 服务。
-- 新会话只轻量参考最近 30 个纠错点:按类别取出现最多的 3 类,每类附 1 个近期例子,注入文本最多 600 字;只能让老师自然留意,不得主动测验或把话题拉回旧错误
+- 新会话只轻量参考 §5.12 的学习者记忆:按证据量取最多 3 条,每条自带 1 个近期例子,注入文本最多 600 字;只能让老师自然留意,不得主动测验或把话题拉回旧错误。**一条纠错不构成记忆**——记忆的阈值是同一类别 90 天内 ≥3 次,因此冷启动阶段和偶发错误不会注入任何东西。这是从「最近 30 条纠错现算」换过来时刻意接受的代价:原来单条纠错也会被注入,但那句话只能说成「最近在语法上被纠正过 1 次」,把偶然当成倾向;宁可前几次对话没有个性化,也不要一开始就给模型一个凭一次错误下的判断
 - **`material.status` 只表达用户是否能消费材料**,不表达所有后台增强任务是否都成功:`ready` 表示主媒体与句级时间轴已可用;P2 ASR 这类增强任务失败或低覆盖率时,只把对应 `job` 记为 `failed` / `done`,不得把材料从 `ready` 降级;`downloaded` 表示视频已下载并本地转码完成、等待手动触发转录(此时无 OSS 上传,不可在 iPhone 消费,也不随任务自动推进)
 - **异步子流程必须有自己的状态与错误字段**:`job` 表达后台任务状态;`shadowing_attempt` 表达一次跟读提交的状态。客户端不得通过“结果字段是否为空”猜测任务是否结束
 
@@ -1135,9 +1163,16 @@ Output
 ```text
 kind="correction_item"
   source_table="chat_correction_item"
-  subject_kind="grammar_point"   subject_key=grammar_point.key
   payload = {"original": str, "replacement": str, "reason_zh": str, "category": str}
   confidence = null  # 当前模型归类没有校准值,不用 1.0 制造虚假确定性
+  一条纠错可同时挂在两个主体下(UNIQUE 含 subject_kind,互不覆盖):
+    subject_kind="correction_category"  subject_key=纠错类别   ← 每条纠错都有
+    subject_kind="grammar_point"        subject_key=语法 key   ← 仅当模型给出 grammar_key
+  为什么必须有前者:模型按 §5.6 的约定只在确有把握时才填 grammar_key,词语选择、
+  自然度这类纠错基本永远为空。若只在有 grammar_key 时才产生事件,事件层就只
+  记得住能塞进语法骨架的那部分错误,「这个人最近老在用词上被纠」这类事实从一开始
+  就不存在于事实层——不是查不到,是根本没记。语法关联是一条纠错的附加属性,
+  不是它值不值得被记录的前提。
 
 kind="companion_question"
   source_table="companion_message"
@@ -1215,6 +1250,68 @@ kind="shadowing_completed"
 - 计算本身是一次索引查询,不是模型调用,不会明显增加延迟,可以每轮都算,不需要跨轮缓存。
 
 这一条不依赖 `learning_event` 存在,只需要 `grammar_encounter`(M0 已有),可以独立于本节其余部分先行实现。
+
+### 5.12 学习者记忆契约(M1-C)
+
+本节是 §13.9 M1 里「定义 `LearnerMemory` 与证据关联」那一条的精确契约。范围只覆盖:记忆与状态的边界、第一种记忆 `recurring_error_pattern`、全量重算与收敛语义、使用者的查看与撤销,以及把聊天提示词个性化接到记忆上。**本次不做**通用 `LearnerState` 投影、决策 trace、LLM 记忆提取与守门、向量召回——各自留到后续切片再回写契约。
+
+#### `LearnerMemory` 与 `LearnerState` 的边界
+
+两者都是从事件推导出来的推断,都可重算,写在一起会立刻变成含混结构(接口闸第 6 条)。分界是**判断的对象**:
+
+- **`LearnerState`(状态投影)**:关于**一个对象**当前怎么样。「`verb-te` 这个语法点需要留意」「这个词下次该在周三复习」。`grammar_encounter` 已经是一个这样的投影,`vocabulary.box` 也是。
+- **`LearnerMemory`(学习者记忆)**:关于**这个人**的跨对象倾向,对应 §13.3 分层记忆的第 3 层「学习者画像」。「最近在助词上反复被纠正」不属于任何单个语法点,它是把多个对象上的多条证据合起来才成立的判断。
+
+判据很简单:**能挂到某一个 `subject_key` 上、且删掉那个对象就该消失的,是状态;跨多个对象、要靠汇总才成立的,是记忆。** 按这条,本次不把「某个语法点反复出错」做成记忆——那是 `grammar_encounter.needs_attention` 已经在回答的状态问题,再做一遍就是同一份事实两个入口分叉,正是 §5.11 刚收拾掉的毛病。
+
+#### 第一种记忆:`recurring_error_pattern`
+
+```text
+kind="recurring_error_pattern"
+  subject_kind="correction_category"   subject_key=纠错类别
+      (grammar | word_choice | naturalness | register | orthography)
+  来源  = kind='correction_item' 且 subject_kind='correction_category'
+          且 rejected_at IS NULL 的 learning_event
+  阈值  = 同一类别在时间窗内 ≥ 3 条有效事件
+  时间窗 = 按 occurred_at 取最近 90 天
+  content = "最近在{类别中文名}上反复被纠正(近 90 天 N 次),例如「原文」→「修正」"
+  reason  = "近 90 天内有 N 条该类别的真实纠错,达到 3 条阈值"
+  confidence = weak(3) | moderate(4–6) | strong(≥7)
+  evidence_refs = 窗口内该类别全部有效事件 id(单用户 90 天量级,不做截断)
+```
+
+几处刻意的选择:
+
+- **时间窗必须有,否则记忆只增不减。** 半年前改掉的毛病不该永远挂在使用者身上;90 天内没有新证据,这条记忆在下次重算时自然消失,不需要谁去清理。这也是「状态是可重算的推断」的直接后果。
+- **`confidence` 用序数而不是浮点概率。** §5.11 已经拒绝过给模型归类填 `1.0` 制造虚假确定性,这里同理:三条纠错支持的判断,没有任何校准依据能说它「有 0.5 的概率为真」。存 `weak/moderate/strong` 加上原始的 `evidence_count`,谁都不会误当成概率去乘。界面也不得把它显示成百分比或进度条。
+- **`content` 只陈述,不评价。** 不写「你还需努力」「继续加油」,§1.4 的不游戏化在这里同样有效。它既是给使用者看的句子,也是注入提示词的句子,两处必须是同一句——不能界面上说得温和、提示词里说得严厉。句中带一个最近的真实例子,既满足 §4.3「每类附 1 个近期例子」,也让这条判断当场可验证;例子是随重算刷新的快照,原文仍以 `evidence_refs` 指向的事件为准。
+- **只认真实纠错,不认 AI 自己的输出。** 来源限定为 `correction_item` 事件,且排除已 `rejected_at` 的;§13.2 明确禁止把模型说过的话反过来当使用者的记忆。
+
+#### 全量重算、收敛,以及使用者的否定必须活下来
+
+`rebuild_learner_memories()` 是一次**全量重算**:读当前全部有效事件,按上述规则算出应当存在的记忆集合,然后 upsert 存在的、删除不该存在的。因此——
+
+- **幂等**:证据不变时重复跑结果完全一致,不产生重复行,也不会把 `created_at` 刷新成现在。
+- **删除即收敛**:删掉纠错或整段聊天,事件被既有触发器清理,下次重算时证据数掉到阈值以下,记忆随之消失。重算查询同时带 `rejected_at IS NULL`,被撤销的证据一律不计。**但当前撤销语法关联不会影响记忆**:按 §5.11 的两个主体划分,`/grammar/evidence/{id}/reject` 撤销的是 `grammar_point` 那条(「这不是て形」),同一条纠错的 `correction_category` 事件仍然成立(「你确实被纠正过一次用词」)——两件事本来就该分开,不是遗漏。
+- **`dismissed_at` 是唯一不参与重算的字段。** 使用者说「这条不对」是新事实,不是可以由证据重新推导出来的东西;重算只更新 `content` / `evidence_count` / `confidence` / `latest_evidence_at`,绝不清除 `dismissed_at`。这与 §5.11 证据撤销、§5.10 手动状态优先是同一条原则的第三次应用:**自动推断不得覆盖使用者的明确判断。**
+- 由此引出一条例外:**证据消失时只删除未被撤销的记忆,已撤销的行保留。** 使用者关掉一条记忆的意思通常是「以后别再跟我提这类」,而不是「这一批证据删掉之前别提」;若把撤销行一并删掉,等同证据回升后系统重新开口,把使用者明确关掉的东西又打开了。保留的行就是那条长期决定本身(§13.7「可以关闭某类长期记忆」),证据回升时只刷新它的事实字段,`dismissed_at` 不动,仍然不进提示词。
+
+重算时机:纠错事件写入后、以及证据删除/撤销后各触发一次。与事件索引一样是**最佳努力**——重算失败只记日志,不得让聊天、存词或删除操作失败(退化闸第 5 条)。记忆是个性化增强,不可用时聊天照常进行,只是少一段个性化提示。
+
+#### 消费者:聊天提示词的个性化改读记忆
+
+这一片有真实消费者,不是先建一个没人读的表。现状 `recent_correction_guidance()` 直接查 `chat_correction_item` 取最近 30 条现算——而 §5.11 已经把这张表降级为「不再是投影的读取路径」,这里是当时漏掉的一处。改为读 `learner_memory`:
+
+- 只取 `dismissed_at IS NULL` 的记忆;使用者关掉的判断**立即不再进入提示词**,这正是「撤销」要有的实际效果,而不只是列表里少一行。
+- 保留原有的 600 字上限与最多 3 条的注入格式契约(§4.3),提示词形状不变,变的只是数据来源和它现在带着 `reason` 与证据引用。
+- 没有任何记忆时注入空串,聊天照常开场——冷启动不得因为「还没有记忆」而报错或空转。
+
+#### 查看与撤销
+
+- `GET /learner/memories`:列出记忆,含 `content`、`reason`、`evidence_count`、`confidence` 与是否已撤销。这是 §13.7「凡是会影响未来教学的长期判断,必须能说明根据什么」的落地入口。
+- `POST /learner/memories/{id}/dismiss` / `restore`:幂等,只动 `dismissed_at`,不删行也不改 `content`——与 §5.11 的 reject/unreject 完全同构。
+
+本次先做 API 不做 iOS 界面:后端契约稳定之前铺界面,等于让两边同时变动。iOS 入口留到记忆种类多于一种、值得有一个「系统记住了什么」页面时再做。
 
 ---
 
@@ -1510,6 +1607,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-08 | M1 精确契约定稿(§4.2 `learning_event` 表、§5.11):按讨论中判断优先级排定的三件事——①证据可撤销,新增 `rejected_at`,撤销一条误标的语法关联不必删除整条纠错,模型当初的判断保留为历史事实,用户的否定是新事实而非编辑;②`learning_event` 定为薄信封(id/kind/来源引用/主体/`occurred_at`/`confidence`)+ 按 `kind` 在应用层校验的 JSONB `payload`,不做跨来源的共享字段,避免接口闸第 6 条警告的含混 event 结构;`occurred_at` 与写入时间 `created_at` 严格分开,回填不得让旧证据看起来像刚发生;③系统提示词里的语法目录改为按 `grammar_encounter` 现状动态裁剪,不再无差别携带全部条目,此条不依赖 `learning_event`,可独立先行实现。`chat_correction_item.grammar_key` 与 `companion_grammar_evidence` 降为遗留写入路径,投影改读 `learning_event`,避免同一份事实两个查询入口分叉。本次只定稿契约,未写代码 |
 | 2026-08-09 | M1 第一纵向子切片进入实现并完成阻断审查修正:新增版本化 `learning_event`、按 `kind` 的 Pydantic 判别载荷、纠错/陪读双写、幂等旧数据回填、来源删除触发清理、证据 reject/unreject 与 iOS 撤销入口;事件索引从聊天主事务拆开,失败不回滚真实对话。推翻上一版「等级覆盖率解锁 + 40 条硬上限」的目录裁剪——实测当前 N5 已占 38 条,解锁后只给 N4 留 2 个位置,会让高级使用者的第一次真实错误永远无法登记;改为完整保留当前 67 条轻量目录,仅用学习状态调整顺序。后端 158 项常规测试、独立临时 PostgreSQL 16 项集成测试与 iOS 42 项测试全部通过。此切片不代表 M1 完成,生词/复习、跟读、通用 LearnerMemory / LearnerState 和决策 trace 尚未实施 |
 | 2026-08-09 | M1-B:生词存词/复习与跟读结果接入事件契约(§5.11),先定精确契约再实现。`_record_learning_event` 从写死 `grammar_point` 改为接受任意 `subject_kind`,新增 `vocabulary_saved`(来源 `vocabulary`,仅新增行触发,合并存词不算)、`vocabulary_reviewed`(来源新表 `vocabulary_review_attempt`)、`shadowing_completed`(来源 `shadowing_attempt`,仅评分成功触发,`payload` 只含 `score`,不复制 `audio_path`/`asr_text`)三种 kind,均沿用「来源事实先提交、事件索引后台最佳努力写入」与既有删除触发器收敛的模式。新增 `vocabulary_review_attempt` 作为复习的不可变事实表,`vocabulary.box/review_count/next_review_at` 仍是调度用的可变投影,两者都写、缺一不可;`backfill_learning_events()` 扩展到回填 `vocabulary_saved` 与状态 `ready` 的 `shadowing_completed`,明确不回填 `vocabulary_reviewed`——上线前的复习次数无法拆回逐次事实,如实记为不可回填而非编造。跟读 `occurred_at` 取录音提交时间,不取异步评分完成时间。三种新 kind 本次不建 reject/unreject 或任何读取投影,只做事实索引,留给未来消费者。新增 2 项契约单测与 4 项独立 PostgreSQL 集成测试(幂等回填两次不重复、删除级联收敛、事件写入失败隔离、`occurred_at` 时间语义)。原生沙盒无 Postgres/Docker/Homebrew,改用 `pgserver`(纯 Python 分发的可嵌入 PostgreSQL 16 二进制,不依赖 root 或系统安装)在本机拉起一个独立临时实例验证:后端全部 179 项测试(含新增 4 项与既有 16 项集成测试)全部通过,重复跑两次结果一致,测试结束后动态表(`vocabulary` / `vocabulary_review_attempt` / `shadowing_attempt` / `learning_event`)均清零、无孤儿行,`ruff` 通过。iOS 未改动。`LearnerMemory`、通用 `LearnerState`、决策 trace 与多角色/圆桌仍未实施 |
+| 2026-08-09 | M1-C:`LearnerMemory` 首个切片(§5.12 新增,§4.2 加 `learner_memory` 表)。先定清 **记忆 vs 状态** 的边界——能挂到单个 `subject_key`、删掉那个对象就该消失的是 `LearnerState`(`grammar_encounter` 已是一个),跨多个对象汇总才成立的才是记忆(§13.3 第 3 层学习者画像);据此**不**把「某个语法点反复出错」做成记忆,那是 `needs_attention` 已在回答的状态问题。首个 kind `recurring_error_pattern`:按纠错类别、90 天窗口、≥3 次阈值从事件推导,带 `content`/`reason`/`evidence_refs`/`rule_version`。`confidence` 存 `weak/moderate/strong` 序数而非浮点概率,沿用 §5.11 拒绝虚假 `1.0` 的同一判断;时间窗保证记忆会自然消退,不是只增不减。`rebuild_learner_memories()` 是全量重算,幂等、删除即收敛;`dismissed_at` 是唯一不参与重算的字段,且证据消失时只删未撤销的行——撤销是「以后别再提这类」的长期决定,删掉它等于证据回升后系统擅自重新开口。实现中发现并修掉 M1 的一个真实缺陷:`correction_item` 事件此前**只在模型给出 `grammar_key` 时才写**,而词语选择/自然度按 §5.6 约定基本永远为空,事件层因此只记得住能塞进语法骨架的错误。改为一条纠错可挂两个主体(`correction_category` 每条都有,`grammar_point` 仅在有语法关联时追加),回填同步补齐;语法投影查询本就按 `subject_kind` 过滤,不受影响。消费者是聊天提示词个性化:`recent_correction_guidance()` 从直读 `chat_correction_item`(§5.11 已降级的遗留路径,当时漏掉的一处)改为读记忆,被撤销的记忆当轮即不再注入。随之修订 §4.3:**单条纠错不再进提示词**,冷启动阶段没有个性化——原来单条也注入,但那句只能说成「被纠正过 1 次」,把偶然当倾向,宁可前几轮没有个性化。新增 `GET /learner/memories` 与 dismiss/restore(§13.7 可解释、第 8 闸可撤销);本次不做 iOS 界面,等记忆种类多于一种再说。验证:新增 8 项纯函数单测与 4 项集成测试,用 `pgserver` 起独立 PostgreSQL 16 实例跑全套 **192 项全部通过**,连跑两次结果一致,结束后动态表清零;真实库当场抓出两处本地跑不出来的失败(一条纠错现在有两个事件、单条纠错不再产生记忆),均已按新契约修正。`ruff` 通过,验证后已卸载 `pgserver`。通用 `LearnerState` 投影、决策 trace 与多角色/圆桌仍未实施 |
 
 ---
 

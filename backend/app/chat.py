@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -367,28 +366,8 @@ def correction_payload(turn: ChatModelTurn) -> dict | None:
     return turn.correction.model_dump()
 
 
-def build_correction_guidance(
-    rows: list[Mapping[str, Any]],
-    *,
-    max_characters: int = 600,
-) -> str:
-    """Summarize already-recent correction rows without turning them into a quiz."""
-    categories: dict[str, dict[str, Any]] = {}
-    for order, row in enumerate(rows):
-        category = str(row["category"])
-        value = categories.setdefault(category, {"count": 0, "order": order, "example": row})
-        value["count"] += 1
-    ranked = sorted(
-        categories.items(),
-        key=lambda item: (-int(item[1]["count"]), int(item[1]["order"])),
-    )[:3]
-    lines: list[str] = []
-    line_budget = max(1, (max_characters - max(0, len(ranked) - 1)) // max(1, len(ranked)))
-    for category, value in ranked:
-        example = value["example"]
-        line = (
-            f"- {category}（近期 {value['count']} 次）：{example['original_fragment']} → "
-            f"{example['replacement']}（{example['reason_zh']}）"
-        )
-        lines.append(line[:line_budget])
-    return "\n".join(lines)
+# The old `build_correction_guidance` lived here and re-derived categories from raw
+# `chat_correction_item` rows on every call. It is replaced by `learner_memory`
+# (§5.12): the same §4.3 shape — at most three categories, one recent example each,
+# 600 characters — is now produced by `build_memory_guidance` from stored memories,
+# so the injected sentence is one the learner can also read back and switch off.
