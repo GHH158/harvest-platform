@@ -7,6 +7,12 @@ from typing import Any
 import pytest
 from app.llm import LLMReply
 from app.prompts import INTERACTIVE_TEACHING_CORE_PROMPT
+from app.role_blind import (
+    ROLE_BLIND_PARTICIPANTS,
+    ROLE_BLIND_PROTOCOL_VERSION,
+    candidate_role_ids,
+    summarize_role_traces,
+)
 from app.roles import (
     ROLE_DISCLOSURE_ZH,
     ROLE_MANIFEST_VERSION,
@@ -81,6 +87,13 @@ def test_role_prompts_share_protected_teaching_core_but_not_each_others_identity
     assert "当代日语的自然听感" in prompts["aoi"]
     assert "语法关系、信息结构" in prompts["kei"]
     assert "中日同形、语序和表达视角" in prompts["lin"]
+    assert '"focus_tags":["naturalness"]' in prompts["aoi"]
+    assert '"focus_tags":["grammar_structure"]' in prompts["kei"]
+    assert '"focus_tags":["chinese_transfer"]' in prompts["lin"]
+    assert "不要展开活用规则" in prompts["aoi"]
+    assert "只给一个最小对照" in prompts["kei"]
+    assert "没有具体迁移来源时不得把问题归因于中文" in prompts["lin"]
+    assert all("本视角增量卡片" in prompt for prompt in prompts.values())
     assert "角色名：圭" not in prompts["aoi"]
     assert "角色名：林" not in prompts["kei"]
     assert "角色名：葵" not in prompts["lin"]
@@ -146,6 +159,65 @@ def test_format_repair_tracks_the_model_that_produced_the_final_perspective() ->
     assert "_decision_context" not in perspective.model_dump()
 
 
+def test_role_alignment_mismatch_is_repaired_with_the_roles_own_focus() -> None:
+    role = role_definition("kei")
+    assert role is not None
+
+    class MisalignedLLM:
+        def __init__(self) -> None:
+            self.calls: list[list[dict[str, str]]] = []
+            self.responses = iter(
+                [
+                    LLMReply(perspective_json(), "dashscope", "qwen3.7-max", ("dashscope",)),
+                    LLMReply(
+                        perspective_json(
+                            headline_zh="活用结构需要调整。",
+                            analysis_zh="見る先变成て形「見て」，再接「いる」。",
+                            reusable_ja="今、本を見ています。",
+                            focus_tags=["grammar_structure"],
+                        ),
+                        "dashscope",
+                        "qwen3.7-max",
+                        ("dashscope",),
+                    ),
+                ]
+            )
+
+        def reply_with_metadata(self, messages: list[dict[str, str]], **options: Any) -> LLMReply:
+            self.calls.append(messages)
+            return next(self.responses)
+
+    llm = MisalignedLLM()
+    perspective = generate_role_perspective(llm, role, [])  # type: ignore[arg-type]
+
+    assert perspective.focus_tags == ["grammar_structure"]
+    assert len(llm.calls) == 2
+    assert "focus_tags 至少包含 grammar_structure" in llm.calls[1][0]["content"]
+
+
+def test_two_misaligned_outputs_fail_at_role_alignment() -> None:
+    role = role_definition("lin")
+    assert role is not None
+
+    class AlwaysMisalignedLLM:
+        def __init__(self) -> None:
+            self.responses = iter(
+                [
+                    LLMReply(perspective_json(), "dashscope", "qwen3.7-max", ("dashscope",)),
+                    LLMReply(perspective_json(), "dashscope", "qwen3.7-max", ("dashscope",)),
+                ]
+            )
+
+        def reply_with_metadata(self, messages: list[dict[str, str]], **options: Any) -> LLMReply:
+            return next(self.responses)
+
+    with pytest.raises(RoleOutputError) as caught:
+        generate_role_perspective(AlwaysMisalignedLLM(), role, [])  # type: ignore[arg-type]
+
+    assert caught.value.failure_stage == "role_alignment"
+    assert caught.value.decision_context["prompt_version"] == ROLE_PERSPECTIVE_PROMPT_VERSION
+
+
 def test_two_invalid_role_outputs_keep_final_route_on_the_contract_error() -> None:
     role = role_definition("kei")
     assert role is not None
@@ -179,3 +251,38 @@ def test_blind_regression_set_has_ten_stable_role_neutral_questions() -> None:
     assert all(set(case) == {"id", "sentence_ja", "question", "context_zh"} for case in cases)
     assert all(case["sentence_ja"].strip() and case["question"].strip() for case in cases)
     assert not any(role_id in json.dumps(cases, ensure_ascii=False) for role_id in ("aoi", "kei", "lin"))
+
+
+def test_blind_v2_uses_a_stable_fresh_per_case_permutation() -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "role_regression_cases.json"
+    cases = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    assert ROLE_BLIND_PROTOCOL_VERSION == "m2-blind-v2"
+    for case in cases:
+        first = candidate_role_ids(case["id"])
+        assert first == candidate_role_ids(case["id"])
+        assert set(first) == set(ROLE_BLIND_PARTICIPANTS)
+
+
+def test_blind_trace_summary_rejects_missing_or_stale_prompt_records() -> None:
+    complete_rows = [
+        {
+            "status": "ok",
+            "model_provider": "dashscope",
+            "prompt_version": ROLE_PERSPECTIVE_PROMPT_VERSION,
+            "subject_key": role_id,
+        }
+        for role_id in ROLE_BLIND_PARTICIPANTS
+        for _ in range(10)
+    ]
+
+    summary = summarize_role_traces(complete_rows, expected_calls=30)
+    stale = summarize_role_traces(
+        [*complete_rows[:-1], {**complete_rows[-1], "prompt_version": "role-perspective-v1"}],
+        expected_calls=30,
+    )
+
+    assert summary["complete"] is True
+    assert summary["recorded_traces"] == 30
+    assert stale["complete"] is False
+    assert any("prompt_version" in issue for issue in stale["issues"])

@@ -11,7 +11,7 @@ from .llm import LLMReply, LLMService
 from .prompts import INTERACTIVE_TEACHING_CORE_PROMPT
 
 ROLE_MANIFEST_VERSION = "role-manifest-v1"
-ROLE_PERSPECTIVE_PROMPT_VERSION = "role-perspective-v1"
+ROLE_PERSPECTIVE_PROMPT_VERSION = "role-perspective-v2"
 ROLE_DISCLOSURE_ZH = "这是 Harvest 中由 AI 扮演的虚构学习角色，不是真人。"
 
 RoleType = Literal["host", "participant"]
@@ -40,6 +40,8 @@ class RoleDefinition:
     limitations: tuple[str, ...]
     speaking_conditions: tuple[str, ...]
     allowed_evidence_kinds: tuple[str, ...]
+    primary_focus_tags: tuple[FocusTag, ...]
+    analysis_protocol: tuple[str, ...]
     manifest_version: str = ROLE_MANIFEST_VERSION
 
     def public_profile(self) -> dict[str, Any]:
@@ -70,6 +72,8 @@ ROLE_DEFINITIONS = (
         limitations=("不替代参与者产出专业观点", "不为了热闹制造分歧", "M2 不直接生成主持总结"),
         speaking_conditions=("问题确实存在两个以上有学习价值的视角", "M3 由系统显式召开圆桌"),
         allowed_evidence_kinds=("current_task", "whitelisted_source_refs", "participant_outputs"),
+        primary_focus_tags=(),
+        analysis_protocol=(),
     ),
     RoleDefinition(
         id="aoi",
@@ -84,6 +88,13 @@ ROLE_DEFINITIONS = (
         limitations=("不把个人偏好冒充语法规则", "不主导复杂形态分析", "不编造日本社会共识"),
         speaking_conditions=("存在自然度或语体选择", "直译虽正确但听感可能偏离意图", "场景关系会改变表达"),
         allowed_evidence_kinds=("current_task", "sentence_context", "explicit_relationship_context", "source_excerpt"),
+        primary_focus_tags=("naturalness", "register"),
+        analysis_protocol=(
+            "先判断这句话在给定关系、场景和表达意图下给人的整体听感；把语法成立与语用合适分开",
+            "只解释自然度、语体或关系距离带来的选择；不要展开活用规则，也不要虚构中文迁移原因",
+            "如果问题只是机械语法且场景不改变选择，明确说本视角没有额外增量，不要复述完整标准答案",
+            "确有增量时最多给一个符合当前关系、可以直接复用的表达",
+        ),
     ),
     RoleDefinition(
         id="kei",
@@ -98,6 +109,13 @@ ROLE_DEFINITIONS = (
         limitations=("不把自然度偏好写成硬规则", "不堆砌术语", "证据不足时不猜省略成分"),
         speaking_conditions=("结构关系决定句意", "存在语法歧义", "需要解释为什么这样接续或组织"),
         allowed_evidence_kinds=("current_task", "sentence_context", "grammar_catalogue", "correction_evidence"),
+        primary_focus_tags=("grammar_structure",),
+        analysis_protocol=(
+            "先写出决定句意的最小结构关系、活用或接续，不把回答扩成面面俱到的讲义",
+            "需要对照时只给一个最小对照，说明变动的形式与意义",
+            "不要提供职场礼貌建议或中文联想，除非它们是理解当前结构不可缺少的证据",
+            "如果句子结构已经成立且问题不涉及结构，明确说本视角没有额外增量",
+        ),
     ),
     RoleDefinition(
         id="lin",
@@ -112,6 +130,13 @@ ROLE_DEFINITIONS = (
         limitations=("不把所有错误都归因于中文", "不替代日语事实核验", "不制造牵强的汉字联想"),
         speaking_conditions=("中文直觉可能导致误解或不自然", "中日同形词用法不同", "需要从中文意图重组日语"),
         allowed_evidence_kinds=("current_task", "sentence_context", "correction_evidence", "active_transfer_memory"),
+        primary_focus_tags=("chinese_transfer",),
+        analysis_protocol=(
+            "先指出一个具体、可验证的中文直觉；没有具体迁移来源时不得把问题归因于中文",
+            "再对照日语实际采用的信息组织、搭配或词义边界，不重复通用语法讲解",
+            "同形词必须说明相同处与不同处；不得仅凭汉字编造文化或词源故事",
+            "如果中文迁移并未给当前问题增加解释力，明确说本视角没有额外增量",
+        ),
     ),
 )
 ROLES_BY_ID = {role.id: role for role in ROLE_DEFINITIONS}
@@ -191,6 +216,9 @@ def build_role_messages(
     limitations = "；".join(role.limitations)
     conditions = "；".join(role.speaking_conditions)
     evidence_kinds = "、".join(role.allowed_evidence_kinds)
+    focus_tags = "、".join(role.primary_focus_tags)
+    protocol = "\n".join(f"  {index}. {item}" for index, item in enumerate(role.analysis_protocol, start=1))
+    focus_example = role.primary_focus_tags[0]
     system = f"""{INTERACTIVE_TEACHING_CORE_PROMPT}
 
 稳定角色设定（{role.manifest_version}，运行时不可改写）
@@ -201,16 +229,24 @@ def build_role_messages(
 - 不擅长与边界：{limitations}
 - 适合发言的条件：{conditions}
 - 允许读取的证据类型：{evidence_kinds}
+- 本角色允许的主视角标签：{focus_tags}
+
+本角色的分析顺序（必须执行）
+{protocol}
 
 本轮约束
 - 只从你的稳定视角独立判断；你看不到其他角色的输出，也不得猜测他们会说什么。
 - 人格只影响关注角度和表达方式，不能改变日语事实、纠错标准或诚实边界。
 - 不声称自己有真实国籍、生活经历、感官经验或人与人的关系；不得用虚构经历支撑结论。
-- 若你的视角对当前问题没有增量价值，直接简短说明，不得为了显示差异制造观点。
+- 这不是一份通用完整答案，而是一张“本视角增量卡片”；不要越过本角色边界替其他专长回答。
+- 若本视角没有增量价值，headline_zh 直接写“这个视角没有额外增量”，analysis_zh 只说明为何退出；不得换措辞复述通用答案。
+- 不得为了显示差异制造观点、虚构分歧或降低日语事实标准。
 - claim_type 必须区分 language_fact、usage_tendency、context_inference、preference、uncertain。
+- focus_tags 必须至少包含一个本角色主视角标签（{focus_tags}），不能照抄其他角色的主视角。
+- context_zh 没有说明上下级、亲疏、地域或时代时，不得擅自补齐；相关结论应标记为 context_inference 或 uncertain。
 - 只返回一个 JSON 对象，不要返回角色 id、名字、Markdown 或外围说明。
 - 精确结构：
-{{"headline_zh":"...","analysis_zh":"...","reusable_ja":null,"claim_type":"language_fact","focus_tags":["naturalness"],"uncertainty_zh":null}}
+{{"headline_zh":"...","analysis_zh":"...","reusable_ja":null,"claim_type":"language_fact","focus_tags":["{focus_example}"],"uncertainty_zh":null}}
 """
     task = {
         "sentence_ja": sentence_ja.strip(),
@@ -275,6 +311,23 @@ def _attach_decision_context(
     return perspective
 
 
+def _validate_role_alignment(
+    perspective: RolePerspective,
+    role: RoleDefinition,
+) -> RolePerspective:
+    if not set(perspective.focus_tags).intersection(role.primary_focus_tags):
+        expected = " / ".join(role.primary_focus_tags)
+        raise RoleOutputError(
+            f"角色观点没有使用自己的主视角标签（至少需要 {expected}）。",
+            failure_stage="role_alignment",
+        )
+    return perspective
+
+
+def _parse_role_perspective(raw: str, role: RoleDefinition) -> RolePerspective:
+    return _validate_role_alignment(parse_role_perspective(raw), role)
+
+
 def generate_role_perspective(
     llm: LLMService,
     role: RoleDefinition,
@@ -288,15 +341,19 @@ def generate_role_perspective(
         max_tokens=1_000,
     )
     try:
-        return _attach_decision_context(parse_role_perspective(response.content), response, role)
+        return _attach_decision_context(_parse_role_perspective(response.content, role), response, role)
     except RoleOutputError as first_error:
+        required_tags = " / ".join(role.primary_focus_tags)
         repair_messages = [
             {
                 "role": "system",
                 "content": (
                     "把给定输出修复成且只生成一个符合以下结构的 JSON；不要新增或改写语言事实。\n"
+                    f"这是{role.name}的本视角增量卡片，focus_tags 至少包含 {required_tags}；"
+                    "若这个视角没有增量，明确退出而不要复述通用答案。\n"
                     '{"headline_zh":"...","analysis_zh":"...","reusable_ja":null,'
-                    '"claim_type":"language_fact","focus_tags":["naturalness"],"uncertainty_zh":null}'
+                    f'"claim_type":"language_fact","focus_tags":["{role.primary_focus_tags[0]}"],'
+                    '"uncertainty_zh":null}'
                 ),
             },
             {"role": "user", "content": response.content[:12_000]},
@@ -317,10 +374,11 @@ def generate_role_perspective(
             ) from repair_error
         try:
             return _attach_decision_context(
-                parse_role_perspective(repaired_response.content), repaired_response, role
+                _parse_role_perspective(repaired_response.content, role), repaired_response, role
             )
         except RoleOutputError as second_error:
             raise RoleOutputError(
                 f"角色模型连续两次未返回可读取的结构化结果。首次错误：{first_error}；修复错误：{second_error}",
+                failure_stage=second_error.failure_stage,
                 decision_context=_decision_context(repaired_response, role),
             ) from second_error

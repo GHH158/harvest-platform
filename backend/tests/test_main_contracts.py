@@ -576,7 +576,7 @@ def test_role_catalogue_and_single_preview_keep_identity_server_owned(
             "decision_context": {
                 "model_provider": "deepseek",
                 "model_name": "deepseek-v4-flash",
-                "prompt_version": "role-perspective-v1",
+                "prompt_version": "role-perspective-v2",
                 "manifest_version": "role-manifest-v1",
                 "attempted_providers": ["dashscope", "deepseek"],
             },
@@ -656,7 +656,7 @@ def test_role_model_failure_is_attributed_without_touching_other_learning_paths(
     assert caught.value.status_code == 503
     assert repository.traces[0]["status"] == "failed"
     assert repository.traces[0]["failure_stage"] == "model_call"
-    assert repository.traces[0]["decision_context"] == {"prompt_version": "role-perspective-v1"}
+    assert repository.traces[0]["decision_context"] == {"prompt_version": "role-perspective-v2"}
 
 
 def test_dictionary_prompt_ranks_the_chinese_difference_first() -> None:

@@ -2152,7 +2152,7 @@ def test_decision_trace_records_success_and_locates_the_failing_stage(
             decision_context={
                 "model_provider": "deepseek",
                 "model_name": "deepseek-v4-flash",
-                "prompt_version": "role-perspective-v1",
+                "prompt_version": "role-perspective-v2",
                 "attempted_providers": ["deepseek"],
             },
             detail={"claim_type": "usage_tendency", "focus_tags": ["naturalness"]},
@@ -2163,7 +2163,7 @@ def test_decision_trace_records_success_and_locates_the_failing_stage(
         assert role_trace[0]["subject_kind"] == "role"
         assert role_trace[0]["subject_key"] == "aoi"
         assert role_trace[0]["model_name"] == "deepseek-v4-flash"
-        assert role_trace[0]["prompt_version"] == "role-perspective-v1"
+        assert role_trace[0]["prompt_version"] == "role-perspective-v2"
         assert role_trace[0]["detail"] == {
             "claim_type": "usage_tendency",
             "focus_tags": ["naturalness"],
