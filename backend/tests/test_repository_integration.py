@@ -2143,6 +2143,32 @@ def test_decision_trace_records_success_and_locates_the_failing_stage(
         assert companion[0]["prompt_version"] == "companion-turn-v1"
         assert companion[0]["detail"]["attempted_providers"] == ["dashscope"]
 
+        repository.record_role_preview_trace(
+            role_id="aoi",
+            manifest_version="role-manifest-v1",
+            status="ok",
+            reason="单角色预览生成成功",
+            duration_ms=12,
+            decision_context={
+                "model_provider": "deepseek",
+                "model_name": "deepseek-v4-flash",
+                "prompt_version": "role-perspective-v1",
+                "attempted_providers": ["deepseek"],
+            },
+            detail={"claim_type": "usage_tendency", "focus_tags": ["naturalness"]},
+        )
+        role_trace = repository.list_decision_traces(call_source="role_perspective_preview")
+        assert len(role_trace) == 1
+        assert role_trace[0]["rule_version"] == "role-manifest-v1"
+        assert role_trace[0]["subject_kind"] == "role"
+        assert role_trace[0]["subject_key"] == "aoi"
+        assert role_trace[0]["model_name"] == "deepseek-v4-flash"
+        assert role_trace[0]["prompt_version"] == "role-perspective-v1"
+        assert role_trace[0]["detail"] == {
+            "claim_type": "usage_tendency",
+            "focus_tags": ["naturalness"],
+        }
+
         # Now break the rebuild and confirm the failure is attributable.
         def fail_rebuild(**_: Any) -> list[str]:
             raise RuntimeError("simulated failure")
