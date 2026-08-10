@@ -1446,6 +1446,21 @@ def get_shadowing(attempt_id: int) -> dict:
     return attempt
 
 
+@app.get("/home/resume")
+def get_resume_hint() -> dict:
+    """§5.18: the one thing on the home screen that knows what you were doing.
+
+    A statement, never a verdict: "you stopped at 0:43", not "you have not studied for
+    three days". `hint` is null when there is nothing worth saying, and the client then
+    shows nothing at all rather than filling the space with encouragement (§1.4).
+
+    Wrapped in an envelope rather than returned as a bare `null` because a top-level JSON
+    null does not decode reliably into a Swift Optional.
+    """
+
+    return {"hint": repository().resume_hint()}
+
+
 @app.get("/jobs/{job_id}")
 def get_job(job_id: int) -> dict:
     job = repository().get_job(job_id)

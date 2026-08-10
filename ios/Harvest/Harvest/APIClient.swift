@@ -231,6 +231,12 @@ struct APIClient {
         try await get("ask")
     }
 
+    /// §5.18: at most one fact about where you left off, or nil.
+    func resumeHint() async throws -> ResumeHint? {
+        let envelope: ResumeHintEnvelope = try await get("home/resume")
+        return envelope.hint
+    }
+
     // MARK: Private journal (§14) — nothing here touches learning data.
 
     func journalEntries() async throws -> [JournalEntry] {

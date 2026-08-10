@@ -29,6 +29,18 @@ DECISION_TRACE_RETENTION_DAYS = 30
 # so that opening it, and answering in it, never gets slower as the history grows (§5.17).
 JOURNAL_TIMELINE_LIMIT = 20
 
+# §5.18: what counts as "you stopped in the middle" rather than "you finished" or "you
+# opened it and backed out". Both numbers come from looking at the real database on
+# 2026-08-10: three of four saved positions sat at 85–88% (finished — reminding you about
+# those is just nagging) and one sat at 7% (actually interrupted). A 90% ceiling would
+# have turned all three finished materials into reminders.
+#
+# The ratio is a filter and never leaves the repository: §4.2 says playback position
+# expresses media resumption, not learning progress, so showing it as a percentage would
+# be §1.4's banned progress bar under another name.
+RESUME_MIN_RATIO = 0.02
+RESUME_MAX_RATIO = 0.80
+
 
 @dataclass(frozen=True)
 class Job:
@@ -2556,6 +2568,84 @@ class Repository:
             },
         )
         return self._vocabulary_row(row)
+
+    def resume_hint(self) -> dict[str, Any] | None:
+        """§5.18: one fact about where you left off, or nothing at all.
+
+        Returns structured fields, not a sentence — the wording is UI copy and belongs
+        to §1.5. What lives here is the *selection rule*, so that "which single thing is
+        worth saying" is defined in exactly one place.
+
+        Nothing is invented: both branches read tables that already exist. When neither
+        matches, the answer is None and the row simply does not appear (§1.4 — an empty
+        shelf is allowed to read as empty, not as an invitation).
+        """
+
+        with self.engine.connect() as connection:
+            interrupted = connection.execute(
+                text(
+                    """SELECT m.id, m.kind, m.title, p.position_ms, p.updated_at
+                       FROM material_playback_state p
+                       JOIN material m ON m.id = p.material_id
+                       WHERE m.status = 'ready'
+                         AND m.duration_ms IS NOT NULL
+                         AND m.duration_ms > 0
+                         AND p.position_ms::numeric / m.duration_ms > :low
+                         AND p.position_ms::numeric / m.duration_ms < :high
+                       ORDER BY p.updated_at DESC, p.material_id DESC
+                       LIMIT 1"""
+                ),
+                {"low": RESUME_MIN_RATIO, "high": RESUME_MAX_RATIO},
+            ).mappings().first()
+            if interrupted is not None:
+                sentence_number: int | None = None
+                if interrupted["kind"] == "reading":
+                    # Reading says "sentence N"; a timestamp is the natural unit for video
+                    # but a strange one for an article (§5.18).
+                    latest_idx = connection.execute(
+                        text(
+                            """SELECT max(idx) FROM segment
+                               WHERE material_id = :material_id AND start_ms <= :position_ms"""
+                        ),
+                        {
+                            "material_id": int(interrupted["id"]),
+                            "position_ms": int(interrupted["position_ms"]),
+                        },
+                    ).scalar()
+                    if latest_idx is not None:
+                        sentence_number = int(latest_idx) + 1
+                return {
+                    "kind": "material",
+                    "material_id": int(interrupted["id"]),
+                    "material_kind": interrupted["kind"],
+                    "title": interrupted["title"],
+                    "position_ms": int(interrupted["position_ms"]),
+                    "sentence_number": sentence_number,
+                    "at": interrupted["updated_at"],
+                }
+
+            # Only points the learner has run into but has not called understood. An
+            # understood point resurfacing is not something to be nudged about, and
+            # §5.10 forbids automation quietly downgrading that state.
+            encountered = connection.execute(
+                text(
+                    """SELECT p.key, p.title_ja, p.title_zh, e.last_evidence_at
+                       FROM grammar_encounter e
+                       JOIN grammar_point p ON p.id = e.point_id
+                       WHERE e.status = 'encountered'
+                       ORDER BY e.last_evidence_at DESC, p.id DESC
+                       LIMIT 1"""
+                )
+            ).mappings().first()
+            if encountered is not None:
+                return {
+                    "kind": "grammar",
+                    "grammar_key": encountered["key"],
+                    "title_ja": encountered["title_ja"],
+                    "title_zh": encountered["title_zh"],
+                    "at": encountered["last_evidence_at"],
+                }
+        return None
 
     # ------------------------------------------------------------------
     # Private journal (§14) — nothing below this line touches learning data.

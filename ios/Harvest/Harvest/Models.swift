@@ -529,3 +529,44 @@ struct JournalPostResult: Codable {
         case replyError = "reply_error"
     }
 }
+
+// MARK: - §5.18 首页的一句「上次到哪儿了」
+
+/// Structured facts, not a rendered sentence: the server owns *which* single thing is
+/// worth saying, the view owns how it reads (§1.5).
+///
+/// Note what is absent — there is no percentage and no completion field. §4.2 says a
+/// saved playback position expresses media resumption, not learning progress, so the
+/// ratio stays inside the repository as a filter and never reaches the client (§5.18).
+struct ResumeHint: Codable, Hashable {
+    /// "material" or "grammar".
+    let kind: String
+    let materialID: Int?
+    let materialKind: String?
+    let title: String?
+    let positionMS: Int?
+    /// Reading materials report a sentence number; video reports a timestamp instead.
+    let sentenceNumber: Int?
+    let grammarKey: String?
+    let titleJA: String?
+    let titleZH: String?
+
+    enum CodingKeys: String, CodingKey {
+        case kind, title
+        case materialID = "material_id"
+        case materialKind = "material_kind"
+        case positionMS = "position_ms"
+        case sentenceNumber = "sentence_number"
+        case grammarKey = "grammar_key"
+        case titleJA = "title_ja"
+        case titleZH = "title_zh"
+    }
+
+    var isMaterial: Bool { kind == "material" }
+}
+
+/// An envelope only because a top-level JSON `null` does not decode into a Swift
+/// Optional; `hint == nil` means there is nothing to show and the row disappears.
+struct ResumeHintEnvelope: Codable {
+    let hint: ResumeHint?
+}

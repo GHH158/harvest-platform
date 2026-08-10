@@ -8,11 +8,17 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var configuration: AppConfiguration
     @State private var counts = HomeCounts()
+    /// §5.18. Nil means there is nothing worth saying, and then nothing is shown.
+    @State private var resume: ResumeHint?
+    /// Already fetched for the grammar count; kept so the resume line can open the
+    /// actual point instead of dropping you on the list to find it again.
+    @State private var grammarPoints: [GrammarPoint] = []
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 askCard
+                resumeLine
                 destinations
                 journalEntry
             }
@@ -37,6 +43,8 @@ struct HomeView: View {
             case .chat: ChatView()
             case .accumulation: AccumulationView()
             case .journal: JournalView()
+            case let .material(materialID): ReaderView(materialID: materialID)
+            case let .grammar(point): GrammarDetailView(point: point)
             case .settings: SettingsView(isOnboarding: false)
             }
         }
@@ -61,6 +69,76 @@ struct HomeView: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    /// §5.18: the one thing here that knows what you were doing last time. §13.1 asks for
+    /// the hundredth launch to feel more familiar than the first; this is the cheapest way
+    /// to keep that promise — every word of it comes from state the app already stores.
+    ///
+    /// The line it must never cross: "上次停在 0:43" is a statement, "你已经三天没学习了"
+    /// is a verdict. §1.4 bans the second one, not the first. So there is no percentage,
+    /// no streak, and nothing at all when there is nothing to say.
+    @ViewBuilder private var resumeLine: some View {
+        if let resume, let destination = resumeDestination(resume) {
+            NavigationLink(value: destination) {
+                HStack(spacing: 6) {
+                    Text(resumeText(resume))
+                        .font(.subheadline)
+                        .foregroundStyle(DesignTokens.ink)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(DesignTokens.muted.opacity(0.6))
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func resumeText(_ hint: ResumeHint) -> String {
+        guard hint.isMaterial else {
+            // Stating the state the learner themselves controls (§12 has exactly three),
+            // not grading them for it.
+            let name = hint.titleJA ?? hint.grammarKey ?? "有个语法点"
+            return "\(name) 撞见过，还没弄懂"
+        }
+        let position: String
+        if hint.materialKind == "reading", let number = hint.sentenceNumber {
+            position = "上次读到第 \(number) 句"
+        } else {
+            position = "上次停在 \(clockText(hint.positionMS ?? 0))"
+        }
+        guard let title = hint.title, !title.isEmpty else { return position }
+        return "\(position) · \(shortened(title))"
+    }
+
+    private func resumeDestination(_ hint: ResumeHint) -> HomeDestination? {
+        if hint.isMaterial {
+            return hint.materialID.map(HomeDestination.material)
+        }
+        guard let key = hint.grammarKey else { return nil }
+        // Falling back to the 积累 page rather than nowhere: one more tap is still better
+        // than a line that does not respond.
+        guard let point = grammarPoints.first(where: { $0.key == key }) else { return .accumulation }
+        return .grammar(point)
+    }
+
+    private func clockText(_ milliseconds: Int) -> String {
+        let total = max(0, milliseconds) / 1_000
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    /// Titles are derived from the opening words of the material, so they can run long.
+    private func shortened(_ title: String) -> String {
+        title.count <= 14 ? title : String(title.prefix(14)) + "…"
     }
 
     private var destinations: some View {
@@ -139,12 +217,18 @@ struct HomeView: View {
         async let topics = try? client.chatSessions()
         async let vocabulary = try? client.listVocabulary()
         async let grammar = try? client.listGrammar()
+        // §5.18 rides along in the same batch. Same failure policy as the counts: if it
+        // does not come back the line simply is not there.
+        async let hint = try? client.resumeHint()
+        let points = await grammar
         counts = HomeCounts(
             materials: await materials?.count,
             chatSessions: await topics?.count,
             vocabulary: await vocabulary?.count,
-            grammarNeedsAttention: await grammar?.filter(\.requiresAttention).count
+            grammarNeedsAttention: points?.filter(\.requiresAttention).count
         )
+        grammarPoints = points ?? []
+        resume = (await hint) ?? nil
     }
 }
 
@@ -154,6 +238,11 @@ enum HomeDestination: Hashable {
     case chat
     case accumulation
     case journal
+    /// §5.18 opens the material itself rather than the list, so the line actually takes
+    /// you back to where you stopped. Not `Int` as its own destination type: the material
+    /// list already claims `Int` in this same stack.
+    case material(Int)
+    case grammar(GrammarPoint)
     case settings
 }
 
