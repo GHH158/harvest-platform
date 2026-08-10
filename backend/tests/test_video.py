@@ -1,7 +1,9 @@
 import subprocess
+import tempfile
 from pathlib import Path
 
-from app.video import VideoDownloader, VideoProcessor
+import pytest
+from app.video import VideoDownloader, VideoProcessor, _trim_arguments
 
 
 def test_video_processor_uses_project_local_ffmpeg() -> None:
@@ -140,3 +142,81 @@ def test_video_processor_limits_software_fallback_threads(monkeypatch, tmp_path:
     assert calls[1][calls[1].index("-threads") + 1] == "2"
     assert calls[2].count("-threads") == 2
     assert all(calls[2][index + 1] == "2" for index, value in enumerate(calls[2]) if value == "-threads")
+
+
+# --- §15: cutting one section out of a longer source ---
+
+
+def test_trim_arguments_use_input_seek_and_duration() -> None:
+    """§15.4 / `_trim_arguments`: `-ss` before `-i` and `-t` rather than `-to`.
+
+    After an input seek the output timeline restarts at zero, so `-to` would be measured
+    against the original clock and cut the wrong amount.
+    """
+
+    assert _trim_arguments(None, None) == ()
+    assert _trim_arguments(0, 5_000) == ("-t", "5.000")
+    assert _trim_arguments(304_000, 621_000) == ("-ss", "304.000", "-t", "317.000")
+    # Open-ended last section: seek in, read to EOF.
+    assert _trim_arguments(621_000, None) == ("-ss", "621.000")
+
+
+def test_a_zero_or_negative_window_is_rejected_not_silently_encoded() -> None:
+    with pytest.raises(ValueError, match="正的时长"):
+        _trim_arguments(5_000, 5_000)
+    with pytest.raises(ValueError, match="正的时长"):
+        _trim_arguments(9_000, 5_000)
+
+
+def test_a_windowed_cut_never_uses_stream_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§15.4. Note the *reason*, which was corrected by measurement on 2026-08-11: with
+    ffmpeg 7.1 an input-side `-ss` plus `-c copy` is already frame-accurate (a 13.5s cut of
+    a 30s source gave exactly 16.50s), so the old "it slides to the nearest keyframe"
+    justification does not hold. What does hold is that a copy cut starts on a non-keyframe
+    (`iskey:0`), and HLS segments must start at keyframes — so packaging it needs a
+    re-encode anyway. The guard below is what keeps that true.
+    """
+
+    transcoder = VideoProcessor()
+    seen: list[dict[str, object]] = []
+
+    def fake_video_hls(source, video_directory, *, direct_video_copy, window=()):
+        seen.append({"direct_video_copy": direct_video_copy, "window": window})
+        return "software"
+
+    monkeypatch.setattr(transcoder, "_video_hls", fake_video_hls)
+    monkeypatch.setattr(transcoder, "_run", lambda *arguments: None)
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        transcoder.create_hls(
+            root / "source.mp4",
+            root / "video",
+            root / "audio",
+            direct_video_copy=True,
+            start_ms=304_000,
+            end_ms=621_000,
+        )
+    assert seen[0]["direct_video_copy"] is False
+    assert seen[0]["window"] == ("-ss", "304.000", "-t", "317.000")
+
+
+def test_without_a_window_stream_copy_is_still_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The link-download path must keep its fast no-re-encode packaging (§3.4)."""
+
+    transcoder = VideoProcessor()
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        transcoder,
+        "_video_hls",
+        lambda source, directory, *, direct_video_copy, window=(): (
+            seen.append(direct_video_copy) or "copy"
+        ),
+    )
+    monkeypatch.setattr(transcoder, "_run", lambda *arguments: None)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        transcoder.create_hls(
+            root / "source.mp4", root / "video", root / "audio", direct_video_copy=True
+        )
+    assert seen == [True]

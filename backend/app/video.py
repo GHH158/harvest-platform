@@ -146,15 +146,30 @@ class VideoProcessor:
         audio_directory: Path,
         *,
         direct_video_copy: bool = False,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> str:
-        """Create independent 6-second VOD segments for watch and shadowing modes."""
+        """Create independent 6-second VOD segments for watch and shadowing modes.
+
+        `start_ms`/`end_ms` cut one section out of a longer source (§15). Stream copy is
+        force-disabled for a windowed cut: `-c copy` can only cut on keyframes, so the
+        learner's carefully placed point would slide by up to ten seconds and might land
+        mid-sentence (§15.4). Re-encoding was going to happen for a phone upload anyway,
+        so cutting during it is frame-accurate and costs nothing extra.
+        """
+        window = _trim_arguments(start_ms, end_ms)
+        if window and direct_video_copy:
+            direct_video_copy = False
         for directory in (video_directory, audio_directory):
             if directory.exists():
                 shutil.rmtree(directory)
             directory.mkdir(parents=True, exist_ok=True)
-        video_mode = self._video_hls(source, video_directory, direct_video_copy=direct_video_copy)
+        video_mode = self._video_hls(
+            source, video_directory, direct_video_copy=direct_video_copy, window=window
+        )
         self._run(
             "-y",
+            *window,
             "-i",
             str(source),
             "-vn",
@@ -176,12 +191,16 @@ class VideoProcessor:
         )
         return video_mode
 
-    def create_thumbnail(self, source: Path, destination: Path) -> None:
+    def create_thumbnail(self, source: Path, destination: Path, *, at_ms: int | None = None) -> None:
+        """`at_ms` picks the frame for one section of a longer source (§15): a section that
+        starts at 10:21 should not be represented by the first second of the whole video."""
+
         destination.parent.mkdir(parents=True, exist_ok=True)
+        offset = "1" if at_ms is None else f"{max(0, int(at_ms)) / 1000 + 1:.3f}"
         arguments = (
             "-y",
             "-ss",
-            "1",
+            offset,
             "-i",
             str(source),
             "-frames:v",
@@ -209,7 +228,14 @@ class VideoProcessor:
                 str(destination),
             )
 
-    def _video_hls(self, source: Path, video_directory: Path, *, direct_video_copy: bool) -> str:
+    def _video_hls(
+        self,
+        source: Path,
+        video_directory: Path,
+        *,
+        direct_video_copy: bool,
+        window: tuple[str, ...] = (),
+    ) -> str:
         """Encode the 720p video HLS using the hardware Media Engine (VideoToolbox),
         which is ~10x faster and uses far less CPU than software x264. Falls back to
         a fast software preset if the hardware encoder is unavailable."""
@@ -243,6 +269,7 @@ class VideoProcessor:
                 self._run(
                     "-y",
                     *input_args,
+                    *window,
                     "-i",
                     str(source),
                     "-filter_threads",
@@ -319,11 +346,44 @@ class VideoProcessor:
             shutil.rmtree(directory)
         directory.mkdir(parents=True, exist_ok=True)
 
-    def extract_audio(self, source: Path, destination: Path) -> None:
+    def extract_audio(
+        self,
+        source: Path,
+        destination: Path,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        self._run("-y", "-i", str(source), "-vn", "-ac", "1", "-c:a", "aac", str(destination))
+        window = _trim_arguments(start_ms, end_ms)
+        self._run(
+            "-y", *window, "-i", str(source), "-vn", "-ac", "1", "-c:a", "aac", str(destination)
+        )
 
     def _run(self, *arguments: str) -> None:
         result = subprocess.run([self.ffmpeg, *arguments], capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg 处理失败: {result.stderr[-800:]}")
+
+
+def _trim_arguments(start_ms: int | None, end_ms: int | None) -> tuple[str, ...]:
+    """ffmpeg input-side trim for one section (§15).
+
+    `-ss` goes before `-i` on purpose: input seeking jumps to the nearest keyframe and
+    discards the rest, which is both fast and — because everything downstream re-encodes —
+    frame-accurate. `-t` (duration) rather than `-to`, since after an input seek the output
+    timeline starts at zero and `-to` would be read against the original clock.
+    """
+
+    if start_ms is None and end_ms is None:
+        return ()
+    arguments: list[str] = []
+    start = max(0, int(start_ms or 0))
+    if start:
+        arguments += ["-ss", f"{start / 1000:.3f}"]
+    if end_ms is not None:
+        duration = max(0, int(end_ms) - start)
+        if duration <= 0:
+            raise ValueError("拆分区间必须是正的时长。")
+        arguments += ["-t", f"{duration / 1000:.3f}"]
+    return tuple(arguments)

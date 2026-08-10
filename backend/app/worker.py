@@ -33,7 +33,10 @@ ENHANCEMENT_JOB_KINDS = {"asr", "translate_reading", "translate_video"}
 # Sentences per subtitle-translation request. Sized against the LLM client's fixed
 # read timeout: 46 sentences in one call succeeded, 137 timed out twice.
 TRANSLATION_BATCH_SIZE = 40
-STANDALONE_JOB_KINDS = {"shadowing", "voice_enrollment", "voice_enrollment_video"}
+# Jobs that legitimately belong to no single material. `split_video` is one because it
+# produces many of them at once (§15.2) — attaching it to any one section would make that
+# section's status and error message stand in for the whole cut.
+STANDALONE_JOB_KINDS = {"shadowing", "voice_enrollment", "voice_enrollment_video", "split_video"}
 
 
 class Worker:
@@ -80,6 +83,8 @@ class Worker:
                 self._translate_reading(job)
             elif job.kind == "shadowing":
                 self._score_shadowing(job)
+            elif job.kind == "split_video":
+                self._split_video(job)
             elif job.kind == "transcode":
                 self._transcode_video(job)
             elif job.kind == "download_video":
@@ -270,6 +275,64 @@ class Worker:
         except Exception:
             duration_ms = None
         self.repository.mark_material_downloaded(job.material_id, duration_ms=duration_ms)
+
+    def _split_video(self, job: Job) -> None:
+        """Cut one uploaded video into the sections the learner marked on their phone (§15).
+
+        Each section is produced exactly the way a whole video would be — 720p video HLS,
+        audio-only HLS, thumbnail, ASR track — and stops at `downloaded`, so nothing reaches
+        OSS until a section's 转录 is tapped (§5.2 step ④, §15.6).
+
+        Sections are processed one at a time and each is marked as it finishes, so a
+        collection is usable while the rest are still encoding, and a failure halfway
+        leaves the finished sections intact rather than losing the whole upload.
+        """
+
+        source = Path(str(job.payload.get("source_path", "")))
+        sections = list(job.payload.get("sections") or [])
+        if not source.exists() or not sections:
+            raise RuntimeError("split_video 任务缺少源文件或拆分区间。")
+        failures: list[str] = []
+        for section in sections:
+            material_id = int(section["material_id"])
+            start_ms = int(section["start_ms"])
+            end_ms = section.get("end_ms")
+            end_ms = int(end_ms) if end_ms is not None else None
+            output_dir = self.settings.data_dir / "video" / f"material-{material_id}"
+            video_directory = output_dir / "hls-video"
+            audio_directory = output_dir / "hls-audio"
+            asr_audio = output_dir / "asr-audio.m4a"
+            thumbnail = output_dir / "thumbnail.jpg"
+            try:
+                try:
+                    self.video.create_thumbnail(source, thumbnail, at_ms=start_ms)
+                    self.repository.store_material_thumbnail(material_id, str(thumbnail))
+                except Exception as error:
+                    print(f"job={job.id} 第 {material_id} 节缩略图失败: {error}", flush=True)
+                self.video.create_hls(
+                    source,
+                    video_directory,
+                    audio_directory,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                )
+                self.video.extract_audio(source, asr_audio, start_ms=start_ms, end_ms=end_ms)
+                try:
+                    duration_ms = audio_duration_ms(asr_audio)
+                except Exception:
+                    duration_ms = None if end_ms is None else end_ms - start_ms
+                self.repository.mark_material_downloaded(material_id, duration_ms=duration_ms)
+            except Exception as error:
+                # One bad section must not cost the others. It stays failed and retryable
+                # while its siblings become usable.
+                failures.append(f"第 {section.get('index', material_id)} 节: {error}")
+                self.repository.mark_material_failed(material_id, str(error))
+        # §15.2 / §15.7: the source video's only purpose was this cut, so it goes — but not
+        # while a section still needs re-cutting from it.
+        if not failures:
+            source.unlink(missing_ok=True)
+        if failures:
+            raise RuntimeError("；".join(failures))
 
     def _download_video(self, job: Job) -> None:
         url = str(job.payload.get("url", "")).strip()

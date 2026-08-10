@@ -465,6 +465,97 @@ async def post_video(title: Annotated[str | None, Form()] = None, video: UploadF
     return {"material_id": material_id, "job_id": job_id, "status": "pending"}
 
 
+def _validated_video_upload(video: UploadFile) -> tuple[Path, str]:
+    """Shared checks for both video upload entry points."""
+
+    if not video.filename:
+        raise HTTPException(status_code=422, detail="请选择一个视频文件。")
+    if not (video.content_type or "").startswith("video/"):
+        raise HTTPException(status_code=415, detail="只接受视频文件。")
+    suffix = Path(video.filename).suffix.lower() or ".mp4"
+    if suffix not in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}:
+        raise HTTPException(status_code=415, detail="暂不支持这种视频格式。")
+    video_dir = get_settings().data_dir / "video" / "uploads"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(video_dir).free < get_settings().min_free_disk_bytes:
+        raise HTTPException(status_code=507, detail="本机磁盘空间不足，暂不能接收视频。")
+    return video_dir, suffix
+
+
+@app.post("/videos/uploads", status_code=status.HTTP_201_CREATED)
+async def post_video_upload(video: UploadFile = File()) -> dict[str, str]:
+    """Park an uploaded video without creating anything yet (§15.2).
+
+    The phone starts this the moment a file is picked and keeps it running in the
+    background while the learner marks cut points — a one-hour video takes minutes to
+    upload, and those are the minutes they spend cutting. `POST /collections` then refers
+    back to it by `upload_id`.
+    """
+
+    video_dir, suffix = _validated_video_upload(video)
+    destination = video_dir / f"pending-{uuid.uuid4().hex}{suffix}"
+    await save_upload_stream(
+        video,
+        destination,
+        get_settings().max_video_upload_bytes,
+        get_settings().min_free_disk_bytes,
+        "视频",
+    )
+    return {"upload_id": destination.name, "filename": video.filename or ""}
+
+
+class CollectionCreate(BaseModel):
+    """§15.2: the cut points the learner marked, in milliseconds.
+
+    `cuts` holds only the interior boundaries — neither 0 nor the end of the file. An
+    empty list is legal and means "keep it whole", which is the honest way to say that a
+    short video needs no splitting.
+    """
+
+    upload_id: str = Field(min_length=1, max_length=200)
+    title: str | None = Field(default=None, max_length=200)
+    cuts: list[int] = Field(default_factory=list, max_length=200)
+
+
+@app.post("/collections", status_code=status.HTTP_202_ACCEPTED)
+def post_collection(payload: CollectionCreate) -> dict[str, object]:
+    """Turn a parked upload plus cut points into a collection of sections (§15.2)."""
+
+    video_dir = (get_settings().data_dir / "video" / "uploads").resolve()
+    source = (video_dir / Path(payload.upload_id).name).resolve()
+    # Resolved and re-checked against the uploads directory: `upload_id` arrives from a
+    # client and must never be able to name a path outside it.
+    if source.parent != video_dir or not source.exists():
+        raise HTTPException(status_code=404, detail="这个上传已经不在了，请重新上传。")
+
+    cuts = sorted({int(value) for value in payload.cuts if int(value) > 0})
+    if cuts != [int(value) for value in payload.cuts if int(value) > 0]:
+        # Silently sorting would hide a client bug that produces overlapping sections.
+        raise HTTPException(status_code=422, detail="拆分点必须严格递增且不重复。")
+    boundaries: list[tuple[int, int | None]] = []
+    previous = 0
+    for cut in cuts:
+        boundaries.append((previous, cut))
+        previous = cut
+    # The last section runs to the end of the file, so its end stays open rather than
+    # trusting a duration the phone measured.
+    boundaries.append((previous, None))
+
+    title = (payload.title or "").strip() or Path(payload.upload_id).stem
+    collection_id, material_ids, job_id = repository().create_collection_with_sections(
+        title=title,
+        source_ref=payload.upload_id,
+        source_path=str(source),
+        boundaries=boundaries,
+    )
+    return {
+        "collection_id": collection_id,
+        "material_ids": material_ids,
+        "job_id": job_id,
+        "status": "pending",
+    }
+
+
 def create_video_link(payload: VideoLinkCreate) -> tuple[int, int]:
     url = payload.url.strip()
     parsed = urlparse(url)

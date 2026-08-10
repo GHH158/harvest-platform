@@ -1667,6 +1667,23 @@ class Repository:
                     {"material_id": material_id, "message": message},
                 )
 
+    def mark_material_failed(self, material_id: int, message: str) -> None:
+        """One section of a split failed (§15.2).
+
+        The job-level failure path marks the job's own `material_id`, but a `split_video`
+        job produces many materials and belongs to none of them — so a failed section has
+        to be marked here, individually, leaving its siblings usable.
+        """
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    """UPDATE material SET status = 'failed', error_message = :message
+                       WHERE id = :material_id"""
+                ),
+                {"message": message[:2_000], "material_id": material_id},
+            )
+
     def mark_material_processing(self, material_id: int) -> None:
         with self.engine.begin() as connection:
             connection.execute(
@@ -2653,6 +2670,74 @@ class Repository:
                 text("DELETE FROM material WHERE id = :id"), {"id": material_id}
             )
         return result.rowcount > 0
+
+    def create_collection_with_sections(
+        self,
+        *,
+        title: str,
+        source_ref: str | None,
+        source_path: str,
+        boundaries: list[tuple[int, int | None]],
+    ) -> tuple[int, list[int], int]:
+        """Creates the collection, its sections and the single split job, in one transaction.
+
+        One job for the whole cut, not one per section: the source is opened and decoded
+        once, and a half-created collection must not be possible if the process dies
+        between two inserts.
+        """
+
+        with self.engine.begin() as connection:
+            collection_id = connection.execute(
+                text("INSERT INTO material_collection (title) VALUES (:title) RETURNING id"),
+                {"title": title},
+            ).scalar_one()
+            material_ids: list[int] = []
+            for index, (start_ms, _) in enumerate(boundaries):
+                material_id = connection.execute(
+                    text(
+                        """INSERT INTO material
+                           (kind, title, source_type, source_ref, status,
+                            collection_id, collection_index, source_offset_ms)
+                           VALUES ('video', :title, 'file', :source_ref, 'pending',
+                                   :collection_id, :index, :offset)
+                           RETURNING id"""
+                    ),
+                    {
+                        "title": f"{title} 第 {index + 1} 节",
+                        "source_ref": source_ref,
+                        "collection_id": collection_id,
+                        "index": index,
+                        "offset": start_ms,
+                    },
+                ).scalar_one()
+                material_ids.append(int(material_id))
+            sections = [
+                {
+                    "material_id": material_ids[index],
+                    "index": index + 1,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                }
+                for index, (start_ms, end_ms) in enumerate(boundaries)
+            ]
+            job_id = connection.execute(
+                text(
+                    """INSERT INTO job (kind, material_id, status, payload)
+                       VALUES ('split_video', NULL, 'pending', CAST(:payload AS JSONB))
+                       RETURNING id"""
+                ),
+                {
+                    "payload": json.dumps(
+                        {
+                            "source_path": source_path,
+                            "collection_id": int(collection_id),
+                            "sections": sections,
+                        },
+                        ensure_ascii=False,
+                    )
+                },
+            ).scalar_one()
+        return int(collection_id), material_ids, int(job_id)
 
     def create_collection(self, title: str) -> dict[str, Any]:
         with self.engine.begin() as connection:
