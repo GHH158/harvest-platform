@@ -174,7 +174,9 @@ final class ChatStore: ObservableObject {
     }
 
     func prefetchFurigana(using client: APIClient) async {
-        for message in messages where message.role == "assistant" {
+        // Bounded for the same reason as the companion sheet: one sequential request
+        // per Japanese run, so a long session made turning ruby on feel like a hang.
+        for message in messages.suffix(6) where message.role == "assistant" {
             for block in markdownBlocks(from: message.content) {
                 switch block {
                 case .paragraph(let text), .heading(_, let text), .unorderedItem(let text),

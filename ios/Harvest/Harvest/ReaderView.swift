@@ -153,6 +153,9 @@ struct ReaderView: View {
                             isCurrent: current,
                             onSelect: { player.seek(to: segment.startMs) },
                             onAsk: { focus in
+                                // Reading the answer while the audio runs on means the
+                                // sentence you asked about is long gone when you close.
+                                player.pause()
                                 companionRequest = CompanionRequest(
                                     materialID: material.id,
                                     segment: segment,

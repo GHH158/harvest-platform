@@ -731,11 +731,24 @@ class Repository:
             ).mappings().one()
         return dict(row)
 
-    def companion_messages(self, material_id: int) -> list[dict[str, Any]]:
+    def companion_messages(self, material_id: int, limit: int = 40) -> list[dict[str, Any]]:
+        """Most recent turns, oldest first for display.
+
+        This used to return every message a material had ever accumulated. Nothing
+        reads the older ones — the model prompt takes the last 12 and the sheet only
+        scrolls back a little — but the client paid for all of them on every open,
+        including one furigana request per Japanese run in each.
+        """
+
         with self.engine.connect() as connection:
             rows = connection.execute(
-                text("SELECT * FROM companion_message WHERE material_id = :material_id ORDER BY id"),
-                {"material_id": material_id},
+                text(
+                    """SELECT * FROM (
+                           SELECT * FROM companion_message WHERE material_id = :material_id
+                           ORDER BY id DESC LIMIT :limit
+                       ) recent ORDER BY id"""
+                ),
+                {"material_id": material_id, "limit": limit},
             ).mappings().all()
         return [dict(row) for row in rows]
 

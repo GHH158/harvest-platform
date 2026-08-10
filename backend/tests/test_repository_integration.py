@@ -2319,3 +2319,37 @@ def test_trace_write_failure_cannot_break_the_operation_it_observes(
             connection.execute(text("DELETE FROM vocabulary WHERE word = :word"), {"word": word})
             connection.execute(text("DELETE FROM decision_trace"))
         engine.dispose()
+
+
+@pytest.mark.integration
+def test_companion_messages_return_the_newest_turns_oldest_first() -> None:
+    """§5.17: the sheet used to fetch a material's entire history on every open.
+
+    The limit wraps the query in a subselect, which is easy to get backwards — this
+    pins that it keeps the *newest* rows but still hands them back in reading order.
+    """
+
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    material_id, _ = repository.create_material_with_job(
+        title="companion limit", source_type="paste", source_ref=None,
+        job_kind="tts", payload={"text": "雨です。"},
+    )
+    try:
+        for index in range(6):
+            repository.add_companion_message(material_id, None, "user", f"第{index}问")
+
+        recent = repository.companion_messages(material_id, limit=4)
+
+        assert [row["content"] for row in recent] == ["第2问", "第3问", "第4问", "第5问"]
+        assert [row["id"] for row in recent] == sorted(row["id"] for row in recent)
+        assert len(repository.companion_messages(material_id)) == 6
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
+        engine.dispose()

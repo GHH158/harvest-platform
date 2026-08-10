@@ -83,6 +83,14 @@ final class AudioPlayer: ObservableObject {
         }
     }
 
+    /// Pause without tearing the player down, so the position survives — `stop()`
+    /// releases the item and the resume point with it.
+    func pause() {
+        guard let player, isPlaying else { return }
+        player.pause()
+        isPlaying = false
+    }
+
     func toggle() {
         guard let player else { return }
         if isPlaying {

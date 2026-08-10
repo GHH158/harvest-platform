@@ -22,9 +22,10 @@ struct CompanionSheet: View {
                 }
             }
         }
-        // Opens at half height so the sentence behind it stays visible — the answer is
-        // about that sentence, and hiding it forces you to remember what you asked.
-        .presentationDetents([.medium, .large])
+        // Two thirds, not half: the sheet prints the sentence at its own top, so the
+        // page's copy behind it does not need to stay visible and the extra third goes
+        // to the answer. Drag up for full height when a reply is long.
+        .presentationDetents([.fraction(0.66), .large])
         .presentationDragIndicator(.visible)
         .presentationBackground(DesignTokens.canvas)
     }

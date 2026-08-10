@@ -809,7 +809,11 @@ struct CompanionView: View {
     @MainActor
     private func prefetchFurigana(using client: APIClient) async {
         await ensureFurigana(for: segment.textJA, using: client)
-        for message in messages where message.role == "assistant" {
+        // Only the newest replies. Each Japanese run costs one request and they are
+        // awaited in sequence, so walking the whole history turned "open the sheet"
+        // into dozens of serial round trips as a material accumulated questions.
+        // Anything older still renders — just without ruby until it is asked about.
+        for message in messages.suffix(6) where message.role == "assistant" {
             for block in markdownBlocks(from: message.content) {
                 switch block {
                 case .paragraph(let text), .heading(_, let text), .unorderedItem(let text),
