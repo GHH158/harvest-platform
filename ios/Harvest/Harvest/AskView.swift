@@ -46,7 +46,7 @@ struct AskView: View {
     private var conversation: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: 26) {
                     if messages.isEmpty {
                         emptyState
                     }
@@ -60,7 +60,10 @@ struct AskView: View {
                             .padding(.vertical, 8)
                     }
                 }
-                .padding(.horizontal, DesignTokens.pageInset)
+                // Narrower than the standard page inset: with no card around the answer
+                // this is the only thing setting line length, and long CJK explanations
+                // want the width.
+                .padding(.horizontal, 18)
                 .padding(.vertical, 18)
             }
             .onChange(of: messages.count) {
@@ -168,28 +171,27 @@ struct AskView: View {
     }
 }
 
+/// The question is short, so it reads as a card. The answer is long, so it does not:
+/// a card around several hundred characters costs line width on both sides and adds a
+/// second frame around content that is already structured. The answer is the page.
 private struct AskBubble: View {
     let message: ConversationMessage
 
     private var isUser: Bool { message.role == "user" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(isUser ? "你" : "老师")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(DesignTokens.muted)
-            if isUser {
-                Text(message.content)
-                    .foregroundStyle(DesignTokens.ink)
-            } else {
-                MarkdownMessageView(markdown: message.content)
-            }
+        if isUser {
+            Text(message.content)
+                .foregroundStyle(DesignTokens.ink)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(DesignTokens.accentWash, in: RoundedRectangle(cornerRadius: 14))
+        } else {
+            MarkdownMessageView(markdown: message.content)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(
-            isUser ? DesignTokens.accentWash : DesignTokens.surface,
-            in: RoundedRectangle(cornerRadius: 14)
-        )
     }
 }

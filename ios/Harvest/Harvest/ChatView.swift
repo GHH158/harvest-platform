@@ -549,12 +549,14 @@ private struct MessageBubble: View {
         SelectableText(
             text: message.content,
             font: .preferredFont(forTextStyle: .body),
+            // Japanese has no word spaces, so lines need more air than Latin before a
+            // reply reads as separate sentences rather than one block.
             textColor: isUser ? .white : UIColor(DesignTokens.ink),
-            lineSpacing: 5,
+            lineSpacing: 8,
             onWordTap: onWordTap
         )
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 15)
+        .padding(.vertical, 13)
         .background(
             isUser ? DesignTokens.accent : DesignTokens.surface,
             in: RoundedRectangle(cornerRadius: 16)
@@ -604,13 +606,21 @@ private struct CorrectionCard: View {
                 .font(.subheadline)
                 .foregroundStyle(DesignTokens.ink)
             ForEach(correction.items.prefix(3)) { item in
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text("\(item.original) → \(item.replacement)")
-                        .font(.subheadline.weight(.medium))
+                        .font(.system(.subheadline, design: .serif).weight(.medium))
                         .foregroundStyle(DesignTokens.ink)
-                    Text("\(item.category.label) · \(item.reasonZH)")
-                        .font(.caption)
-                        .foregroundStyle(DesignTokens.muted)
+                    // The reason is the part actually worth reading, so it was the
+                    // wrong thing to set in the smallest, lightest type on the screen.
+                    // The category stays small; the explanation reads as body text.
+                    Text(item.category.label)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(DesignTokens.accent.opacity(0.85))
+                    Text(item.reasonZH)
+                        .font(.subheadline)
+                        .foregroundStyle(DesignTokens.ink.opacity(0.85))
+                        .lineSpacing(5)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

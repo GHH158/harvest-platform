@@ -952,8 +952,10 @@ struct MarkdownMessageView: View {
     private func proseParagraph(_ text: String) -> some View {
         let japanese = isMostlyJapanese(text)
         let font: Font = japanese ? .system(.body, design: .serif) : .body
+        // CJK has no word spaces and a high ink density, so it needs more leading than
+        // Latin at the same size before a wall of text becomes readable.
         return renderText(text, font: font, color: DesignTokens.ink)
-            .lineSpacing(japanese ? 6 : 5)
+            .lineSpacing(japanese ? 8 : 7)
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -976,16 +978,13 @@ struct MarkdownMessageView: View {
         }
     }
 
+    /// No decorative left rule: §13.10 records that as a UI debt to clear, and it also
+    /// eats horizontal space on every heading. Weight and the space above already say
+    /// "new section" — structure should be self-evident, not drawn on.
     private func headingRow(level: Int, text: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(DesignTokens.accent.opacity(level <= 2 ? 0.85 : 0.45))
-                .frame(width: 3, height: level <= 2 ? 18 : 14)
-                .padding(.top, 3)
-            renderText(text, font: headingFont(level: level), color: DesignTokens.ink)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        renderText(text, font: headingFont(level: level), color: DesignTokens.ink)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func listRow(label: String, text: String) -> some View {
@@ -996,50 +995,29 @@ struct MarkdownMessageView: View {
                 .foregroundStyle(DesignTokens.accent)
                 .frame(width: 20, alignment: .trailing)
                 .padding(.top, 2)
-            if japanese, style == .teaching {
-                renderText(
-                    text,
-                    font: .system(.body, design: .serif),
-                    color: DesignTokens.ink
-                )
-                .lineSpacing(5)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 12))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(DesignTokens.separator, lineWidth: 0.5)
-                }
-            } else {
-                renderText(
-                    text,
-                    font: japanese ? .system(.body, design: .serif) : .body,
-                    color: DesignTokens.ink
-                )
-                .lineSpacing(5)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-            }
+            // A bullet is already structure; boxing it puts a bordered card inside the
+            // answer card and costs ~30pt of line width, which is what made long
+            // explanations wrap every 13 characters. The serif face is enough to mark
+            // Japanese apart from the Chinese around it.
+            renderText(
+                text,
+                font: japanese ? .system(.body, design: .serif) : .body,
+                color: DesignTokens.ink
+            )
+            .lineSpacing(japanese ? 7 : 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
+    /// Softer tone and an indent carry "aside" without a rule *and* a border *and* a
+    /// fill all saying the same thing.
     private func quoteBlock(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(DesignTokens.accent.opacity(0.5))
-                .frame(width: 3)
-            renderText(text, font: .callout, color: DesignTokens.muted)
-                .lineSpacing(5)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(DesignTokens.separator, lineWidth: 0.5)
-        }
+        renderText(text, font: .callout, color: DesignTokens.muted)
+            .lineSpacing(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 14)
     }
 
     private func codeBlock(_ text: String) -> some View {
@@ -1059,21 +1037,21 @@ struct MarkdownMessageView: View {
             }
     }
 
+    /// `isMostlyJapanese` cannot reliably separate a Japanese example from a Chinese
+    /// explanation that quotes several Japanese phrases — its own comment says lines
+    /// like that "stay ambiguous". A box and border on a false positive is the worst
+    /// outcome: the paragraph loses ~28pt of width and wraps differently from every
+    /// other paragraph in the same answer. Serif plus leading is enough of a signal,
+    /// and it costs nothing when the guess is wrong.
     private func exampleBlock(_ text: String) -> some View {
         renderText(
             text,
             font: .system(.body, design: .serif),
             color: DesignTokens.ink
         )
-        .lineSpacing(6)
+        .lineSpacing(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(DesignTokens.separator, lineWidth: 0.5)
-        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder
