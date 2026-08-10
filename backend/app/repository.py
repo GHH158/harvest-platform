@@ -25,6 +25,10 @@ GRAMMAR_LEVEL_ORDER = ("N5", "N4", "N3", "N2", "N1")
 DECISION_TRACE_SCHEMA_VERSION = "decision-trace-v1"
 DECISION_TRACE_RETENTION_DAYS = 30
 
+# §14.2: how many entries the journal page shows and the model gets as context. Bounded
+# so that opening it, and answering in it, never gets slower as the history grows (§5.17).
+JOURNAL_TIMELINE_LIMIT = 20
+
 
 @dataclass(frozen=True)
 class Job:
@@ -2552,3 +2556,105 @@ class Repository:
             },
         )
         return self._vocabulary_row(row)
+
+    # ------------------------------------------------------------------
+    # Private journal (§14) — nothing below this line touches learning data.
+    #
+    # Kept physically at the end of the class and behind this banner because the
+    # isolation is the feature (§14.3). None of these methods may grow a
+    # learning_event write, a decision_trace row, grammar evidence, or a read of
+    # any learning table; nothing on the learning side may read journal rows.
+    # If a future change needs to cross that line, it changes §14 first.
+    # ------------------------------------------------------------------
+
+    def add_journal_entry(self, body: str) -> dict[str, Any]:
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text("INSERT INTO journal_entry (body) VALUES (:body) RETURNING *"),
+                {"body": body},
+            ).mappings().one()
+        return dict(row)
+
+    def update_journal_entry(self, entry_id: int, body: str) -> dict[str, Any] | None:
+        """Only for fixing a typo in something already said; replies are left alone."""
+
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    "UPDATE journal_entry SET body = :body WHERE id = :id RETURNING *"
+                ),
+                {"body": body, "id": entry_id},
+            ).mappings().first()
+        return dict(row) if row else None
+
+    def delete_journal_entry(self, entry_id: int) -> bool:
+        """Hard delete (§13.7): the foreign key cascades the replies with it.
+
+        Not a list-level hide — after this the row is gone from the database, which is
+        the whole reason this table exists here rather than in a commercial app.
+        """
+
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                text("DELETE FROM journal_entry WHERE id = :id"), {"id": entry_id}
+            )
+        return result.rowcount > 0
+
+    def add_journal_reply(
+        self,
+        entry_id: int,
+        body: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        prompt_version: str | None = None,
+    ) -> dict[str, Any]:
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    """INSERT INTO journal_reply
+                       (entry_id, body, model_provider, model_name, prompt_version)
+                       VALUES (:entry_id, :body, :provider, :model, :prompt_version)
+                       RETURNING *"""
+                ),
+                {
+                    "entry_id": entry_id,
+                    "body": body,
+                    "provider": provider,
+                    "model": model,
+                    "prompt_version": prompt_version,
+                },
+            ).mappings().one()
+        return dict(row)
+
+    def journal_timeline(self, limit: int = JOURNAL_TIMELINE_LIMIT) -> list[dict[str, Any]]:
+        """Most recent entries with their replies, oldest first for display.
+
+        Bounded on purpose. §5.17 set the rule that one interaction must not get more
+        expensive as history grows, and this is both the display query and the source
+        of the model's context (§14.2 keeps the last 20).
+        """
+
+        with self.engine.connect() as connection:
+            entries = connection.execute(
+                text(
+                    """SELECT * FROM (
+                           SELECT * FROM journal_entry ORDER BY id DESC LIMIT :limit
+                       ) recent ORDER BY id"""
+                ),
+                {"limit": limit},
+            ).mappings().all()
+            if not entries:
+                return []
+            replies = connection.execute(
+                text(
+                    """SELECT * FROM journal_reply
+                       WHERE entry_id = ANY(:ids)
+                       ORDER BY entry_id, created_at, id"""
+                ),
+                {"ids": [int(entry["id"]) for entry in entries]},
+            ).mappings().all()
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for reply in replies:
+            grouped.setdefault(int(reply["entry_id"]), []).append(dict(reply))
+        return [{**dict(entry), "replies": grouped.get(int(entry["id"]), [])} for entry in entries]

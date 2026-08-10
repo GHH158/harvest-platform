@@ -231,6 +231,46 @@ struct APIClient {
         try await get("ask")
     }
 
+    // MARK: Private journal (§14) — nothing here touches learning data.
+
+    func journalEntries() async throws -> [JournalEntry] {
+        try await get("journal")
+    }
+
+    /// Writing is enough to save it; the reply comes back in the same response (§14.2).
+    /// A longer timeout than `ask` because there is no partial state to fall back on and
+    /// the entry has already been stored server-side either way.
+    func postJournalEntry(body: String) async throws -> JournalPostResult {
+        var request = URLRequest(url: baseURL.appending(path: "journal"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 90
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["body": body])
+        return try await send(request)
+    }
+
+    /// Appends another reply. Used after a failure, or when the first one did not land.
+    func retryJournalReply(id: Int) async throws -> JournalReply {
+        var request = URLRequest(url: baseURL.appending(path: "journal/\(id)/reply"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 90
+        return try await send(request)
+    }
+
+    func updateJournalEntry(id: Int, body: String) async throws -> JournalEntry {
+        var request = URLRequest(url: baseURL.appending(path: "journal/\(id)"))
+        request.httpMethod = "PATCH"
+        request.timeoutInterval = 12
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["body": body])
+        return try await send(request)
+    }
+
+    /// Hard delete (§13.7 / §14.3): the replies cascade and nothing is merely hidden.
+    func deleteJournalEntry(id: Int) async throws {
+        try await delete("journal/\(id)")
+    }
+
     /// §5.16: with a lens the text is what is being asked *about*; without one it is
     /// the question itself.
     func ask(text: String, lens: String? = nil) async throws -> ChatReply {

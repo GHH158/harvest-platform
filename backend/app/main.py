@@ -37,6 +37,7 @@ from .companion import build_companion_messages, generate_companion_turn
 from .config import ROOT_DIR, get_settings
 from .db import apply_schema, make_engine
 from .furigana import ruby_segments
+from .journal import JOURNAL_PROMPT_VERSION, build_journal_messages, generate_journal_reply
 from .lenses import LENS_PROMPT_VERSION, lens_by_id, public_lenses, render_lens_question
 from .llm import LLMService
 from .omni import relay_voice_teacher
@@ -1451,6 +1452,100 @@ def get_job(job_id: int) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail="任务不存在。")
     return job
+
+
+# ----------------------------------------------------------------------
+# Private journal (§14). The one part of this API with nothing to do with Japanese.
+# No learning_event, no decision_trace, no grammar evidence, no OSS — see §14.3.
+# ----------------------------------------------------------------------
+
+
+class JournalEntryRequest(BaseModel):
+    """§14: something the learner wants to say about work or life."""
+
+    body: str = Field(min_length=1, max_length=20_000)
+
+
+@app.get("/journal")
+def list_journal_entries() -> list[dict]:
+    return repository().journal_timeline()
+
+
+@app.post("/journal", status_code=status.HTTP_201_CREATED)
+def post_journal_entry(payload: JournalEntryRequest) -> dict:
+    """Writing is enough to save it; the reply comes automatically (§14.2).
+
+    Note the deliberate difference from `POST /ask`: there, a question whose answer
+    never arrived is deleted, because a question with no answer is a ghost row. Here
+    the entry is kept even when the model call fails — what the learner said has
+    value on its own, and throwing away their own words because a cloud API was down
+    would be the worst possible behaviour for this particular feature. The client
+    gets the saved entry plus `reply_error` and can ask again.
+    """
+
+    repo = repository()
+    body = payload.body.strip()
+    history = repo.journal_timeline()
+    entry = repo.add_journal_entry(body)
+    try:
+        result = generate_journal_reply(
+            llm_service(), build_journal_messages(history=history, body=body)
+        )
+    except Exception as error:
+        logger.exception("Journal reply failed")
+        return {"entry": {**entry, "replies": []}, "reply_error": str(error)}
+    reply = repo.add_journal_reply(
+        int(entry["id"]),
+        result.content,
+        provider=result.provider,
+        model=result.model,
+        prompt_version=JOURNAL_PROMPT_VERSION,
+    )
+    return {"entry": {**entry, "replies": [reply]}, "reply_error": None}
+
+
+@app.post("/journal/{entry_id}/reply", status_code=status.HTTP_201_CREATED)
+def post_journal_reply(entry_id: int) -> dict:
+    """Ask again after a failed or unsatisfying reply. Appends, never overwrites."""
+
+    repo = repository()
+    timeline = repo.journal_timeline()
+    entry = next((item for item in timeline if int(item["id"]) == entry_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="这条不在最近的记录里。")
+    history = [item for item in timeline if int(item["id"]) != entry_id]
+    try:
+        result = generate_journal_reply(
+            llm_service(), build_journal_messages(history=history, body=str(entry["body"]))
+        )
+    except Exception as error:
+        raise _llm_error(error) from error
+    return repo.add_journal_reply(
+        entry_id,
+        result.content,
+        provider=result.provider,
+        model=result.model,
+        prompt_version=JOURNAL_PROMPT_VERSION,
+    )
+
+
+@app.patch("/journal/{entry_id}")
+def patch_journal_entry(entry_id: int, payload: JournalEntryRequest) -> dict:
+    """Fixing a typo in something already said. Existing replies are left alone."""
+
+    entry = repository().update_journal_entry(entry_id, payload.body.strip())
+    if entry is None:
+        raise HTTPException(status_code=404, detail="这条记录不存在。")
+    return entry
+
+
+@app.delete("/journal/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_journal_entry(entry_id: int) -> Response:
+    """Hard delete (§13.7 / §14.3): replies cascade, nothing is merely hidden."""
+
+    if not repository().delete_journal_entry(entry_id):
+        raise HTTPException(status_code=404, detail="这条记录不存在。")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/admin/materials", response_class=HTMLResponse)

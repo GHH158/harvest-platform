@@ -447,3 +447,41 @@ CREATE INDEX IF NOT EXISTS idx_decision_trace_recent
     ON decision_trace(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_decision_trace_failed
     ON decision_trace(call_source, created_at DESC) WHERE status = 'failed';
+
+-- Private journal (§14). Deliberately the only thing in this file that has nothing to
+-- do with Japanese: talking about work and life, decoupled from every learning table.
+--
+-- The isolation is the point and it runs both ways (§14.3): no learning_event trigger,
+-- no decision_trace, no grammar evidence, and no teaching prompt may read these rows.
+-- It does NOT reuse companion_message, which already carries the grammar-evidence path,
+-- companion_question events and delete-convergence triggers — venting mixed in there
+-- would leak into the evidence chain and be very hard to notice afterwards.
+--
+-- Pure addition, so it stays in the baseline: running these statements twice cannot
+-- change a single row, which is the §7.5 test for "baseline, not migration".
+CREATE TABLE IF NOT EXISTS journal_entry (
+    id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    body       TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+DROP TRIGGER IF EXISTS trg_journal_entry_updated ON journal_entry;
+CREATE TRIGGER trg_journal_entry_updated BEFORE UPDATE ON journal_entry
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE INDEX IF NOT EXISTS idx_journal_entry_recent
+    ON journal_entry(created_at DESC, id DESC);
+
+-- One reply per entry in practice, written automatically right after the entry (§14.2).
+-- Not unique: asking again after a failure appends rather than overwrites, so a reply
+-- the learner actually read is never silently replaced.
+CREATE TABLE IF NOT EXISTS journal_reply (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    entry_id       BIGINT NOT NULL REFERENCES journal_entry(id) ON DELETE CASCADE,
+    body           TEXT NOT NULL,
+    model_provider TEXT,
+    model_name     TEXT,
+    prompt_version TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_journal_reply_entry
+    ON journal_reply(entry_id, created_at);

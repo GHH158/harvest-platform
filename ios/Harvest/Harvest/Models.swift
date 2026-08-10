@@ -482,3 +482,50 @@ struct GrammarEvidenceItem: Codable, Identifiable, Hashable {
     var isMistake: Bool { kind == "correction" }
     var summaryText: String { isMistake ? (originalFragment ?? "") : (question ?? "") }
 }
+
+// MARK: - Private journal (§14)
+//
+// The one model here with nothing to do with Japanese. Deliberately unrelated to
+// ConversationMessage: sharing a shape with the teaching entries would be the first
+// step toward sharing a code path, and the isolation in §14.3 runs both ways.
+
+struct JournalReply: Codable, Identifiable, Hashable {
+    let id: Int
+    let body: String
+    let createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, body
+        case createdAt = "created_at"
+    }
+}
+
+struct JournalEntry: Codable, Identifiable, Hashable {
+    let id: Int
+    let body: String
+    let createdAt: String
+    /// Absent from the PATCH response, which returns the bare row. Optional here so a
+    /// missing key is "no replies loaded" rather than a decode failure.
+    private let repliesRaw: [JournalReply]?
+
+    var replies: [JournalReply] { repliesRaw ?? [] }
+
+    enum CodingKeys: String, CodingKey {
+        case id, body
+        case createdAt = "created_at"
+        case repliesRaw = "replies"
+    }
+}
+
+/// `replyError` is non-nil when the entry was saved but the model call failed. The words
+/// are kept either way (§14.2) — losing what you just wrote because a cloud API was down
+/// would be the worst possible behaviour for this particular feature.
+struct JournalPostResult: Codable {
+    let entry: JournalEntry
+    let replyError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case entry
+        case replyError = "reply_error"
+    }
+}

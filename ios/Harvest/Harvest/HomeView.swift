@@ -14,6 +14,7 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 22) {
                 askCard
                 destinations
+                journalEntry
             }
             .padding(.horizontal, DesignTokens.pageInset)
             .padding(.top, 8)
@@ -35,6 +36,7 @@ struct HomeView: View {
             case .materials: MaterialListView()
             case .chat: ChatView()
             case .accumulation: AccumulationView()
+            case .journal: JournalView()
             case .settings: SettingsView(isOnboarding: false)
             }
         }
@@ -70,6 +72,22 @@ struct HomeView: View {
             row(.accumulation, icon: "square.stack.3d.up", title: "积累",
                 caption: "生词与语法骨架", detail: counts.accumulationDetail)
         }
+    }
+
+    /// §14, placed as §5.16 requires: on the home screen but deliberately quiet. No card,
+    /// no icon, no count, and set apart from the three learning rows above — you should
+    /// not be reminded that you have something on your mind every time you open the app
+    /// to study. A count here would not be information, it would be a nudge.
+    private var journalEntry: some View {
+        NavigationLink(value: HomeDestination.journal) {
+            Text("说点别的")
+                .font(.subheadline)
+                .foregroundStyle(DesignTokens.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 6)
     }
 
     private func row(
@@ -135,6 +153,7 @@ enum HomeDestination: Hashable {
     case materials
     case chat
     case accumulation
+    case journal
     case settings
 }
 
