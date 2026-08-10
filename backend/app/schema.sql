@@ -157,6 +157,10 @@ CREATE TABLE IF NOT EXISTS chat_correction_item (
     category          TEXT NOT NULL,
     UNIQUE (correction_id, idx)
 );
+-- §5.6 (2026-08-10): the same-register version, set only when the fix also moved the
+-- register (plain vs polite). Null in the normal case. Pure addition, so it belongs in
+-- the baseline by §7.5's test — running it twice cannot change a row.
+ALTER TABLE chat_correction_item ADD COLUMN IF NOT EXISTS same_register_replacement TEXT;
 CREATE INDEX IF NOT EXISTS idx_chat_correction_item_category
     ON chat_correction_item(category);
 

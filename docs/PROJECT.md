@@ -1007,6 +1007,14 @@ Correction behavior
 - When correction is useful, preserve intent, provide one complete natural version, and identify at most three high-value issues.
 - Prioritize meaning, grammar, and naturalness. Explain briefly in Chinese.
 - Distinguish actual errors from optional naturalness improvements; never call a valid alternative wrong.
+- Never emit an item whose replacement is identical to the original. If the phrase is fine as written,
+  it is not a correction item — say it in the reply instead.
+- If your replacement also changes the register of what the learner wrote (they wrote plain form and you
+  answer in polite form, or the reverse), do two things: say so in reason_zh, and put the same-register
+  version in same_register_replacement. Otherwise the learner cannot tell the fix apart from the
+  politeness choice. Never raise or lower register silently. Leave same_register_replacement null when
+  the register is unchanged — the normal case — and also when the register change *is* the correction
+  (category=register, e.g. plain form said to a superior), where keeping their register would be bad advice.
 - Continue the selected conversation after correction.
 
 Honesty
@@ -1018,7 +1026,7 @@ Output
 - Return exactly one JSON object, with no Markdown or surrounding commentary.
 - Allowed correction categories: grammar, word_choice, naturalness, register, orthography.
 - The exact schema is:
-{"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","reason_zh":"...","category":"grammar","grammar_key":null}]},"reply_ja":"...","follow_up_ja":"..."}
+{"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","same_register_replacement":null,"reason_zh":"...","category":"grammar","grammar_key":null}]},"reply_ja":"...","follow_up_ja":"..."}
 - When correction is unnecessary, use needed=false, corrected_text=null, summary_zh=null, items=[].
 ```
 
@@ -1867,6 +1875,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-10 | **新增 §14 私人倾诉,并在 §1.1 承认本项目不再只有一件事。** 起因是对 Rakuo(日语学习 App)与 對白/JustTalk(英语写作搭子)两款产品的调研讨论,使用者由此明确提出想要一个能谈心、能倾诉工作与生活的伙伴,且**明确要求不与日语数据挂钩**。**四条决定**:①§1.1 改写,承认第二件东西;②接受推理走云端(百炼/DeepSeek),不为此上本地模型;③**暂时不备份**——`backup.sh` 固定 `--exclude-table-data`,代价是没有任何副本,已在 §7.4 写明;④入口放首页但低调,不带角标、不显示条数(§5.16 新增小节)。**为什么必须写进 §1.1 而不是悄悄加**:§13.10 前置清单第 4 问要求「最终促成哪一次新的理解、提问或真实日语输出,只增加 AI 内容消费的不进入开发」,倾诉按字面通不过这一问;伪装成学习功能会在下次审计时被这条闸正确删掉,承认它是第二件东西才让它有自己的判据(§14.6:说完之后有没有比说之前轻一点)。**设计要点**:**写完即自动回应**——本行初稿曾写成「回复是可选的、点一下才回应」,当日被使用者当场纠正为「必须要有回应,他要像一个真人一样」,理由是需要按按钮才开口的东西不是伙伴而是查询接口(§14.2);与学习侧硬隔离且双向,不复用 `companion_message`(那张表挂着语法证据路径与删除触发器,混进去会让倾诉内容流入证据链);独立提示词 `journal-v1` **先写「要像个人」(会接话、有态度、可以不同意你、有记性、可以很短、不端着),再写三条禁令**,另有唯一一条硬禁令是「不许编造它自己的经历」——**像真人 ≠ 假装是人**,编造履历一定会被抓住,而被抓住那一刻会回头污染它说过的所有话;与日语老师是两个而不是同一个,因为**隔离必须能被感觉到,不能只在数据库里成立**。**同时更正一处误导记录**:§13.3–13.6 的写法会让人读成「角色整体出局」,而实际被否决的是那一版的「内容单位太大」——这次调研中该误读真实发生并被使用者当场更正,已记入 §14.5 并列为 §11.10 待处理。**本次改动仅限文档**:两张新表按 §7.5 判据(同一库跑两次不改变任何行)留在 `schema.sql` 基线、不新建迁移;代码与 iOS 尚未实施 |
 | 2026-08-10 | **§14 落地实施**(同日,紧接上一行)。`schema.sql` 加两张表(基线,无迁移);`prompts.py` 加 `JOURNAL_SYSTEM_PROMPT` 与 `journal-v1`;新模块 `app/journal.py` 只有 build + generate 两个函数且**不 import 任何学习侧模块**——把隔离交给「这个文件根本没有路径伸过去」比交给注释可靠;`repository.py` 的 journal 方法集中放在类末尾并加醒目分隔;`GET/POST /journal`、`POST /journal/{id}/reply`、`PATCH`、`DELETE`;`backup.sh` 固定 `--exclude-table-data`;iOS 新增 `JournalView`(一页纸、衬线、不套卡片、使用者与回应靠字号与深浅区分而非气泡或竖线)与首页低调入口。**两处实施判断记入偏离说明**:①`POST /journal` 在模型失败时**保留 entry** 并返回 `reply_error`,与 `/ask` 删掉无答案提问的做法相反——使用者写的话本身有价值,因一次云端抖动丢掉他刚写的东西对这个功能是最坏行为;②iOS 时间戳格式化器按需创建而非 `static`(`ISO8601DateFormatter` 非 `Sendable`,共享实例要开 `nonisolated(unsafe)`,懒加载只渲染可见行,不值得)。**验收**:`ruff` 通过;全新持久库 `harvest_journal_test` 连跑两次各 **216 项全通过**;新增 8 项测试,其中 `test_journal_writes_produce_no_learning_event_and_no_decision_trace` 把 §14.3 的隔离变成会红的断言;iOS `BUILD SUCCEEDED` 与 `TEST SUCCEEDED`。**真实链路连百炼 `qwen3.7-max` 验证语气与连续性**:第 3 条只说「明天要不要直接跟他说清楚」、不提名字,回应准确接上前两条里的老陈与分工,且给的是一句判断(「说清楚是对的,但别带着情绪去讲」)而不是三点建议;三条回应 30–47 字,无小标题、无「听起来你感到……」、无正能量话术、无「我也有过这种感觉」。同时用相同参数 dump 验证备份排除生效:结构保留、`COPY` 数据段 0 处、原文 grep 0 处,而 `companion_message` 照常备份。验证在**独立测试库**上进行,用完即删,不写入真实倾诉数据;真实库需重启一次服务才会建表。材料:`evidence/journal/00-gate-a.md` |
 | 2026-08-10 | **新增 §5.18「上次到哪儿了」并同日落地**。§13.1 早就写下「第 100 次使用必须比第 1 次更熟悉使用者」,但首页只有事实计数,打开时没有任何东西知道你上次在干什么;这条是那句目标最便宜的兑现——**零新表、零新事实**,全部由既有 `material_playback_state` / `segment` / `grammar_encounter` 派生。**唯一要守住的判据**:「上次停在 0:43」是陈述,「你已经三天没学习了」是评判,§1.4 禁的一直是后者。**阈值先查真实库再定**:4 条播放位置里 3 条停在 85–88%(那是读完了)、只有 1 条停在 7%(那才是中断),因此上界取 **80% 而非 90%**——取 90% 会把三条已读完的材料全变成提醒。顺带核对 `normalizedResumePosition` 已有的 0.95:两个数字回答不同问题(0.95 决定播放器要不要从头播,0.80 决定值不值得在首页说一句),不矛盾。**不显示百分比**:§4.2 已写明播放位置只表达媒体续播、不表达学习进度,换算成百分比等于把 §1.4 禁掉的进度条换个写法,因此比例只在 repository 内部作筛选,payload 里没有任何 progress/ratio/percent 字段(有断言锁住)。改为阅读说「第 N 句」(反查 `segment.start_ms`)、视频说 `m:ss`。**必须可点**并直接回到那个位置,`HomeDestination` 新增 `case material(Int)` 而不是直接用 `Int`——`MaterialListView` 在同一 `NavigationStack` 里已声明 `for: Int.self`,同类型会互相盖住。接口 `GET /home/resume` 返回 `{"hint": …|null}` 的信封,而非文档初稿写的裸对象:顶层 JSON `null` 在 Swift 里解不进 Optional,已同步改 §5.18。**验收**:`ruff` 通过;全新持久库 `harvest_e1_test` 连跑两次各 **223 项全通过**;新增 7 项测试(两端边界 88%/1% 均不提供、可续播材料压过语法点、阅读给句号视频给时间、`understood` 不出现、空状态返回 None、两个阈值常量本身);iOS `BUILD SUCCEEDED` 与 `TEST SUCCEEDED`。**真实库只读验证**:选中的正是那条 7% 的 `material 39`,首页会显示「上次停在 0:43 · せっかく○○のに」,三条 85–88% 的都没被选上。**可证伪判据**:如果它从不被点,它就是装饰,按 §14.6 同样的态度删掉;不做任何自动埋点来回答这个问题。材料:`evidence/resume-hint/00-gate-a.md` |
+| 2026-08-10 | **纠错的语体可见性(§5.6 更新,§11.7 复查但不关闭)。原提案被真实数据否掉了一半。** 原计划是「每条纠错都给 2–3 个版本并标注语体」;查真实库后改为窄版:①**§11.7 自己的触发条件未满足**——四个角度总共只用过 5 次(structure 2、chinese 2、meaning 1),**没有任何一句被两个角度问过**,该现象在真实使用中根本没发生,`lenses.py` 一字未改;②**但纠错侧撞见一次**:真实纠错「話したいことが**話さない**」(全句简体)被改成「**話せません**」(丁寧体),而 reason 与 summary 只解释了可能形,使用者会以为 `ません` 是修正的一部分;③**顺带发现一个明确缺陷**:一条纠错的 `replacement` 与原文完全相同(「日本人として」→「日本人として」,category=register,其 reason 自称「这个表现本身没问题」),界面上就是「把 X 改成 X」。**措施**:`CorrectionOutput` 过滤 `original == replacement` 的 item,全为无效时**降级为 `needed=False` 而不抛错**(§12.5:模型的毛病不该连累使用者这一轮;但 `needed=true` 本来就交空 items 仍是硬违规,既有测试钉着这一点——它抓到了我第一版把两种情况混为一谈的错);新增可空列与字段 `same_register_replacement`(等于 replacement 或空白即丢弃);提示词加两条,并明确**语体变化本身就是纠错目的时(对上司说简体)不给该字段**,否则等于建议他保持失礼。**实测比设计预期更好**:改完后模型不再切换语体,同句返回「話さない → **話せない**」、该字段为 null,即这条规则的主要效果是**让它停止了不必要的切换**,字段主要是安全网;另测「部長、明日休む」→「お休みをいただきます」确认 `category=register` 时不给该字段。**验收**:`ruff` 通过;全新持久库 `harvest_c1_clean` 连跑两次各 **229 项全通过**;新增 6 项测试含**存储往返**(只写不读的可空列是「看着没事直到手机上卡片是空的」那类问题);iOS `BUILD SUCCEEDED` 与 `TEST SUCCEEDED`。**一个操作教训(§11.6 的实例)**:首次全量出现 2 failed 且两次一致,原因是我**用同一个库既跑真实模型实验又跑测试套件**,3.2 那条 register 纠错留在库里打红了两条假设「库里没有别的数据」的既有测试;换全新库后 229 全通过。结论:**真实链路验证必须与测试套件分库**,否则「连跑两次」这道闸会被自己的验证数据打红。材料:`evidence/register-visibility/00-gate-a.md` |
 
 ---
 
@@ -1931,6 +1940,16 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 **为什么仍然记着**:当时的判断依据是「开发者一次只看一个视角,分歧不进使用者视野」。角色与圆桌已移除(§13),这条前提消失了,但**问题本身没有消失**——§5.15 的四个角度是使用者自己一个一个点的,同一句先点「结构」再点「自然吗」,两次回答里的例句仍可能一个用「見た」、一个用「見ました」而不说明为什么。
 
 **当前判断**:暂不改。四个角度的提示词里,「自然吗」已经写了「语境没有说明上下级或亲疏时,明确指出这一点,不要擅自补齐关系」;另外三个没写,是因为它们本来就不该谈语体。**若实际使用中出现过「同一句、不同角度给出语体不一致的例句且都不加说明」,再在 `lenses.py` 的对应 `focus_zh` 里补一句并升 `LENS_PROMPT_VERSION`。** 在真的撞见之前不预先加约束——提示词每多一条,模型遵守其余各条的概率就低一点。
+
+**2026-08-10 复查:角度这一侧的触发条件仍未满足,但纠错那一侧撞见了。** 查真实库:四个角度总共只用过 **5 次**(structure 2、chinese 2、meaning 1),**没有任何一句被两个角度问过**,所以本节描述的现象在真实使用里根本没发生过,`lenses.py` 一个字不改。
+
+但同一个毛病在 §5.6 的纠错上出现了一次,已按窄版处理(见 §5.6 的 Correction behavior 与 §10 当日记录):
+
+- 真实纠错 #11:用户写「話したいことが**話さない**」(全句简体),改写返回「**話せません**」(丁寧体),`reason_zh` 与 `summary_zh` 都只解释了可能形,**一个字没提语体也被换掉了**——使用者会以为 `ません` 是修正的一部分。
+- 措施:提示词加一条「语体若被改动必须点明,并在 `same_register_replacement` 里给出与原句同语体的版本」;当语体变化**本身就是纠错的目的**时(对上司说简体)不给该字段,否则等于建议他保持失礼的语体。
+- **实测结果比设计预期更好**:改完之后模型不再切换语体了,同一句现在返回「話さない → **話せない**」,`same_register_replacement` 为 null——因为语体压根没动。该字段因此主要是安全网,不是常态。
+
+**本节继续保留、不关闭**,因为角度那一侧的现象仍未观测到;纠错侧的这一次不算它写的触发条件。
 
 ### 11.8 陪读——移入待开发,暂不投入
 

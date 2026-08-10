@@ -87,6 +87,14 @@ Correction behavior
   why the expression fits this context, the key grammar or wording, then how to form the reusable natural expression.
   Do not add fixed section headings or change the JSON schema.
 - Distinguish actual errors from optional naturalness improvements; never call a valid alternative wrong.
+- Never emit an item whose replacement is identical to the original. If the phrase is fine as written,
+  it is not a correction item — say it in the reply instead.
+- If your replacement also changes the register of what the learner wrote (they wrote plain form and you
+  answer in polite form, or the reverse), do two things: say so in reason_zh, and put the same-register
+  version in same_register_replacement. Otherwise the learner cannot tell the fix apart from the
+  politeness choice. Never raise or lower register silently. Leave same_register_replacement null when
+  the register is unchanged — the normal case — and also when the register change *is* the correction
+  (category=register, e.g. plain form said to a superior), where keeping their register would be bad advice.
 - Continue the selected conversation after correction.
 
 Honesty
@@ -98,7 +106,7 @@ Output
 - Return exactly one JSON object, with no Markdown or surrounding commentary.
 - Allowed correction categories: grammar, word_choice, naturalness, register, orthography.
 - The exact schema is:
-{"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","reason_zh":"...","category":"grammar","grammar_key":null}]},"reply_ja":"...","follow_up_ja":"..."}
+{"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","same_register_replacement":null,"reason_zh":"...","category":"grammar","grammar_key":null}]},"reply_ja":"...","follow_up_ja":"..."}
 - When correction is unnecessary, use needed=false, corrected_text=null, summary_zh=null, items=[].
 - follow_up_ja is optional: set it to null when this turn should not end with a question.
 - grammar_key links a correction item to the learner's grammar skeleton. Set it only when
@@ -134,6 +142,12 @@ class CorrectionItemOutput(BaseModel):
     original: str = Field(min_length=1, max_length=1_000)
     replacement: str = Field(min_length=1, max_length=1_000)
     reason_zh: str = Field(min_length=1, max_length=1_000)
+    # §5.6 (2026-08-10): only set when the fix also moved the register. Real usage had
+    # 「話したいことが話さない」→「話したいことが話せません」: the learner wrote plain form,
+    # the answer came back polite, and neither the reason nor the summary mentioned it —
+    # so what they take away is that ません is part of the fix, which it is not.
+    # Null in the normal case, which is most of the time.
+    same_register_replacement: str | None = Field(default=None, max_length=1_000)
     category: CorrectionCategory
     # Optional link into the grammar skeleton (§12). Left null unless the mistake
     # really is that point: a wrong tag quietly pollutes the learner's skeleton,
@@ -156,6 +170,14 @@ class CorrectionItemOutput(BaseModel):
         cleaned = (value or "").strip()
         return cleaned if cleaned in KNOWN_GRAMMAR_KEYS else None
 
+    @model_validator(mode="after")
+    def drop_uninformative_alternative(self) -> CorrectionItemOutput:
+        """A same-register version identical to the replacement carries no information."""
+
+        alternative = (self.same_register_replacement or "").strip()
+        self.same_register_replacement = alternative if alternative and alternative != self.replacement else None
+        return self
+
 
 class CorrectionOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -167,6 +189,27 @@ class CorrectionOutput(BaseModel):
 
     @model_validator(mode="after")
     def fields_match_needed(self) -> CorrectionOutput:
+        # §5.6 (2026-08-10): an item whose replacement equals the original is not a
+        # correction. Real usage produced one — 「日本人として」→「日本人として」,
+        # category=register, whose own reason said the phrase was fine — and the card
+        # read "change X to X". Dropped by validation rather than forbidden only in the
+        # prompt, following §12.5's precedent: the server accepts what it can verify and
+        # discards the rest, because a rule the model may or may not follow is not a
+        # guarantee. The prompt says it too, so the model has a chance to get it right.
+        submitted = len(self.items)
+        self.items = [item for item in self.items if item.original != item.replacement]
+        if self.needed and submitted > 0 and not self.items:
+            # Every item was a no-op, so nothing was actually being corrected. Downgrade
+            # instead of raising: this is a model quirk, and §12.5's rule is that it
+            # should cost the tag, not the user's turn.
+            #
+            # Only when the filter emptied the list. `needed=true` with an empty items
+            # list to begin with stays a hard contract violation — that is a malformed
+            # turn, not a quirk, and an existing test pins it.
+            self.needed = False
+            self.corrected_text = None
+            self.summary_zh = None
+            return self
         if self.needed:
             if not (self.corrected_text or "").strip() or not (self.summary_zh or "").strip():
                 raise ValueError("需要纠错时必须提供完整修正版和中文总结。")

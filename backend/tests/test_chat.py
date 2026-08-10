@@ -383,3 +383,127 @@ def test_question_detection_is_not_punctuation_only(text: str, is_question: bool
     turn = parse_chat_turn(model_json())
 
     assert (suppress_follow_up(turn, history).follow_up_ja is None) is is_question
+
+
+# --- §5.6 2026-08-10: register moves must be visible, no-op items must not survive ---
+#
+# Both rules came from reading the 14 real corrections in the live database rather than
+# from imagining what could go wrong (§11.9's lesson).
+
+
+def _turn(items: list[dict[str, Any]], *, needed: bool = True) -> str:
+    return json.dumps(
+        {
+            "correction": {
+                "needed": needed,
+                "corrected_text": "話したいことが話せません" if needed else None,
+                "summary_zh": "可能形の否定を使う" if needed else None,
+                "items": items,
+            },
+            "reply_ja": "そうですね。",
+            "follow_up_ja": None,
+        }
+    )
+
+
+def test_prompt_forbids_no_op_items_and_silent_register_moves() -> None:
+    assert "replacement is identical to the original" in CHAT_SYSTEM_PROMPT
+    assert "Never raise or lower register silently" in CHAT_SYSTEM_PROMPT
+    assert "same_register_replacement" in CHAT_SYSTEM_PROMPT
+
+
+def test_an_item_that_changes_nothing_is_dropped() -> None:
+    """Real data had exactly this: 「日本人として」→「日本人として」, category=register,
+    whose own reason said the phrase was fine. The card read "change X to X"."""
+
+    turn = parse_chat_turn(
+        _turn(
+            [
+                {
+                    "original": "日本人として",
+                    "replacement": "日本人として",
+                    "reason_zh": "这个说法本身没问题",
+                    "category": "register",
+                    "grammar_key": None,
+                },
+                {
+                    "original": "会議しましょう",
+                    "replacement": "Teamsで会議をしましょう",
+                    "reason_zh": "手段を加えると具体的",
+                    "category": "naturalness",
+                    "grammar_key": None,
+                },
+            ]
+        )
+    )
+
+    assert [item.original for item in turn.correction.items] == ["会議しましょう"]
+    assert turn.correction.needed is True
+
+
+def test_a_correction_made_only_of_no_op_items_downgrades_instead_of_failing() -> None:
+    """§12.5's rule: a model quirk should cost the tag, not the user's turn."""
+
+    turn = parse_chat_turn(
+        _turn(
+            [
+                {
+                    "original": "日本人として",
+                    "replacement": "日本人として",
+                    "reason_zh": "没问题",
+                    "category": "register",
+                    "grammar_key": None,
+                }
+            ]
+        )
+    )
+
+    assert turn.correction.needed is False
+    assert turn.correction.items == []
+    assert turn.correction.corrected_text is None
+    assert turn.correction.summary_zh is None
+    # The conversation itself is untouched.
+    assert turn.reply_ja == "そうですね。"
+
+
+def test_a_register_move_carries_the_same_register_version() -> None:
+    """The real case: the learner wrote plain form and got polite back, with neither the
+    reason nor the summary mentioning it."""
+
+    turn = parse_chat_turn(
+        _turn(
+            [
+                {
+                    "original": "話さない",
+                    "replacement": "話せません",
+                    "same_register_replacement": "話せない",
+                    "reason_zh": "需要可能态否定；另外你原句是简体，这里给的是丁宁体",
+                    "category": "grammar",
+                    "grammar_key": None,
+                }
+            ]
+        )
+    )
+
+    item = turn.correction.items[0]
+    assert item.replacement == "話せません"
+    assert item.same_register_replacement == "話せない"
+
+
+def test_same_register_version_is_dropped_when_it_says_nothing() -> None:
+    for alternative in ("話せません", "   ", None):
+        turn = parse_chat_turn(
+            _turn(
+                [
+                    {
+                        "original": "話さない",
+                        "replacement": "話せません",
+                        "same_register_replacement": alternative,
+                        "reason_zh": "可能态否定",
+                        "category": "grammar",
+                        "grammar_key": None,
+                    }
+                ]
+            )
+        )
+        assert turn.correction.items[0].same_register_replacement is None

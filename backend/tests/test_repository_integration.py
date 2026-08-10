@@ -2031,3 +2031,58 @@ def test_companion_messages_return_the_newest_turns_oldest_first() -> None:
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
         engine.dispose()
+
+
+@pytest.mark.integration
+def test_same_register_version_round_trips_through_the_correction_store() -> None:
+    """§5.6 (2026-08-10). The parsing rules have unit tests; this pins the storage path,
+    because a nullable column that is written but never read back is the kind of thing
+    that looks fine until the card is empty on the phone."""
+
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    session_id = f"register-{uuid.uuid4()}"
+    _, correction, _ = repository.complete_chat_turn(
+        session_id=session_id,
+        user_content="話したいことが話さない",
+        assistant_content="そうですか。",
+        correction={
+            "needed": True,
+            "corrected_text": "話したいことが話せません",
+            "summary_zh": "可能形の否定を使う",
+            "items": [
+                {
+                    "original": "話さない",
+                    "replacement": "話せません",
+                    "same_register_replacement": "話せない",
+                    "reason_zh": "需要可能态否定；你原句是简体，这里给的是丁宁体",
+                    "category": "grammar",
+                    "grammar_key": None,
+                },
+                {
+                    "original": "話したいこと",
+                    "replacement": "言いたいこと",
+                    "reason_zh": "自然な言い回し",
+                    "category": "naturalness",
+                    "grammar_key": None,
+                },
+            ],
+        },
+        create_session_topic="register round trip",
+    )
+    try:
+        assert correction is not None
+        assert correction["items"][0]["same_register_replacement"] == "話せない"
+        # Unchanged register stays null rather than repeating the replacement.
+        assert correction["items"][1]["same_register_replacement"] is None
+
+        listed = repository.chat_corrections(session_id=session_id, limit=10)
+        assert listed[0]["items"][0]["same_register_replacement"] == "話せない"
+        assert listed[0]["items"][1]["same_register_replacement"] is None
+    finally:
+        repository.delete_chat_session(session_id)

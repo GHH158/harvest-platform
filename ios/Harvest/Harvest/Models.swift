@@ -179,6 +179,9 @@ struct ChatCorrectionItem: Codable, Identifiable, Hashable {
     let index: Int
     let original: String
     let replacement: String
+    /// §5.6: set only when the fix also moved the register, so the politeness choice can
+    /// be told apart from the correction itself. Null in the normal case.
+    let sameRegisterReplacement: String?
     let reasonZH: String
     let category: ChatCorrectionCategory
 
@@ -186,6 +189,7 @@ struct ChatCorrectionItem: Codable, Identifiable, Hashable {
         case id, original, replacement, category
         case correctionID = "correction_id"
         case index = "idx"
+        case sameRegisterReplacement = "same_register_replacement"
         case reasonZH = "reason_zh"
     }
 }

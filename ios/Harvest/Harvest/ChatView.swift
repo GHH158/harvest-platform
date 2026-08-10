@@ -612,6 +612,15 @@ private struct CorrectionCard: View {
                     Text("\(item.original) → \(item.replacement)")
                         .font(.system(.subheadline, design: .serif).weight(.medium))
                         .foregroundStyle(DesignTokens.ink)
+                    // §5.6: only present when the fix also moved the register. Body-sized
+                    // like the reason, because it is the same kind of thing — something you
+                    // actually need to read — not metadata.
+                    if let alternative = item.sameRegisterReplacement, !alternative.isEmpty {
+                        Text("保持你原来的语体：\(alternative)")
+                            .font(.system(.subheadline, design: .serif))
+                            .foregroundStyle(DesignTokens.ink.opacity(0.85))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     // The reason is the part actually worth reading, so it was the
                     // wrong thing to set in the smallest, lightest type on the screen.
                     // The category stays small; the explanation reads as body text.

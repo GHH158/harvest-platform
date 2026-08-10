@@ -942,16 +942,27 @@ class Repository:
                     stored_item = connection.execute(
                         text(
                             """INSERT INTO chat_correction_item
-                            (correction_id, idx, original_fragment, replacement, reason_zh, category, grammar_key)
-                            VALUES (:correction_id, :idx, :original, :replacement, :reason_zh, :category, :grammar_key)
+                            (correction_id, idx, original_fragment, replacement,
+                             same_register_replacement, reason_zh, category, grammar_key)
+                            VALUES (:correction_id, :idx, :original, :replacement,
+                                    :same_register_replacement, :reason_zh, :category, :grammar_key)
                             RETURNING id, correction_id, idx, original_fragment AS original,
-                                replacement, reason_zh, category, grammar_key"""
+                                replacement, same_register_replacement, reason_zh, category,
+                                grammar_key"""
                         ),
+                        # Bound explicitly rather than splatting the item dict: the dict
+                        # now carries a field the statement has to name, and a silent
+                        # mismatch between the two is exactly the kind of thing a splat
+                        # hides.
                         {
                             "correction_id": int(correction_row["id"]),
                             "idx": index,
+                            "original": item["original"],
+                            "replacement": item["replacement"],
+                            "same_register_replacement": item.get("same_register_replacement"),
+                            "reason_zh": item["reason_zh"],
+                            "category": item["category"],
                             "grammar_key": item.get("grammar_key"),
-                            **{k: v for k, v in item.items() if k != "grammar_key"},
                         },
                     ).mappings().one()
                     items.append(dict(stored_item))
@@ -1124,7 +1135,7 @@ class Repository:
                 items = connection.execute(
                     text(
                         """SELECT id, correction_id, idx, original_fragment AS original,
-                            replacement, reason_zh, category
+                            replacement, same_register_replacement, reason_zh, category
                         FROM chat_correction_item
                         WHERE correction_id = ANY(:correction_ids)
                         ORDER BY correction_id, idx"""
