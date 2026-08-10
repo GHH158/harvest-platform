@@ -858,10 +858,25 @@ def post_ask(payload: AskRequest) -> dict:
 
 
 @app.get("/companion/{material_id}")
-def get_companion_messages(material_id: int) -> list[dict]:
+def get_companion_messages(
+    material_id: int,
+    segment_id: int | None = Query(default=None),
+) -> list[dict]:
+    """`segment_id` narrows the history to one sentence (§5.17, 2026-08-10).
+
+    The sheet opens on a single sentence, so returning the whole material's history
+    buried the answer you just asked for under dozens of answers about other sentences.
+    The rows are kept either way — grammar evidence hangs off `companion_message.id` and
+    deleting them would erase the skeleton's provenance (§4.3). Remembering and
+    displaying are separate decisions, and they had been wired together.
+
+    Without the parameter the behaviour is unchanged, which is what the "以前问过的"
+    secondary entry uses.
+    """
+
     if repository().get_material(material_id) is None:
         raise HTTPException(status_code=404, detail="材料不存在。")
-    return repository().companion_messages(material_id)
+    return repository().companion_messages(material_id, segment_id=segment_id)
 
 
 @app.post("/companion")

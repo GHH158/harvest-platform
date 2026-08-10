@@ -37,4 +37,35 @@ enum DesignTokens {
     static let cardRadius: CGFloat = 18
     static let readingSize: CGFloat = 22
     static let readingLineSpacing: CGFloat = 12
+
+    /// §1.5 allows a serif for titles to get a published feel, and after the home screen
+    /// was rebuilt in serif (2026-08-10) the navigation bar's heavy sans-serif "Harvest"
+    /// was the only thing left on screen that did not belong to that typography.
+    /// Set once at launch because UIKit owns the bar's fonts, not SwiftUI.
+    static func applyNavigationBarAppearance() {
+        let inkColor = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.949, green: 0.929, blue: 0.875, alpha: 1)
+                : UIColor(red: 0.239, green: 0.224, blue: 0.161, alpha: 1)
+        }
+        let appearance = UINavigationBarAppearance()
+        appearance.configureWithTransparentBackground()
+        appearance.largeTitleTextAttributes = [
+            .font: serifFont(size: 34, weight: .semibold),
+            .foregroundColor: inkColor,
+        ]
+        appearance.titleTextAttributes = [
+            .font: serifFont(size: 17, weight: .semibold),
+            .foregroundColor: inkColor,
+        ]
+        UINavigationBar.appearance().standardAppearance = appearance
+        UINavigationBar.appearance().scrollEdgeAppearance = appearance
+        UINavigationBar.appearance().compactAppearance = appearance
+    }
+
+    private static func serifFont(size: CGFloat, weight: UIFont.Weight) -> UIFont {
+        let base = UIFont.systemFont(ofSize: size, weight: weight)
+        guard let descriptor = base.fontDescriptor.withDesign(.serif) else { return base }
+        return UIFont(descriptor: descriptor, size: size)
+    }
 }

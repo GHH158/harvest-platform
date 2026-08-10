@@ -5,6 +5,8 @@ struct HarvestApp: App {
     @StateObject private var configuration = AppConfiguration()
     @StateObject private var offlineLibrary = OfflineLibrary()
 
+    init() { DesignTokens.applyNavigationBarAppearance() }
+
     var body: some Scene {
         WindowGroup {
             ZStack {

@@ -219,8 +219,18 @@ struct APIClient {
         return try await send(request)
     }
 
-    func companion(materialID: Int) async throws -> [ConversationMessage] {
-        try await get("companion/\(materialID)")
+    /// §5.17 (2026-08-10): pass `segmentID` to get just that sentence's history. The sheet
+    /// opens on one sentence, so the whole material's history buried the answer you just
+    /// asked for. Omit it for the "以前问过的" view, which deliberately wants everything.
+    func companion(materialID: Int, segmentID: Int? = nil) async throws -> [ConversationMessage] {
+        guard let segmentID else { return try await get("companion/\(materialID)") }
+        var components = URLComponents(
+            url: baseURL.appending(path: "companion/\(materialID)"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [URLQueryItem(name: "segment_id", value: String(segmentID))]
+        guard let url = components?.url else { return try await get("companion/\(materialID)") }
+        return try await get(url: url)
     }
 
     func companionLenses() async throws -> [QuestionLens] {

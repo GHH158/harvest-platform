@@ -19,6 +19,12 @@ LensID = Literal["meaning", "naturalness", "structure", "chinese"]
 @dataclass(frozen=True)
 class QuestionLens:
     id: LensID
+    #: 2026-08-10: reworded from 意思/自然吗/结构/和中文 at the learner's request — those
+    #: read as flat category names rather than as something a person would say. The new
+    #: wording is colloquial, but §11.9's constraint is unchanged and is the reason none
+    #: of them got cuter than this: **the label has to say what you get by tapping it.**
+    #: A label you cannot tell apart from the others sends you back to always tapping the
+    #: first one, which is the template accident wearing a different hat.
     label_zh: str
     #: Rendered into companion_message. Must read as a natural question a person
     #: could have typed — the history is read by a human, not by the server.
@@ -31,14 +37,14 @@ class QuestionLens:
 QUESTION_LENSES: tuple[QuestionLens, ...] = (
     QuestionLens(
         id="meaning",
-        label_zh="意思",
+        label_zh="啥意思？",
         question_zh="这句话是什么意思？",
         question_with_focus_zh="「{focus}」在这里是什么意思？",
         focus_zh="回答意思与实际用法，必要时给一个同类例子。不要展开活用规则或中日对比。",
     ),
     QuestionLens(
         id="naturalness",
-        label_zh="自然吗",
+        label_zh="怪不怪",
         question_zh="这句话听起来自然吗？语体合适吗？",
         question_with_focus_zh="「{focus}」这样说自然吗？语体合适吗？",
         focus_zh=(
@@ -49,7 +55,7 @@ QUESTION_LENSES: tuple[QuestionLens, ...] = (
     ),
     QuestionLens(
         id="structure",
-        label_zh="结构",
+        label_zh="拆开看看",
         question_zh="这句话的语法结构是怎样的？",
         question_with_focus_zh="「{focus}」在这句里的语法结构是怎样的？",
         focus_zh=(
@@ -59,7 +65,7 @@ QUESTION_LENSES: tuple[QuestionLens, ...] = (
     ),
     QuestionLens(
         id="chinese",
-        label_zh="和中文",
+        label_zh="跟中文比",
         question_zh="这句话和中文的说法有什么不同？",
         question_with_focus_zh="「{focus}」和中文的说法有什么不同？",
         focus_zh=(

@@ -5,6 +5,16 @@ import SwiftUI
 /// command box would cost a model call for things a single tap already does
 /// reliably. The ask field is the one exception, because "why is this sentence like
 /// this" is not something you can tap your way to (§5.16).
+///
+/// Rebuilt 2026-08-10 after real use. It had grown four different visual treatments in
+/// one screen — a bordered card, tinted rows with accent icons, and two bare text lines —
+/// and the two bare lines looked identical while meaning completely different things
+/// (resume your learning vs. a private entry with nothing to do with Japanese). Now
+/// everything is one form: text, separated by whitespace and grouping rather than by
+/// boxes, which is what §1.5 asks for.
+///
+/// The animation is not decoration either. §1.5 requires state changes to keep time
+/// continuity, and this screen had none: counts arrived asynchronously and popped in.
 struct HomeView: View {
     @EnvironmentObject private var configuration: AppConfiguration
     @State private var counts = HomeCounts()
@@ -13,18 +23,20 @@ struct HomeView: View {
     /// Already fetched for the grammar count; kept so the resume line can open the
     /// actual point instead of dropping you on the list to find it again.
     @State private var grammarPoints: [GrammarPoint] = []
+    /// Drives the staggered entrance. Set once, after the first frame.
+    @State private var hasAppeared = false
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                askCard
+            VStack(alignment: .leading, spacing: 0) {
                 resumeLine
+                askCard
                 destinations
                 journalEntry
             }
             .padding(.horizontal, DesignTokens.pageInset)
-            .padding(.top, 8)
-            .padding(.bottom, 32)
+            .padding(.top, 10)
+            .padding(.bottom, 40)
         }
         .background(DesignTokens.canvas.ignoresSafeArea())
         .navigationTitle("Harvest")
@@ -48,54 +60,134 @@ struct HomeView: View {
             case .settings: SettingsView(isOnboarding: false)
             }
         }
-        .task { await loadCounts() }
-    }
-
-    private var askCard: some View {
-        NavigationLink(value: HomeDestination.ask) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("有哪里卡住了？")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(DesignTokens.ink)
-                Text("课本上的一句话、一个词，或者任何想不通的地方")
-                    .font(.subheadline)
-                    .foregroundStyle(DesignTokens.muted)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16)
-            .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 16))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16).stroke(DesignTokens.accent.opacity(0.35), lineWidth: 1)
-            }
+        .task {
+            await loadCounts()
+            withAnimation(.easeOut(duration: 0.34)) { hasAppeared = true }
         }
-        .buttonStyle(.plain)
     }
 
-    /// §5.18: the one thing here that knows what you were doing last time. §13.1 asks for
-    /// the hundredth launch to feel more familiar than the first; this is the cheapest way
-    /// to keep that promise — every word of it comes from state the app already stores.
-    ///
-    /// The line it must never cross: "上次停在 0:43" is a statement, "你已经三天没学习了"
-    /// is a verdict. §1.4 bans the second one, not the first. So there is no percentage,
-    /// no streak, and nothing at all when there is nothing to say.
+    // MARK: - Rows
+
+    /// §5.18, and now the first thing on the screen: opening the app, "where was I" comes
+    /// before "what could I do". Set in body text with the material name after a middot —
+    /// it is a statement about where you stopped, never a verdict about how long ago.
     @ViewBuilder private var resumeLine: some View {
         if let resume, let destination = resumeDestination(resume) {
             NavigationLink(value: destination) {
                 HStack(spacing: 6) {
                     Text(resumeText(resume))
-                        .font(.subheadline)
+                        .font(.system(size: 17, design: .serif))
                         .foregroundStyle(DesignTokens.ink)
                         .lineLimit(1)
                     Image(systemName: "chevron.right")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(DesignTokens.muted.opacity(0.6))
+                        .foregroundStyle(DesignTokens.accent.opacity(0.7))
                     Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 16)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(SoftPressStyle())
+            .padding(.bottom, 26)
+            .entrance(hasAppeared, order: 0)
         }
     }
+
+    /// The one thing here that is not a link to a page, so it keeps a little more weight —
+    /// but as type, not as a box (§1.5: no card around what is already structured).
+    private var askCard: some View {
+        NavigationLink(value: HomeDestination.ask) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("哪儿卡住了？")
+                    .font(.system(size: 27, design: .serif))
+                    .foregroundStyle(DesignTokens.ink)
+                Text("课本上的一句话、一个词，都可以直接问")
+                    .font(.subheadline)
+                    .foregroundStyle(DesignTokens.muted)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SoftPressStyle())
+        .padding(.bottom, 30)
+        .entrance(hasAppeared, order: 1)
+    }
+
+    private var destinations: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            row(.materials, title: "素材", caption: "读过的文章和视频",
+                detail: counts.materials.map { "\($0) 篇" }, order: 2)
+            row(.chat, title: "聊天", caption: "用日语说说话，随手纠错",
+                detail: counts.chatSessions.map { "\($0) 个话题" }, order: 3)
+            row(.accumulation, title: "积累", caption: "撞见过的词和语法",
+                detail: counts.accumulationDetail, order: 4)
+        }
+    }
+
+    private func row(
+        _ destination: HomeDestination,
+        title: String,
+        caption: String,
+        detail: String?,
+        order: Int
+    ) -> some View {
+        NavigationLink(value: destination) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 19, design: .serif))
+                        .foregroundStyle(DesignTokens.ink)
+                    Text(caption)
+                        .font(.footnote)
+                        .foregroundStyle(DesignTokens.muted)
+                }
+                Spacer(minLength: 8)
+                if let detail {
+                    // Plain counts only. §1.4 rules out progress bars, streaks and
+                    // achievements; an empty shelf is allowed to just read as empty.
+                    // Fades in when it arrives instead of popping (§1.5).
+                    Text(detail)
+                        .font(.footnote)
+                        .foregroundStyle(DesignTokens.muted)
+                        .transition(.opacity)
+                        .id(detail)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(DesignTokens.muted.opacity(0.5))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SoftPressStyle())
+        .entrance(hasAppeared, order: order)
+    }
+
+    /// §14, placed as §5.16 requires: on the home screen but deliberately quiet — no card,
+    /// no icon, no count, and set well apart from the three learning rows.
+    ///
+    /// It used to look exactly like the resume line above, which was the worst of the old
+    /// screen's problems: the same shape for "carry on studying" and for "somewhere with
+    /// nothing to do with Japanese". Now it sits alone under a hairline, right-aligned,
+    /// with no chevron — a different gesture entirely.
+    private var journalEntry: some View {
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(DesignTokens.separator)
+                .frame(height: 0.5)
+                .padding(.top, 34)
+            NavigationLink(value: HomeDestination.journal) {
+                Text("说点别的")
+                    .font(.footnote)
+                    .foregroundStyle(DesignTokens.muted)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.top, 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(SoftPressStyle())
+        }
+        .entrance(hasAppeared, order: 5)
+    }
+
+    // MARK: - Copy
 
     private func resumeText(_ hint: ResumeHint) -> String {
         guard hint.isMaterial else {
@@ -141,73 +233,6 @@ struct HomeView: View {
         title.count <= 14 ? title : String(title.prefix(14)) + "…"
     }
 
-    private var destinations: some View {
-        VStack(spacing: 10) {
-            row(.materials, icon: "text.book.closed", title: "素材",
-                caption: "读过的文章与视频", detail: counts.materials.map { "\($0) 篇" })
-            row(.chat, icon: "bubble.left.and.bubble.right", title: "聊天",
-                caption: "用日语说，即时纠错", detail: counts.chatSessions.map { "\($0) 个话题" })
-            row(.accumulation, icon: "square.stack.3d.up", title: "积累",
-                caption: "生词与语法骨架", detail: counts.accumulationDetail)
-        }
-    }
-
-    /// §14, placed as §5.16 requires: on the home screen but deliberately quiet. No card,
-    /// no icon, no count, and set apart from the three learning rows above — you should
-    /// not be reminded that you have something on your mind every time you open the app
-    /// to study. A count here would not be information, it would be a nudge.
-    private var journalEntry: some View {
-        NavigationLink(value: HomeDestination.journal) {
-            Text("说点别的")
-                .font(.subheadline)
-                .foregroundStyle(DesignTokens.muted)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-        }
-        .buttonStyle(.plain)
-        .padding(.top, 6)
-    }
-
-    private func row(
-        _ destination: HomeDestination,
-        icon: String,
-        title: String,
-        caption: String,
-        detail: String?
-    ) -> some View {
-        NavigationLink(value: destination) {
-            HStack(spacing: 14) {
-                Image(systemName: icon)
-                    .font(.title3)
-                    .foregroundStyle(DesignTokens.accent)
-                    .frame(width: 28)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(.headline)
-                        .foregroundStyle(DesignTokens.ink)
-                    Text(caption)
-                        .font(.footnote)
-                        .foregroundStyle(DesignTokens.muted)
-                }
-                Spacer(minLength: 8)
-                if let detail {
-                    // Plain counts only. §1.4 rules out progress bars, streaks and
-                    // achievements; an empty shelf is allowed to just read as empty.
-                    Text(detail)
-                        .font(.footnote)
-                        .foregroundStyle(DesignTokens.muted)
-                }
-                Image(systemName: "chevron.right")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(DesignTokens.muted.opacity(0.6))
-            }
-            .padding(.vertical, 14)
-            .padding(.horizontal, 16)
-            .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 14))
-        }
-        .buttonStyle(.plain)
-    }
-
     @MainActor private func loadCounts() async {
         guard let endpoint = configuration.endpoint else { return }
         // Counts are decoration on a working launcher: a failure here must leave the
@@ -221,14 +246,53 @@ struct HomeView: View {
         // does not come back the line simply is not there.
         async let hint = try? client.resumeHint()
         let points = await grammar
-        counts = HomeCounts(
+        let loaded = HomeCounts(
             materials: await materials?.count,
             chatSessions: await topics?.count,
             vocabulary: await vocabulary?.count,
             grammarNeedsAttention: points?.filter(\.requiresAttention).count
         )
+        let loadedHint = (await hint) ?? nil
         grammarPoints = points ?? []
-        resume = (await hint) ?? nil
+        withAnimation(.easeOut(duration: 0.28)) {
+            counts = loaded
+            resume = loadedHint
+        }
+    }
+}
+
+/// Fade plus a small rise, staggered by position. Deliberately short and without any
+/// bounce or scale: §1.5 wants motion that explains where something came from, not motion
+/// that draws attention to itself.
+private struct EntranceModifier: ViewModifier {
+    let isVisible: Bool
+    let order: Int
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isVisible ? 1 : 0)
+            .offset(y: isVisible ? 0 : 8)
+            .animation(
+                .easeOut(duration: 0.34).delay(Double(order) * 0.05),
+                value: isVisible
+            )
+    }
+}
+
+private extension View {
+    func entrance(_ isVisible: Bool, order: Int) -> some View {
+        modifier(EntranceModifier(isVisible: isVisible, order: order))
+    }
+}
+
+/// Press feedback for rows that have no background of their own: the text warms toward the
+/// accent and settles back. iOS's default is to grey the whole block, which on a screen
+/// made only of text reads as the text breaking rather than as a press.
+private struct SoftPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.55 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 

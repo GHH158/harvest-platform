@@ -711,24 +711,42 @@ class Repository:
             ).mappings().one()
         return dict(row)
 
-    def companion_messages(self, material_id: int, limit: int = 40) -> list[dict[str, Any]]:
+    def companion_messages(
+        self,
+        material_id: int,
+        limit: int = 40,
+        *,
+        segment_id: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Most recent turns, oldest first for display.
 
         This used to return every message a material had ever accumulated. Nothing
         reads the older ones — the model prompt takes the last 12 and the sheet only
         scrolls back a little — but the client paid for all of them on every open,
         including one furigana request per Japanese run in each.
+
+        `segment_id` narrows it to one sentence (§5.17, 2026-08-10). With it, opening the
+        sheet costs what that sentence has accumulated instead of what the whole material
+        has — which is what §5.17's rule ("the cost of opening must not depend on history
+        length") actually asks for. A cap of 40 bounded it; it did not make it independent.
         """
 
         with self.engine.connect() as connection:
             rows = connection.execute(
                 text(
+                    # The cast is required, not stylistic: with segment_id = None Postgres
+                    # cannot infer a type for the bare placeholder in `IS NULL` and the
+                    # query fails outright. Found by opening the app, not by the tests —
+                    # the no-filter path had no integration coverage, which it now has.
                     """SELECT * FROM (
-                           SELECT * FROM companion_message WHERE material_id = :material_id
+                           SELECT * FROM companion_message
+                           WHERE material_id = :material_id
+                             AND (CAST(:segment_id AS BIGINT) IS NULL
+                                  OR segment_id = CAST(:segment_id AS BIGINT))
                            ORDER BY id DESC LIMIT :limit
                        ) recent ORDER BY id"""
                 ),
-                {"material_id": material_id, "limit": limit},
+                {"material_id": material_id, "limit": limit, "segment_id": segment_id},
             ).mappings().all()
         return [dict(row) for row in rows]
 

@@ -2086,3 +2086,57 @@ def test_same_register_version_round_trips_through_the_correction_store() -> Non
         assert listed[0]["items"][1]["same_register_replacement"] is None
     finally:
         repository.delete_chat_session(session_id)
+
+
+@pytest.mark.integration
+def test_companion_messages_filters_by_segment_and_still_works_without_one() -> None:
+    """§5.17 (2026-08-10). Both paths, because the no-filter path is what every existing
+    caller uses and it had no integration coverage — the first version of the segment
+    filter returned HTTP 500 for it (Postgres cannot type a bare placeholder inside
+    `IS NULL`) and the whole suite stayed green.
+    """
+
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    material_id, _ = repository.create_material_with_job(
+        title="segment filter",
+        source_type="paste",
+        source_ref=None,
+        job_kind="tts",
+        payload={"text": "一。二。"},
+    )
+    repository.complete_reading(
+        material_id=material_id,
+        local_path="/tmp/segment-filter.mp3",
+        oss_key="materials/segment-filter.mp3",
+        bytes_count=10,
+        duration_ms=2_000,
+        segments=[
+            {"idx": 0, "text_ja": "一。", "start_ms": 0, "end_ms": 1_000},
+            {"idx": 1, "text_ja": "二。", "start_ms": 1_000, "end_ms": 2_000},
+        ],
+    )
+    try:
+        segments = repository.get_segments(material_id)
+        first, second = int(segments[0]["id"]), int(segments[1]["id"])
+        repository.add_companion_message(material_id, first, "user", "第一句的问题")
+        repository.add_companion_message(material_id, first, "assistant", "第一句的回答")
+        repository.add_companion_message(material_id, second, "user", "第二句的问题")
+
+        narrowed = repository.companion_messages(material_id, segment_id=first)
+        assert [row["content"] for row in narrowed] == ["第一句的问题", "第一句的回答"]
+
+        # No filter must keep returning everything: that is what the "以前问过的" view uses
+        # and what every pre-existing caller relies on.
+        everything = repository.companion_messages(material_id)
+        assert len(everything) == 3
+
+        assert repository.companion_messages(material_id, segment_id=second)[0]["content"] == "第二句的问题"
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})

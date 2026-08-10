@@ -508,6 +508,8 @@ struct CompanionView: View {
     @State private var showManualLookup = false
     @State private var lookupWord: LookupWord?
     @State private var lenses: [QuestionLens] = []
+    /// §5.17: false means the sheet shows only this sentence's history, which is the default.
+    @State private var showsWholeMaterial = false
 
     init(materialID: Int, segment: Segment, focusText: String? = nil) {
         self.materialID = materialID
@@ -641,6 +643,22 @@ struct CompanionView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
+                    // The whole material's history is still there and still kept — the
+                    // grammar skeleton's provenance hangs off these rows (§4.3). It is just
+                    // not what you asked for when you tapped one sentence, so it waits here
+                    // where you would scroll up looking for it.
+                    if !showsWholeMaterial {
+                        Button {
+                            Task { await loadWholeMaterial() }
+                        } label: {
+                            Text("看这篇以前问过的")
+                                .font(.footnote)
+                                .foregroundStyle(DesignTokens.muted)
+                        }
+                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.bottom, 2)
+                    }
                     ForEach(messages) { message in
                         CompanionMessageBubble(
                             role: message.role,
@@ -696,6 +714,15 @@ struct CompanionView: View {
     /// §5.15: one tap sends that angle. Shown whenever the learner can still ask —
     /// the point is that the options are visible before you have a question in mind,
     /// which an empty box does not achieve any better than a pre-filled one did.
+    /// One row (2026-08-10). The first reworded set did not fit across 402pt and a
+    /// horizontal scroll left 「跟中文差在哪」 clipped to 「跟中文差在」 — which reads like a
+    /// typo and hides what tapping it gets you, exactly what §11.9 is about. Two rows fixed
+    /// the legibility but ate height in a two-thirds sheet, so the labels were shortened
+    /// instead: 15 characters across four capsules fits at the default text size.
+    ///
+    /// The ScrollView stays as a fallback rather than as the layout: at larger accessibility
+    /// text sizes this degrades to scrolling instead of clipping, which is the failure mode
+    /// that matters here.
     private var lensBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -705,8 +732,10 @@ struct CompanionView: View {
                     } label: {
                         Text(lens.labelZH)
                             .font(.subheadline)
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 7)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
                             .background(DesignTokens.surface, in: Capsule())
                             .overlay { Capsule().stroke(DesignTokens.separator, lineWidth: 0.5) }
                     }
@@ -765,7 +794,12 @@ struct CompanionView: View {
         }
         let client = APIClient(baseURL: endpoint)
         do {
-            messages = try await client.companion(materialID: materialID)
+            // §5.17 (2026-08-10): this sheet is about one sentence, so it opens with only
+            // that sentence's history. It used to load the whole material's — forty answers
+            // about other sentences, on top of the one you just asked for. Same-sentence
+            // history stays, because that IS context: asking 拆开看看 and then 这么说怪吗
+            // about the same line is one conversation.
+            messages = try await client.companion(materialID: materialID, segmentID: segment.id)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -773,6 +807,22 @@ struct CompanionView: View {
         // Angles are an addition, not a precondition: if this call fails the learner
         // can still type a question, so it must not surface as an error.
         lenses = (try? await client.companionLenses()) ?? []
+    }
+
+    /// Pulls in the rest of the material's history on request (§5.17). One way only: once
+    /// you have asked to see it, going back to the narrow view would just hide something
+    /// you are reading.
+    @MainActor private func loadWholeMaterial() async {
+        guard let client, !showsWholeMaterial else { return }
+        do {
+            let all = try await client.companion(materialID: materialID)
+            withAnimation(.easeOut(duration: 0.22)) {
+                messages = all
+                showsWholeMaterial = true
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     @MainActor private func send(lens: String? = nil) async {
