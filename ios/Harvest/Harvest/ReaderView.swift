@@ -2,16 +2,17 @@ import NaturalLanguage
 import SwiftUI
 
 /// Navigation payloads instead of inline destinations.
-///
-/// `NavigationLink { CompanionView(…) }` builds its destination eagerly, so every word
-/// in the text constructed one — on every re-render, which during playback is ten times
-/// a second. Worse, mixing that form with `navigationDestination(for:)` in the same
-/// stack is also discouraged. Building them by value means a destination is created
-/// only when a link is actually followed.
-struct CompanionRequest: Hashable {
+/// Asking about a sentence presents a sheet rather than pushing a screen: you are in
+/// the middle of reading or watching, and leaving the page to ask costs the place you
+/// were in. `Identifiable` so `.sheet(item:)` builds the destination only when one is
+/// actually requested — the old `NavigationLink { CompanionView(…) }` form built one
+/// eagerly for every word, on every re-render, ten times a second during playback.
+struct CompanionRequest: Hashable, Identifiable {
     let materialID: Int
     let segment: Segment
     let focusText: String?
+
+    var id: String { "\(materialID)-\(segment.id)-\(focusText ?? "")" }
 }
 
 struct ShadowingRequest: Hashable {
@@ -43,6 +44,9 @@ struct ReaderView: View {
     /// sentence being listened to. Coming back from 陪读 restores the same position, so
     /// the current sentence never *changes* — without this the view sits at the top.
     @State private var scrollRequests = 0
+    /// Presented over the reader instead of pushed, so the place you were reading is
+    /// still there when the sheet closes.
+    @State private var companionRequest: CompanionRequest?
     private let startsOffline: Bool
 
     init(materialID: Int) {
@@ -78,13 +82,8 @@ struct ReaderView: View {
         .navigationTitle(material?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
-        // Destinations are built here, once, only when a link is actually followed.
-        .navigationDestination(for: CompanionRequest.self) { request in
-            CompanionView(
-                materialID: request.materialID,
-                segment: request.segment,
-                focusText: request.focusText
-            )
+        .sheet(item: $companionRequest) { request in
+            CompanionSheet(request: request)
         }
         .navigationDestination(for: ShadowingRequest.self) { request in
             ShadowingView(segment: request.segment)
@@ -152,7 +151,14 @@ struct ReaderView: View {
                                 ? activeReadingUnitID(in: units, at: player.positionMs)
                                 : nil,
                             isCurrent: current,
-                            onSelect: { player.seek(to: segment.startMs) }
+                            onSelect: { player.seek(to: segment.startMs) },
+                            onAsk: { focus in
+                                companionRequest = CompanionRequest(
+                                    materialID: material.id,
+                                    segment: segment,
+                                    focusText: focus
+                                )
+                            }
                         )
                         .equatable()
                         .id(segment.id)
@@ -500,6 +506,8 @@ struct ReadingSentenceView: View, Equatable {
     let activeUnitID: Int?
     let isCurrent: Bool
     let onSelect: () -> Void
+    /// nil asks about the whole sentence; a word asks about that word in this sentence.
+    let onAsk: (String?) -> Void
 
     init(
         materialID: Int,
@@ -507,7 +515,8 @@ struct ReadingSentenceView: View, Equatable {
         units: [JapaneseReadingUnit],
         activeUnitID: Int?,
         isCurrent: Bool,
-        onSelect: @escaping () -> Void
+        onSelect: @escaping () -> Void,
+        onAsk: @escaping (String?) -> Void
     ) {
         self.materialID = materialID
         self.segment = segment
@@ -515,6 +524,7 @@ struct ReadingSentenceView: View, Equatable {
         self.activeUnitID = activeUnitID
         self.isCurrent = isCurrent
         self.onSelect = onSelect
+        self.onAsk = onAsk
     }
 
     init(
@@ -523,7 +533,8 @@ struct ReadingSentenceView: View, Equatable {
         tokens: [Token],
         playbackPositionMs: Int,
         isCurrent: Bool,
-        onSelect: @escaping () -> Void
+        onSelect: @escaping () -> Void,
+        onAsk: @escaping (String?) -> Void
     ) {
         let units = japaneseReadingUnits(text: segment.textJA, tokens: tokens)
         self.init(
@@ -532,7 +543,8 @@ struct ReadingSentenceView: View, Equatable {
             units: units,
             activeUnitID: isCurrent ? activeReadingUnitID(in: units, at: playbackPositionMs) : nil,
             isCurrent: isCurrent,
-            onSelect: onSelect
+            onSelect: onSelect,
+            onAsk: onAsk
         )
     }
 
@@ -549,13 +561,9 @@ struct ReadingSentenceView: View, Equatable {
             ReadingFlowLayout(horizontalSpacing: 2, verticalSpacing: 9) {
                 ForEach(units) { unit in
                     if unit.isWord {
-                        NavigationLink(
-                            value: CompanionRequest(
-                                materialID: materialID,
-                                segment: segment,
-                                focusText: unit.text
-                            )
-                        ) {
+                        Button {
+                            onAsk(unit.text)
+                        } label: {
                             ReadingWordLabel(
                                 unit: unit,
                                 isActive: unit.id == activeUnitID
@@ -576,6 +584,8 @@ struct ReadingSentenceView: View, Equatable {
                     .foregroundStyle(DesignTokens.muted)
                     .lineSpacing(3)
             }
+
+            askIcon
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
@@ -590,6 +600,23 @@ struct ReadingSentenceView: View, Equatable {
             .accessibilityLabel("从本句开始播放")
         }
         .animation(.easeInOut(duration: 0.24), value: isCurrent)
+    }
+
+    /// Per-sentence entry to the explanation. It sits under the sentence it belongs to,
+    /// so there is no "which sentence did that mean?" step — that was the weakness of a
+    /// single "ask the current one" button in the control bar.
+    private var askIcon: some View {
+        Button {
+            onAsk(nil)
+        } label: {
+            Image(systemName: "sparkles")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(DesignTokens.accent)
+                .frame(width: 30, height: 26)
+                .background(DesignTokens.accentWash, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("讲解这句")
     }
 }
 
@@ -730,12 +757,14 @@ private struct ReadingControlBar: View {
             .font(.caption2.monospacedDigit())
             .foregroundStyle(DesignTokens.muted)
 
+            // No "ask the current sentence" button here any more: each sentence now
+            // carries its own icon (§5.17), which removes the "which sentence did that
+            // mean?" step this button always had.
             HStack(spacing: 12) {
                 Text(positionLabel)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(DesignTokens.muted)
                 Spacer()
-                askButton
             }
             HStack(spacing: 18) {
                 shadowButton
@@ -760,24 +789,6 @@ private struct ReadingControlBar: View {
         .overlay(alignment: .top) { Divider().overlay(DesignTokens.separator) }
     }
 
-    @ViewBuilder
-    private var askButton: some View {
-        NavigationLink(
-            value: currentSegment.map {
-                CompanionRequest(materialID: materialID, segment: $0, focusText: nil)
-            }
-        ) {
-            Label("问这句", systemImage: "questionmark.bubble")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(DesignTokens.accent)
-                .padding(.horizontal, 10)
-                .frame(minHeight: 30)
-                .background(DesignTokens.accentWash, in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .disabled(currentSegment == nil)
-        .accessibilityLabel("提问当前句子")
-    }
 
     private var shadowButton: some View {
         NavigationLink(value: currentSegment.map(ShadowingRequest.init(segment:))) {

@@ -219,7 +219,7 @@ struct VideoLearningView: View {
     @State private var lastWatchPositionMs = 0
     @State private var didRestorePlayback = false
     @State private var lastSavedPositionMs = 0
-    @State private var questionSegment: Segment?
+    @State private var companionRequest: CompanionRequest?
     @StateObject private var onlineVideo = OnlineMediaPlayer()
     @StateObject private var onlineAudio = OnlineMediaPlayer()
     @StateObject private var offlineVideoPlayer = OnlineMediaPlayer()
@@ -266,8 +266,8 @@ struct VideoLearningView: View {
         .safeAreaInset(edge: .bottom) {
             if mode == "观看" { learningControlBar }
         }
-        .navigationDestination(item: $questionSegment) { segment in
-            CompanionView(materialID: material.id, segment: segment)
+        .sheet(item: $companionRequest) { request in
+            CompanionSheet(request: request)
         }
         .task { await restorePlaybackPosition() }
         .onChange(of: watchPlaybackPositionMs) { oldPosition, newPosition in
@@ -355,17 +355,6 @@ struct VideoLearningView: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(DesignTokens.muted)
                 Spacer()
-                Button(action: askCurrentSentence) {
-                    Label("提问本句", systemImage: "questionmark.bubble")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(DesignTokens.accent)
-                        .padding(.horizontal, 10)
-                        .frame(minHeight: 30)
-                        .background(DesignTokens.accentWash, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .disabled(subtitleRows.isEmpty)
-                .accessibilityLabel("提问当前播放句子")
             }
             HStack(spacing: 18) {
                 learningButton("backward.end.fill", label: "上一句", action: previousSentence)
@@ -547,7 +536,8 @@ struct VideoLearningView: View {
                             units: row.units,
                             activeUnitID: highlight.segmentID == row.id ? highlight.unitID : nil,
                             isCurrent: highlight.segmentID == row.id,
-                            onSelect: { seek(to: row.segment.startMs) }
+                            onSelect: { seek(to: row.segment.startMs) },
+                            onAsk: { focus in ask(segment: row.segment, focusText: focus) }
                         )
                         .equatable()
                         .id(row.id)
@@ -608,14 +598,19 @@ struct VideoLearningView: View {
         else { offlineVideoPlayer.toggle() }
     }
 
-    private func askCurrentSentence() {
-        guard let segment = segmentForCurrentQuestion(
-            segments: playbackSegments,
-            positionMs: watchPlaybackPositionMs
-        ) else { return }
+    /// Pauses first: the explanation is about this sentence, and letting playback run
+    /// on behind the sheet means the sentence you asked about has already gone by when
+    /// you close it.
+    private func ask(segment: Segment, focusText: String?) {
         onlineVideo.pause()
         offlineVideoPlayer.pause()
-        questionSegment = segment
+        onlineAudio.pause()
+        offlineAudioPlayer.pause()
+        companionRequest = CompanionRequest(
+            materialID: material.id,
+            segment: segment,
+            focusText: focusText
+        )
     }
 
     private func toggleSentenceLoop() {
