@@ -229,11 +229,10 @@ def chat_messages(
     *,
     topic: str,
     history: list[dict],
-    guidance: str,
     user_message: str | None,
     catalogue_subset: list[tuple[str, str, str, str, str]] | None = None,
 ) -> list[dict[str, str]]:
-    context = f"Session topic: {topic}\nLearner notes from recent corrections:\n{guidance or 'None yet.'}"
+    context = f"Session topic: {topic}"
     system_prompt = build_chat_system_prompt(catalogue_subset)
     messages = [{"role": "system", "content": f"{system_prompt}\n\n{context}"}]
     for message in history[-20:]:
@@ -399,8 +398,8 @@ def correction_payload(turn: ChatModelTurn) -> dict | None:
     return turn.correction.model_dump()
 
 
-# The old `build_correction_guidance` lived here and re-derived categories from raw
-# `chat_correction_item` rows on every call. It is replaced by `learner_memory`
-# (§5.12): the same §4.3 shape — at most three categories, one recent example each,
-# 600 characters — is now produced by `build_memory_guidance` from stored memories,
-# so the injected sentence is one the learner can also read back and switch off.
+# Cross-session personalisation was removed on 2026-08-09: the derived learner profile
+# said the same thing the grammar shelf already shows visibly, but only the model could
+# see it, so there was no way to tell whether it helped. The visible version stayed.
+# Before that it was `build_correction_guidance`, which re-derived categories from raw
+# `chat_correction_item` rows on every call. Neither exists now.

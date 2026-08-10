@@ -11,13 +11,6 @@ from typing import Any
 from sqlalchemy import Engine, text
 
 from .grammar_catalogue import catalogue_rows
-from .learner_memory import (
-    LEARNER_MEMORY_SCHEMA_VERSION,
-    RECURRING_ERROR_RULE_VERSION,
-    RECURRING_ERROR_WINDOW_DAYS,
-    build_memory_guidance,
-    derive_recurring_error_memories,
-)
 from .learning_events import LEARNING_EVENT_SCHEMA_VERSION, validated_learning_event_payload
 from .text import canonical_source_key
 
@@ -393,7 +386,6 @@ class Repository:
         # Memories are derived from the events this backfill just repaired, so the
         # rebuild belongs here too — quietly, since a missing memory must not stop
         # the service from starting the way a missing event index would.
-        self._rebuild_learner_memories_quietly()
         # Startup is the natural place to expire diagnostics (§5.13): traces describe
         # history, they are not history, so dropping old ones loses no learning fact.
         pruned = self.prune_decision_traces()
@@ -846,7 +838,6 @@ class Repository:
         if deleted is not None:
             for key in touched_keys:
                 self.reconcile_grammar_projection(key)
-            self._rebuild_learner_memories_quietly()
         return deleted is not None
 
     def add_chat_message(self, session_id: str, role: str, content: str) -> dict[str, Any]:
@@ -1033,7 +1024,6 @@ class Repository:
                         extra={"subject_key": event["subject_key"]},
                     )
                     failure_stage = failure_stage or "project_grammar"
-            self._rebuild_learner_memories_quietly()
             self._record_decision_trace(
                 call_source="chat_correction_index",
                 status="failed" if failure_stage else "ok",
@@ -1164,188 +1154,9 @@ class Repository:
         if deleted is not None:
             for key in touched_keys:
                 self.reconcile_grammar_projection(key)
-            self._rebuild_learner_memories_quietly()
         return deleted is not None
 
     # ── learner memory (§5.12) ──────────────────────────────────
-
-    def rebuild_learner_memories(self, *, now: datetime | None = None) -> list[str]:
-        """Recompute every derived memory from current evidence (§5.12).
-
-        A full recompute rather than an incremental update, so the result depends
-        only on the events and the rule version: running it twice changes nothing,
-        and evidence that disappeared takes its memory with it without a separate
-        cleanup path. Returns the subject keys that currently hold.
-        """
-        current = now or datetime.now(UTC)
-        cutoff = current - timedelta(days=RECURRING_ERROR_WINDOW_DAYS)
-        with self.engine.begin() as connection:
-            events = connection.execute(
-                text(
-                    """SELECT id, occurred_at, payload
-                       FROM learning_event
-                       WHERE schema_version = :schema_version
-                         AND kind = 'correction_item'
-                         AND subject_kind = 'correction_category'
-                         AND rejected_at IS NULL
-                         AND occurred_at >= :cutoff"""
-                ),
-                {"schema_version": LEARNING_EVENT_SCHEMA_VERSION, "cutoff": cutoff},
-            ).mappings().all()
-            drafts = derive_recurring_error_memories([dict(row) for row in events], now=current)
-            for draft in drafts:
-                connection.execute(
-                    text(
-                        """INSERT INTO learner_memory
-                           (schema_version, kind, subject_kind, subject_key, content, reason,
-                            confidence, evidence_count, evidence_refs, rule_version, latest_evidence_at)
-                           VALUES (:schema_version, :kind, :subject_kind, :subject_key, :content,
-                                   :reason, :confidence, :evidence_count, CAST(:evidence_refs AS JSONB),
-                                   :rule_version, :latest_evidence_at)
-                           ON CONFLICT (kind, subject_kind, subject_key) DO UPDATE SET
-                             schema_version = EXCLUDED.schema_version,
-                             content = EXCLUDED.content,
-                             reason = EXCLUDED.reason,
-                             confidence = EXCLUDED.confidence,
-                             evidence_count = EXCLUDED.evidence_count,
-                             evidence_refs = EXCLUDED.evidence_refs,
-                             rule_version = EXCLUDED.rule_version,
-                             latest_evidence_at = EXCLUDED.latest_evidence_at"""
-                        # Legacy dismissed_at is absent on purpose. Runtime suppression
-                        # lives in learner_memory_preference, outside derived content.
-                    ),
-                    {
-                        "schema_version": LEARNER_MEMORY_SCHEMA_VERSION,
-                        "kind": draft.kind,
-                        "subject_kind": draft.subject_kind,
-                        "subject_key": draft.subject_key,
-                        "content": draft.content,
-                        "reason": draft.reason,
-                        "confidence": draft.confidence,
-                        "evidence_count": draft.evidence_count,
-                        "evidence_refs": json.dumps(draft.evidence_refs),
-                        "rule_version": draft.rule_version,
-                        "latest_evidence_at": draft.latest_evidence_at,
-                    },
-                )
-            # Every memory row is derived content, so unsupported rows always go.
-            # The learner's standing "do not use this category" decision lives in
-            # learner_memory_preference and contains no copied sentence/evidence ids.
-            connection.execute(
-                text(
-                    """DELETE FROM learner_memory
-                       WHERE kind = 'recurring_error_pattern'
-                         AND NOT (subject_key = ANY(:supported))"""
-                ),
-                {"supported": [draft.subject_key for draft in drafts]},
-            )
-        return [draft.subject_key for draft in drafts]
-
-    def _rebuild_learner_memories_quietly(self) -> None:
-        """Best-effort rebuild for call sites whose main job must not fail with it.
-
-        Memory is personalisation on top of a chat turn or a deletion that already
-        succeeded; per the degradation gate, losing it costs a paragraph of prompt
-        context, not the user's action. The next rebuild repairs it from events —
-        and either way §5.13 gets a row saying which happened.
-        """
-        started = time.perf_counter()
-        try:
-            subject_keys = self.rebuild_learner_memories()
-        except Exception:
-            logger.exception("Failed to rebuild learner memories")
-            self._record_decision_trace(
-                call_source="learner_memory_rebuild",
-                status="failed",
-                failure_stage="derive",
-                reason="记忆重算失败，聊天与删除主流程未受影响",
-                rule_version=RECURRING_ERROR_RULE_VERSION,
-                duration_ms=int((time.perf_counter() - started) * 1000),
-            )
-            return
-        self._record_decision_trace(
-            call_source="learner_memory_rebuild",
-            status="ok",
-            reason=f"重算后有效记忆 {len(subject_keys)} 条",
-            rule_version=RECURRING_ERROR_RULE_VERSION,
-            duration_ms=int((time.perf_counter() - started) * 1000),
-            detail={"memories": len(subject_keys), "subject_keys": subject_keys},
-        )
-
-    def list_learner_memories(self, *, include_dismissed: bool = True) -> list[dict[str, Any]]:
-        where = "" if include_dismissed else "WHERE preference.dismissed_at IS NULL"
-        with self.engine.connect() as connection:
-            rows = connection.execute(
-                text(
-                    f"""SELECT memory.*, preference.dismissed_at AS preference_dismissed_at
-                        FROM learner_memory memory
-                        LEFT JOIN learner_memory_preference preference
-                          ON preference.kind = memory.kind
-                         AND preference.subject_kind = memory.subject_kind
-                         AND preference.subject_key = memory.subject_key
-                        {where}
-                        ORDER BY memory.evidence_count DESC, memory.latest_evidence_at DESC,
-                                 memory.id"""
-                )
-            ).mappings().all()
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            data = dict(row)
-            data["dismissed_at"] = data.pop("preference_dismissed_at")
-            result.append(data)
-        return result
-
-    def set_learner_memory_dismissed(self, memory_id: int, *, dismissed: bool) -> dict[str, Any] | None:
-        """Idempotently change the separate, content-free suppression preference."""
-        with self.engine.begin() as connection:
-            target = connection.execute(
-                text(
-                    """SELECT kind, subject_kind, subject_key
-                       FROM learner_memory WHERE id = :memory_id"""
-                ),
-                {"memory_id": memory_id},
-            ).mappings().one_or_none()
-            if target is None:
-                return None
-            identity = {
-                "kind": target["kind"],
-                "subject_kind": target["subject_kind"],
-                "subject_key": target["subject_key"],
-            }
-            if dismissed:
-                connection.execute(
-                    text(
-                        """INSERT INTO learner_memory_preference
-                           (kind, subject_kind, subject_key)
-                           VALUES (:kind, :subject_kind, :subject_key)
-                           ON CONFLICT (kind, subject_kind, subject_key) DO NOTHING"""
-                    ),
-                    identity,
-                )
-            else:
-                connection.execute(
-                    text(
-                        """DELETE FROM learner_memory_preference
-                           WHERE kind = :kind AND subject_kind = :subject_kind
-                             AND subject_key = :subject_key"""
-                    ),
-                    identity,
-                )
-        return next(
-            (memory for memory in self.list_learner_memories() if int(memory["id"]) == memory_id),
-            None,
-        )
-
-    def recent_correction_guidance(self, *, max_characters: int = 600) -> str:
-        """Light personalisation for a new chat turn, now sourced from memories.
-
-        This used to read `chat_correction_item` directly and re-derive categories
-        on every call — a leftover read of the very table §5.11 demoted from being
-        a read path. Going through `learner_memory` means the injected sentence is
-        the same one the learner can inspect and switch off.
-        """
-        memories = self.list_learner_memories(include_dismissed=False)
-        return build_memory_guidance(memories, max_characters=max_characters)
 
     def voice_profiles(self) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:

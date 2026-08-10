@@ -359,6 +359,12 @@ CREATE TRIGGER trg_shadowing_attempt_learning_event_delete
     AFTER DELETE ON shadowing_attempt
     FOR EACH ROW EXECUTE FUNCTION delete_learning_events_for_source();
 
+-- Kept in the baseline even though the feature is gone (removed 2026-08-09).
+-- Migrations 0002 and 0003 already ran against these tables and cannot be edited
+-- (§7.5: an applied migration is a fact and its checksum is verified), so a fresh
+-- database still has to create them for those migrations to replay. Migration 0006
+-- drops them again at the end. Create-then-drop is the honest cost of immutable
+-- history; the alternative is a re-baseline, which is a separate deliberate change.
 -- Learner memory (M1-C, full contract in §5.12). A claim about the *person* spanning
 -- many objects — "recently keeps being corrected on particles" — as opposed to
 -- LearnerState, which is per-object (grammar_encounter already is one). Every column

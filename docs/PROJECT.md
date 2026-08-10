@@ -685,43 +685,9 @@ CREATE INDEX idx_learning_event_source ON learning_event(source_table, source_id
 -- 事件同步收敛。当前已覆盖 chat_correction_item / companion_message / vocabulary /
 -- vocabulary_review_attempt / shadowing_attempt。
 
--- 学习者记忆(M1-C,§5.12 有完整契约)。这是「关于这个人」的跨对象判断,不是
--- 单个语法点/单个词的状态——后者是 LearnerState,grammar_encounter 已经是一个。
--- 全部由 learning_event 按固定规则推导,可随时全量重算。使用者的明确停用
--- 不属于派生内容,单独存入下面不含原文与证据引用的 preference 表。
-CREATE TABLE learner_memory (
-    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    schema_version     TEXT NOT NULL DEFAULT 'learner-memory-v1',
-    kind               TEXT NOT NULL,   -- recurring_error_pattern(当前唯一,见 §5.12)
-    subject_kind       TEXT NOT NULL,   -- correction_category
-    subject_key        TEXT NOT NULL,   -- 如 grammar / word_choice
-    content            TEXT NOT NULL,   -- 给使用者看的一句中文陈述,不含评价或激励
-    reason             TEXT NOT NULL,   -- 依据什么规则得出,能直接回答「凭什么这么说」
-    confidence         TEXT NOT NULL,   -- weak | moderate | strong;序数,不是概率(§5.12)
-    evidence_count     INT NOT NULL,    -- 支持这条判断的有效事件数,是原始事实
-    evidence_refs      JSONB NOT NULL,  -- learning_event id 列表,可回查到每一条原文
-    rule_version       TEXT NOT NULL,   -- 规则版本;换规则即可识别哪些记忆需重算
-    latest_evidence_at TIMESTAMPTZ NOT NULL,  -- 取自事件 occurred_at,不是本行写入时间
-    dismissed_at       TIMESTAMPTZ,     -- 仅兼容旧库;运行时不再读取,迁移后清空
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (kind, subject_kind, subject_key)
-);
-CREATE INDEX idx_learner_memory_active ON learner_memory(kind, latest_evidence_at DESC);
-CREATE TRIGGER trg_learner_memory_updated BEFORE UPDATE ON learner_memory
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
--- 停用偏好只保存稳定身份,不保存派生句子或 evidence_refs。即使当前证据全部
--- 删除、learner_memory 行随之消失,以后同类证据再次达到阈值时仍保持停用。
-CREATE TABLE learner_memory_preference (
-    kind         TEXT NOT NULL,
-    subject_kind TEXT NOT NULL,
-    subject_key  TEXT NOT NULL,
-    dismissed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (kind, subject_kind, subject_key)
-);
+-- learner_memory / learner_memory_preference 已于 2026-08-09 删除(迁移 0006)。
+-- 基线仍保留它们的 DDL,因为迁移 0002/0003 已经在这两张表上跑过、按 §7.5 不可修改,
+-- 全新库必须先建出来才能重放;0006 在最后把它们删掉。DDL 原文见 schema.sql。
 
 -- 后台决策记录(M1-D,§5.13 有完整契约)。事件索引、投影重算、记忆推导这些
 -- 增强路径按设计失败不阻断主流程,代价是出错时完全无声;这张表就是它们的
@@ -764,7 +730,7 @@ CREATE INDEX idx_decision_trace_failed
 - **个人知识库第一版就是 PostgreSQL 中的完整聊天与结构化纠错**,不引入 pgvector、Embedding 或 RAG。正确且自然的输入只留在聊天历史,不创建 `chat_correction`。**纠错库本身不做复习调度**——`chat_correction` 只供查阅、搜索和新会话的轻量个性化;§5.9 的复习调度只作用于 `vocabulary`,两者不合并
 - **素材库列表 API 是用户状态投影,不是 material 表直出**:`GET /materials` 除时长、来源、创建时间与封面路径外,还要基于当前 job 返回 `progress_percent`、`progress_label`、`eta_minutes`、失败阶段标题、用户可读错误分类、原始错误和 `retryable`;进度是明确的阶段进度,不能伪装成底层云服务未提供的逐字节精度。`POST /materials/{id}/retry` 复用失败 job 的原始 payload 并清空失败状态,不得创建重复 material。
 - 视频与照片素材使用 `media_asset(kind='image', purpose='thumbnail')` 保存本机缩略图;视频在本地转码前后生成一张 JPEG,照片直接复用受控上传副本。`GET /materials/{id}/thumbnail` 只读取数据库登记且仍存在的文件。纯文本/网页材料由 iOS 使用一致的排版占位封面,不为装饰额外调用图片或 AI 服务。
-- 新会话只轻量参考 §5.12 的学习者记忆:按证据量取最多 3 条,每条自带 1 个近期例子,注入文本最多 600 字;只能让老师自然留意,不得主动测验或把话题拉回旧错误。**一条纠错不构成记忆**——记忆的阈值是同一类别 90 天内 ≥3 次,因此冷启动阶段和偶发错误不会注入任何东西。这是从「最近 30 条纠错现算」换过来时刻意接受的代价:原来单条纠错也会被注入,但那句话只能说成「最近在语法上被纠正过 1 次」,把偶然当成倾向;宁可前几次对话没有个性化,也不要一开始就给模型一个凭一次错误下的判断
+- **新会话不注入任何跨会话的个性化。** 曾按纠错类别派生过一层「学习者画像」注入聊天提示词,2026-08-09 删除:它和语法骨架说的是同一件事,但只有模型看得见,无法判断是否真的帮到使用者;可见的那份(§12「需要留意」)保留。
 - **`material.status` 只表达用户是否能消费材料**,不表达所有后台增强任务是否都成功:`ready` 表示主媒体与句级时间轴已可用;P2 ASR 这类增强任务失败或低覆盖率时,只把对应 `job` 记为 `failed` / `done`,不得把材料从 `ready` 降级;`downloaded` 表示视频已下载并本地转码完成、等待手动触发转录(此时无 OSS 上传,不可在 iPhone 消费,也不随任务自动推进)
 - **异步子流程必须有自己的状态与错误字段**:`job` 表达后台任务状态;`shadowing_attempt` 表达一次跟读提交的状态。客户端不得通过“结果字段是否为空”猜测任务是否结束
 
@@ -1195,7 +1161,7 @@ Output
 
 ### 5.11 全局学习事件契约(M1)
 
-本节是 §13.9 M1 的学习事件精确契约,按项目自己的规矩先于实现落地。第一纵向切片定过三件事:证据可撤销、事件信封与旧数据回填、系统提示词目录的动态构造;M1-B 在同一套信封上追加生词存词、生词复习与跟读结果三个适配器,并新增 `vocabulary_review_attempt` 事实表。学习者记忆和后台决策记录分别见已经落地的 §5.12 / §5.13。
+本节是 §13.9 M1 的学习事件精确契约,按项目自己的规矩先于实现落地。第一纵向切片定过三件事:证据可撤销、事件信封与旧数据回填、系统提示词目录的动态构造;M1-B 在同一套信封上追加生词存词、生词复习与跟读结果三个适配器,并新增 `vocabulary_review_attempt` 事实表。后台决策记录见已经落地的 §5.13(同期的「学习者记忆」已于 2026-08-09 删除)。
 
 #### 为什么是「薄信封 + 按 kind 校验的载荷」
 
@@ -1296,68 +1262,6 @@ kind="shadowing_completed"
 
 这一条不依赖 `learning_event` 存在,只需要 `grammar_encounter`(M0 已有),可以独立于本节其余部分先行实现。
 
-### 5.12 学习者记忆契约(M1-C)
-
-本节是 §13.9 M1 里「定义 `LearnerMemory` 与证据关联」那一条的精确契约。范围覆盖:记忆与状态的边界、第一种记忆 `recurring_error_pattern`、全量重算与收敛语义、使用者的查看与停用,以及把聊天提示词个性化接到记忆上。后台决策 trace 已在 §5.13 落地;LLM 记忆提取、向量召回仍不进入 M1。当前没有第三种对象状态需要共享抽象,因此不为 `grammar_encounter` 与生词调度额外建设一张通用 `LearnerState` 表。
-
-#### `LearnerMemory` 与 `LearnerState` 的边界
-
-两者都是从事件推导出来的推断,都可重算,写在一起会立刻变成含混结构(接口闸第 6 条)。分界是**判断的对象**:
-
-- **`LearnerState`(状态投影)**:关于**一个对象**当前怎么样。「`verb-te` 这个语法点需要留意」「这个词下次该在周三复习」。`grammar_encounter` 已经是一个这样的投影,`vocabulary.box` 也是。
-- **`LearnerMemory`(学习者记忆)**:关于**这个人**的跨对象倾向,对应 §13.3 分层记忆的第 3 层「学习者画像」。「最近在助词上反复被纠正」不属于任何单个语法点,它是把多个对象上的多条证据合起来才成立的判断。
-
-判据很简单:**能挂到某一个 `subject_key` 上、且删掉那个对象就该消失的,是状态;跨多个对象、要靠汇总才成立的,是记忆。** 按这条,本次不把「某个语法点反复出错」做成记忆——那是 `grammar_encounter.needs_attention` 已经在回答的状态问题,再做一遍就是同一份事实两个入口分叉,正是 §5.11 刚收拾掉的毛病。
-
-#### 第一种记忆:`recurring_error_pattern`
-
-```text
-kind="recurring_error_pattern"
-  subject_kind="correction_category"   subject_key=纠错类别
-      (grammar | word_choice | naturalness | register | orthography)
-  来源  = kind='correction_item' 且 subject_kind='correction_category'
-          且 rejected_at IS NULL 的 learning_event
-  阈值  = 同一类别在时间窗内 ≥ 3 条有效事件
-  时间窗 = 按 occurred_at 取最近 90 天
-  content = "最近在{类别中文名}上反复被纠正(近 90 天 N 次),例如「原文」→「修正」"
-  reason  = "近 90 天内有 N 条该类别的真实纠错,达到 3 条阈值"
-  confidence = weak(3) | moderate(4–6) | strong(≥7)
-  evidence_refs = 窗口内该类别全部有效事件 id(单用户 90 天量级,不做截断)
-```
-
-几处刻意的选择:
-
-- **时间窗必须有,否则记忆只增不减。** 半年前改掉的毛病不该永远挂在使用者身上;90 天内没有新证据,这条记忆在下次重算时自然消失,不需要谁去清理。这也是「状态是可重算的推断」的直接后果。
-- **`confidence` 用序数而不是浮点概率。** §5.11 已经拒绝过给模型归类填 `1.0` 制造虚假确定性,这里同理:三条纠错支持的判断,没有任何校准依据能说它「有 0.5 的概率为真」。存 `weak/moderate/strong` 加上原始的 `evidence_count`,谁都不会误当成概率去乘。界面也不得把它显示成百分比或进度条。
-- **`content` 只陈述,不评价。** 不写「你还需努力」「继续加油」,§1.4 的不游戏化在这里同样有效。它既是给使用者看的句子,也是注入提示词的句子,两处必须是同一句——不能界面上说得温和、提示词里说得严厉。句中带一个最近的真实例子,既满足 §4.3「每类附 1 个近期例子」,也让这条判断当场可验证;例子是随重算刷新的快照,原文仍以 `evidence_refs` 指向的事件为准。
-- **只认真实纠错,不认 AI 自己的输出。** 来源限定为 `correction_item` 事件,且排除已 `rejected_at` 的;§13.2 明确禁止把模型说过的话反过来当使用者的记忆。
-
-#### 全量重算、删除收敛,以及停用偏好必须独立存活
-
-`rebuild_learner_memories()` 是一次**全量重算**:读当前全部有效事件,按上述规则算出应当存在的记忆集合,然后 upsert 存在的、删除不该存在的。因此——
-
-- **幂等**:证据不变时重复跑结果完全一致,不产生重复行,也不会把 `created_at` 刷新成现在。
-- **删除即收敛**:删掉纠错或整段聊天,事件被既有触发器清理,下次重算时证据数掉到阈值以下,记忆随之消失。重算查询同时带 `rejected_at IS NULL`,被撤销的证据一律不计。**但当前撤销语法关联不会影响记忆**:按 §5.11 的两个主体划分,`/grammar/evidence/{id}/reject` 撤销的是 `grammar_point` 那条(「这不是て形」),同一条纠错的 `correction_category` 事件仍然成立(「你确实被纠正过一次用词」)——两件事本来就该分开,不是遗漏。
-- **派生记忆与停用偏好分表。** `learner_memory` 的 `content`、例句快照和 `evidence_refs` 全部是可重算内容;`learner_memory_preference` 只保存 `kind + subject_kind + subject_key + dismissed_at`,不保存任何原句。自动推断不得覆盖使用者的明确判断,但也不能以「保留判断」为由长期保留已经失去来源的私密内容。
-- **证据消失时所有无支持的 `learner_memory` 行一律删除,包括已停用的。** 停用身份仍留在 preference;同类证据以后重新达到阈值时派生行可以重建,关联 preference 后依然不进提示词。这样同时满足「以后别再提这类」与「来源删除后派生原文、失效引用必须消失」。旧库中 `learner_memory.dismissed_at` 会幂等迁移到 preference 并清空,旧列只作一版兼容。
-
-重算时机:纠错事件写入后、以及证据删除/撤销后各触发一次。与事件索引一样是**最佳努力**——重算失败只记日志,不得让聊天、存词或删除操作失败(退化闸第 5 条)。记忆是个性化增强,不可用时聊天照常进行,只是少一段个性化提示。
-
-#### 消费者:聊天提示词的个性化改读记忆
-
-这一片有真实消费者,不是先建一个没人读的表。现状 `recent_correction_guidance()` 直接查 `chat_correction_item` 取最近 30 条现算——而 §5.11 已经把这张表降级为「不再是投影的读取路径」,这里是当时漏掉的一处。改为读 `learner_memory`:
-
-- 关联 `learner_memory_preference` 后只取未停用的记忆;使用者关掉的判断**立即不再进入提示词**,这正是用户控制要有的实际效果,而不只是列表里少一行。
-- 保留原有的 600 字上限与最多 3 条的注入格式契约(§4.3),提示词形状不变,变的只是数据来源和它现在带着 `reason` 与证据引用。
-- 没有任何记忆时注入空串,聊天照常开场——冷启动不得因为「还没有记忆」而报错或空转。
-
-#### 查看与撤销
-
-- `GET /learner/memories`:列出记忆,含 `content`、`reason`、`evidence_count`、`confidence` 与是否已撤销。这是 §13.7「凡是会影响未来教学的长期判断,必须能说明根据什么」的落地入口。
-- `POST /learner/memories/{id}/dismiss` / `restore`:幂等,只增删独立 preference,不编辑派生 `content`;证据仍存在时接口返回关联后的最新记忆。
-
-iOS 在设置页提供「系统记住的内容」区域:显示同一句 `content`、`reason` 与依据数量,可「不再用于聊天」或恢复。它不增加底部导航,也不暴露事件表、置信度调度或 trace;复杂性留在系统内,用户只看到会实际影响教学的判断及其开关。
-
 ### 5.13 后台决策记录契约(M1-D)
 
 本节最初是 §13.9 M1 里「为记忆提取、投影、召回与删除定义统一决策记录」的精确契约;此后每个已经落地的增强/验证路径按同一隐私边界追加 `call_source`。它不是所有 HTTP 或模型请求的通用日志:当前只覆盖 M1 的后台路径与 §5.15 的提问角度,不为尚未存在的功能预先造记录类型。
@@ -1379,7 +1283,6 @@ call_source(当前全集,新增后台路径必须同时新增取值):
   vocabulary_saved_index     存词事件
   vocabulary_reviewed_index  复习事件
   shadowing_completed_index  跟读评分事件
-  learner_memory_rebuild     记忆全量重算
   learning_event_backfill    启动时的幂等回填
   role_perspective_preview   M2 一位参与者的显式开发预览
 
@@ -1687,7 +1590,7 @@ WHERE role = 'user' GROUP BY 1 ORDER BY 2 DESC;
 - **iOS 端不硬编码 API Key**,存 Keychain,首次启动时配置
 - **iOS 正式 Bundle ID 固定为 `com.gaohuanhuan.harvest.JapaneseLearning`**,调试和真机安装不得另建同名 App 的平行 Bundle。Debug/Release 生成的 Info.plist 必须包含 `UILaunchScreen`,根画布必须覆盖安全区;缺少启动屏声明导致的兼容模式上下黑边属于构建失败
 - **所有可收敛的后台耗时操作走 job 表异步执行**,API 立即返回任务 ID,前端轮询状态。文字聊天和实时语音属于持续交互通道,按各自同步请求 / WebSocket 协议执行,不进入 job 表
-- **领域模块不得 import `repository`**。当前依赖方向是:`chat` / `companion` / `roles` / `learner_memory` / `learning_events` 是不碰数据库的纯规则模块,`repository` 反过来 import 其中的规则模块并负责把规则落到 SQL,只有 `main` 和 `worker` 两个组合根同时持有两侧。这个方向是「186 项测试无需数据库、1.5 秒跑完」的直接原因,也是 `main.py` 至今零裸 SQL 的前提,**不得为了图方便让领域模块直接查库**
+- **领域模块不得 import `repository`**。当前依赖方向是:`chat` / `companion` / `lenses` / `learning_events` 是不碰数据库的纯规则模块,`repository` 反过来 import 其中的规则模块并负责把规则落到 SQL,只有 `main` 和 `worker` 两个组合根同时持有两侧。这个方向是「186 项测试无需数据库、1.5 秒跑完」的直接原因,也是 `main.py` 至今零裸 SQL 的前提,**不得为了图方便让领域模块直接查库**
 - **`Repository` 按领域拆分,存量不动**。当前它是单类约 90 个方法、2700 行;方法名前缀(`grammar_` / `chat_` / `companion_` / `vocabulary_`)已经是事实上的分组,再接入新的学习入口会把它推到 4000 行以上。规则是:**新领域的数据访问不再往 `Repository` 里加**,按领域新建 `GrammarRepository` / `ChatRepository` / `LearnerRepository`,共享同一个 `Engine`;已有 92 个方法**不做一次性搬迁**——没有真实痛点的大重构只会制造一次无法验收的巨型 diff。拆分随新功能渐进发生,旧方法在被相邻改动触及时顺带搬,不单独立项
 
 ### 7.4 运维
@@ -1865,6 +1768,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-09 | 弹层的四点跟进(§5.17 更新)。①**默认改为约三分之二屏、可上拉全屏**(`.fraction(0.66)` + `.large`)——原先取半屏的理由是「让页面上那句留在后面可见」,但弹层顶部自己就印着当前句子,那个理由站不住,省下的高度给回答;上拉全屏本就由 `.large` 提供,已实测确认。②**打开弹层前先暂停**,阅读页与视频页都是——否则读回答时音频继续走,关掉弹层时问的那句早已过去。为此给 `AudioPlayer` 增加 `pause()`:原来只有 `toggle()` 与 `stop()`,而 `stop()` 会释放播放条目、连带丢掉续播点。③**修掉两处会随历史线性变慢的实现**:`GET /companion/{id}` 此前**返回该材料的全部消息且无上限**,改为默认最近 40 条(仍按阅读顺序);**假名预取遍历全部助手消息**、每个日语片段一次请求且**串行 await**,改为只取最近 6 条,更早的消息照常显示只是暂无振假名,聊天页同一问题一并改。据此在 §5.17 立判据:**打开弹层的代价必须与历史长度无关**。新增 1 项集成测试锁住上限查询——它把原查询包进子选择,方向极易写反,测试同时验证「保留最新」与「仍按阅读顺序返回」。验证:`ruff` 通过;全新持久库连跑两次各 **243 项全通过**;iOS `BUILD SUCCEEDED` 与 `TEST SUCCEEDED`;模拟器上连真实服务确认弹层默认高度、上拉全屏、点开即暂停三项均生效 |
 | 2026-08-09 | §1.4 解除「不录入课本正文」,把约束的轴从「内容来自哪里」换成「你是否真的会读它」。**起因是真实使用**:使用者边学《标准日本语》边想弄懂时,App 里没有任何地方能接住手上那一句,原约束从保护变成了阻碍。判据换轴的依据在 §1.4 内部就有——生词那条的例外是「**你自己查过的**」,真正的判据一直是「有没有真的撞上并停下来」,而不是内容出处;批量灌词表没价值不是因为它来自课本,是因为不会真的读它。**改为**:正在学的课文可以摄入(拍照或粘贴,与文章、视频同一条管道);仍禁止整册批量导入、成套词表导入、课程进度条与打卡。**明确保留一条**:课本的讲解正文不得抄进语法骨架——摄入课文来读来问,与把课本注解粘进骨架,是两件事;骨架的价值在于按实际撞见组织 + 讲解按需生成,粘进去它就成了课本的更差副本,那才是「课本数字化」真正要防的。同时澄清与原 M0 修订理由不冲突:**如果使用者正在学标日,标日的顺序就是他真实的撞见顺序**,骨架照实反映即可。**本次无需改代码**——该约束一直只写在文档里,代码从未强制;拍照摄入(Qwen-VL OCR → 自动排 TTS → 分句 + 朗读音频 → 点词按角度提问)早已可用,且对纸质课本是比打字更省事的路径。附带观察:角度功能在课本句子上格外有用,因为课本例句常语法完美而语用别扭,而课本自己不会说这件事 |
 | 2026-08-09 | **删除角色、圆桌与 M3–M7 整条路线**(§5.14 删除,§13.3–13.6 与 §13.9 重写)。使用者判断这部分对自己没有必要,且会影响学习、消耗大量 token——两条理由都成立:圆桌的形态是一次提问调用多个模型再由主持人收敛,而实测下来真正需要的是「这句为什么这么说」的单点讲解,一次调用就能做好(§5.15);关系记忆、情感日记、沉浸场景、主动提醒那一类本质是让使用者消费更多 AI 内容并停留更久,正是 §9 写明的失败模式。**删除范围**:代码 `roles.py`(384 行)、`role_blind.py`、`GET /roles`、`POST /roles/{id}/preview`、`RolePreviewRequest`、`record_role_preview_trace`、两个盲测脚本、`test_roles.py` 与 10 题固定题集;文档 §5.14 全节、§13.3–13.6 四节、M3–M7 路线。删除前已确认**这批代码没有任何消费者**——iOS 从未调用 `/roles`,后端也无其他模块引用,§5.15 的四个角度只借用了视角定义、不调用角色 manifest。**刻意保留的**:①三条仍在约束现有代码的规则(不把 AI 输出写成使用者事实、影响未来教学的长期判断必须可解释、六条验收闸),因为 §5.11–§5.13 直接引用它们;②M0/M1 的产物说明——`learning_event`、`learner_memory`、`decision_trace` 三张表都在跑,语法骨架靠它生长、聊天个性化读记忆,删掉设计说明会让这些代码变得无从解释;③`docs/reviews/M2-role-blind-evaluation.md` 保留并加状态说明,它是「那四个角度凭什么可信」的唯一依据(28/30 = 93% 的辨认率来自真实付费调用与人工评审)。**编号按 §0.3 保留**:§13.3–13.6 留作空位并注明删除,不重编号,避免既有交叉引用失效。顺带修掉因删除产生的悬空引用:§5.15 改为叙述盲测结论而非引用 §5.14,§7.5 的版本化契约例子换成 `companion-lens-v1`,§11.7 从「等 M3 主持人处理」改为「若实际出现同句不同角度语体不一致再补提示词并升版本」,§7.3 的 Repository 拆分规则去掉 M3 时点,§13.8 的目标闭环改为当前真正在跑的那条。验证:`ruff` 通过;后端 **190 项通过、33 项跳过**(删除 20 项角色测试);生きている節に悬空引用 0;`backend/app` 由 8344 行降至 7971 行,`docs/PROJECT.md` 由 2369 行降至 2148 行 |
+| 2026-08-09 | **删除分层记忆的第 3 层「学习者画像」**(§5.12 全节删除,迁移 0006)。第 1 层(当前互动上下文)与第 2 层(`learning_event`)保留——前者就是对话历史本身,后者是语法骨架的数据源:目录查询直接 JOIN 它来算「这个点错过几次、问过什么、要不要留意」,删了骨架就退化成静态目录。**第 3 层只有一个消费者**:把纠错类别派生成一句话注入聊天系统提示词。删除理由不是成本(它不额外调模型),而是**它与语法骨架说的是同一件事,却只有模型看得见**——「积累」页那份是可见、你能据此行动的版本,`learner_memory` 是同一批信息的不可见副本,无法判断是否真的帮到使用者。删除范围:`learner_memory.py`、`rebuild_learner_memories` / `set_learner_memory_dismissed` / `list_learner_memories` / `recent_correction_guidance` 与 4 处静默重算调用、`chat_messages` 的 `guidance` 参数、`GET/POST /learner/memories*` 三个接口、iOS 的 `LearnerMemory` 模型与设置页「系统记住的内容」、相关测试。**基线故意不删这两张表的 DDL**:迁移 0002/0003 已经在它们上面跑过、按 §7.5 不可修改(校验和会拦),全新库必须先建出来才能重放历史,再由 0006 在最后删除——create-then-drop 是不可变历史的诚实代价,替代方案是重做基线,那是另一次需要显式记录的改动。已实测全新库 0001→0006 全部通过且两表最终不存在。`decision_trace` 里 `learner_memory_rebuild` 的历史行不动,按 30 天保留期自然裁剪。顺带把失败阶段的测试覆盖从「记忆重算失败」改挂到「陪读语法证据登记失败」——那是仍然存在的静默路径,§5.13 要求的「失败必须能定位到阶段」不能随功能删除一起丢掉。验证:`ruff` 通过;全新持久库连跑两次各 **208 项通过**;iOS `TEST SUCCEEDED`;真实库迁移至 0006,`learning_event` 29 条、`grammar_encounter` 10 条均未受影响 |
 
 ---
 
@@ -1916,7 +1820,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 
 **已确认不是本次改动引入**:用改前的 `db.py` / `schema.sql` 在全新库上对照复现,第二次运行同样只有这一项失败;且移出基线的三条 `grammar_encounter` 语句都是 `UPDATE`,不删除任何行,不可能清理掉这条残留。
 
-**已修复(2026-08-09)**:在该测试的 teardown 中清理 `grammar_encounter`,与同处已有的 `learner_memory` / `decision_trace` 清理同级——它们都是派生投影,teardown 一并收敛。验证方式即下面这条新增约定:全新持久库上连跑三次全套,每次 **230 项全通过**(修复前第二次即失败),三次结束后 `grammar_encounter`、`learning_event`、`learner_memory`、`decision_trace`、`chat_session`、`material`、`vocabulary`、`shadowing_attempt` 等动态表全部归零。
+**已修复(2026-08-09)**:在该测试的 teardown 中清理 `grammar_encounter`,与同处已有的 `decision_trace` 清理同级——它们都是派生投影,teardown 一并收敛。验证方式即下面这条新增约定:全新持久库上连跑三次全套,每次 **230 项全通过**(修复前第二次即失败),三次结束后 `grammar_encounter`、`learning_event`、`learner_memory`、`decision_trace`、`chat_session`、`material`、`vocabulary`、`shadowing_attempt` 等动态表全部归零。
 
 **由此确立的验收约定**:**「连跑两次」必须针对同一个持久数据库,不能用一次性临时集群代替。** 每次拿一个全新的库只能验证单次运行内部的正确性,验证不出跨运行的状态泄漏,而真实数据库恰恰是持久的——本条缺陷正是因此长期存在却从未被发现。
 
@@ -2066,7 +1970,7 @@ Harvest 不应只是阅读、聊天、查词、语法等 AI 功能的集合,也�
 
 内部每次重要推断、记忆提取与后台决策都应有结构化的 `reason`、来源证据、提示词/规则版本与结果(§5.13)。可观测性不要无差别记录全部私密原文;优先记录结构化决策与必要引用,让出错时能判断是证据、召回、提示词还是模型的问题。
 
-学习者记忆与后台决策记录都必须是可独立退化的组件:任一部分不可用时,核心阅读、播放、查词、提问与聊天仍可继续,只是少一段个性化。
+后台推断与决策记录必须是可独立退化的组件:任一部分不可用时,核心阅读、播放、查词、提问与聊天仍可继续。
 
 ### 13.8 语法骨架是第一个切片
 

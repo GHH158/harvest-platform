@@ -197,19 +197,6 @@ struct APIClient {
         try await postWithoutBody("grammar/evidence/\(eventID)/unreject")
     }
 
-    func learnerMemories() async throws -> [LearnerMemory] {
-        try await get("learner/memories")
-    }
-
-    @discardableResult
-    func dismissLearnerMemory(id: Int) async throws -> LearnerMemory {
-        try await postWithoutBody("learner/memories/\(id)/dismiss")
-    }
-
-    @discardableResult
-    func restoreLearnerMemory(id: Int) async throws -> LearnerMemory {
-        try await postWithoutBody("learner/memories/\(id)/restore")
-    }
 
     /// Words due for spaced-repetition review right now, oldest-due first.
     func reviewDueVocabulary(limit: Int = 20) async throws -> [VocabularyWord] {

@@ -16,7 +16,6 @@ from app.chat import (
     suppress_follow_up,
     topic_for,
 )
-from app.learner_memory import build_memory_guidance
 from app.llm import LLMReply
 from app.prompts import INTERACTIVE_TEACHING_CORE_PROMPT
 from fastapi import HTTPException
@@ -179,7 +178,6 @@ def test_context_only_contains_recent_twenty_messages_and_chinese_rule() -> None
     messages = chat_messages(
         topic="週末",
         history=history,
-        guidance="- grammar",
         user_message="我想说周末去了公园",
     )
 
@@ -191,37 +189,11 @@ def test_context_only_contains_recent_twenty_messages_and_chinese_rule() -> None
     assert "- grammar" in messages[0]["content"]
 
 
-def test_memory_guidance_keeps_three_memories_and_caps_length() -> None:
-    """§4.3's injection budget survives the move to learner_memory (§5.12): at most
-    three entries, 600 characters, however long a single memory happens to be."""
-    memories = [
-        {"content": f"最近在{label}上反复被纠正" + "很长的例子" * 100}
-        for label in ("语法", "自然度", "语体", "书写")
-    ]
-
-    guidance = build_memory_guidance(memories, max_characters=600)
-
-    assert len(guidance) <= 600
-    assert guidance.count("\n") == 2
-    assert "语法" in guidance
-    assert "自然度" in guidance
-    assert "语体" in guidance
-    assert "书写" not in guidance
-
-
-def test_memory_guidance_is_empty_without_memories() -> None:
-    # Cold start: no memories yet must inject nothing rather than an empty bullet.
-    assert build_memory_guidance([]) == ""
-
-
 class ChatRepository:
     def __init__(self) -> None:
         self.completed = False
         self.created: dict[str, Any] | None = None
         self.session = {"id": "session-1", "topic": "週末"}
-
-    def recent_correction_guidance(self) -> str:
-        return "- grammar"
 
     def grammar_catalogue_for_prompt(self) -> list[tuple[str, str, str, str, str]]:
         return [("verb-te", "～て", "て形与连接", "N5", "动词变形")]
@@ -265,7 +237,6 @@ def test_session_creation_returns_ai_opener(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured == {
         "topic": "今週末の予定",
         "history": [],
-        "guidance": "- grammar",
         "user_message": None,
         "catalogue_subset": repository.grammar_catalogue_for_prompt(),
     }
@@ -382,7 +353,6 @@ def test_per_turn_instruction_is_added_only_after_a_question() -> None:
     asked = chat_messages(
         topic="本",
         history=[{"role": "assistant", "content": "どの作品を読みましたか？"}],
-        guidance="",
         user_message="村上春樹です",
     )
     # Match the per-turn nudge specifically; the system prompt mentions the field too.
@@ -392,7 +362,6 @@ def test_per_turn_instruction_is_added_only_after_a_question() -> None:
     not_asked = chat_messages(
         topic="本",
         history=[{"role": "assistant", "content": "村上春樹、いいですね。"}],
-        guidance="",
         user_message="村上春樹です",
     )
     assert not any(marker in m["content"] for m in not_asked)

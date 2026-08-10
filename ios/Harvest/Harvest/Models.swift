@@ -482,33 +482,3 @@ struct GrammarEvidenceItem: Codable, Identifiable, Hashable {
     var isMistake: Bool { kind == "correction" }
     var summaryText: String { isMistake ? (originalFragment ?? "") : (question ?? "") }
 }
-
-/// One explainable, derived statement that may lightly personalise future teaching.
-/// The learner can inspect and disable it; raw event tables remain an internal detail.
-struct LearnerMemory: Codable, Identifiable, Hashable {
-    let id: Int
-    let kind: String
-    let subjectKind: String
-    let subjectKey: String
-    let content: String
-    let reason: String
-    let confidence: String
-    let evidenceCount: Int
-    let evidenceRefs: [Int]
-    let ruleVersion: String
-    let latestEvidenceAt: String
-    let dismissedAt: String?
-
-    enum CodingKeys: String, CodingKey {
-        case id, kind, content, reason, confidence
-        case subjectKind = "subject_kind"
-        case subjectKey = "subject_key"
-        case evidenceCount = "evidence_count"
-        case evidenceRefs = "evidence_refs"
-        case ruleVersion = "rule_version"
-        case latestEvidenceAt = "latest_evidence_at"
-        case dismissedAt = "dismissed_at"
-    }
-
-    var isDismissed: Bool { dismissedAt != nil }
-}
