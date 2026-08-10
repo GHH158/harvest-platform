@@ -54,8 +54,32 @@ enum MarkdownBlock: Equatable {
     case orderedItem(number: String, text: String)
     case quote(String)
     case code(String)
+    /// GFM pipe table. Comparison tables (「たまに」vs「ときどき」, 语体对照) are a
+    /// natural shape for language teaching, so the model reaches for them; without a
+    /// case here they fell through to `.paragraph` and showed raw pipes.
+    case table(header: [String], rows: [[String]])
     case divider
     case spacer
+}
+
+/// A row is `| a | b |`; outer pipes are optional in GFM. Returns nil for lines that
+/// merely contain a pipe, so ordinary prose is never mistaken for a table.
+func markdownTableCells(from line: String) -> [String]? {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    guard trimmed.contains("|") else { return nil }
+    var body = trimmed
+    if body.hasPrefix("|") { body.removeFirst() }
+    if body.hasSuffix("|") { body.removeLast() }
+    guard body.contains("|") || trimmed.hasPrefix("|") else { return nil }
+    return body.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+}
+
+/// The `|---|:--:|` line under the header is what makes a table a table.
+func isMarkdownTableDivider(_ line: String) -> Bool {
+    guard let cells = markdownTableCells(from: line), !cells.isEmpty else { return false }
+    return cells.allSatisfy { cell in
+        !cell.isEmpty && cell.allSatisfy { $0 == "-" || $0 == ":" || $0 == " " } && cell.contains("-")
+    }
 }
 
 func markdownBlocks(from source: String) -> [MarkdownBlock] {
@@ -66,6 +90,7 @@ func markdownBlocks(from source: String) -> [MarkdownBlock] {
     var codeLines: [String] = []
     var quoteLines: [String] = []
     var isInsideCodeFence = false
+    var index = 0
 
     func flushParagraph() {
         guard !paragraphLines.isEmpty else { return }
@@ -84,8 +109,32 @@ func markdownBlocks(from source: String) -> [MarkdownBlock] {
         quoteLines.removeAll(keepingCapacity: true)
     }
 
-    for line in lines {
+    while index < lines.count {
+        let line = lines[index]
+        index += 1
         let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+        // A table is only a table when a divider row follows the header, so look one
+        // line ahead before committing. Everything else stays line-at-a-time.
+        if !isInsideCodeFence,
+           index < lines.count,
+           let header = markdownTableCells(from: line),
+           header.count >= 2,
+           isMarkdownTableDivider(lines[index]) {
+            flushParagraph()
+            flushQuote()
+            index += 1  // consume the divider
+            var rows: [[String]] = []
+            while index < lines.count, let cells = markdownTableCells(from: lines[index]) {
+                // Pad or trim so every row matches the header and the grid stays square.
+                var row = cells
+                if row.count < header.count { row += Array(repeating: "", count: header.count - row.count) }
+                rows.append(Array(row.prefix(header.count)))
+                index += 1
+            }
+            blocks.append(.table(header: header, rows: rows))
+            continue
+        }
 
         if isInsideCodeFence {
             if trimmed.hasPrefix("```") {
@@ -768,7 +817,7 @@ struct CompanionView: View {
                     for run in furiganaRuns(in: text) where run.annotate {
                         await ensureFurigana(for: run.text, using: client)
                     }
-                case .code, .divider, .spacer:
+                case .code, .table, .divider, .spacer:
                     break
                 }
             }
@@ -908,6 +957,8 @@ struct MarkdownMessageView: View {
             return section
         case (.code, _), (_, .code):
             return 12
+        case (.table, _), (_, .table):
+            return 14
         case (.divider, _), (_, .divider):
             return 16
         case (.paragraph, .paragraph):
@@ -939,6 +990,8 @@ struct MarkdownMessageView: View {
             quoteBlock(text)
         case .code(let text):
             codeBlock(text)
+        case .table(let header, let rows):
+            tableBlock(header: header, rows: rows)
         case .divider:
             Rectangle()
                 .fill(DesignTokens.separator)
@@ -1051,6 +1104,88 @@ struct MarkdownMessageView: View {
         )
         .lineSpacing(8)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Up to three columns a phone can show as a real grid. Beyond that each column
+    /// gets ~85pt and CJK wraps every three characters — measured on a real four-column
+    /// answer, "ときどきジョギングをする" came out as four stacked fragments. Wide
+    /// tables therefore transpose: one block per row, first cell as its title. Sideways
+    /// scrolling is not the fix, because it hides the column you are comparing against.
+    @ViewBuilder
+    private func tableBlock(header: [String], rows: [[String]]) -> some View {
+        if header.count > 3 {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    transposedRow(header: header, row: row)
+                }
+            }
+        } else {
+            VStack(spacing: 0) {
+                tableRow(header, isHeader: true)
+                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                    Divider().overlay(DesignTokens.separator)
+                    tableRow(row, isHeader: false)
+                        .background(index.isMultiple(of: 2) ? Color.clear : DesignTokens.canvas.opacity(0.5))
+                }
+            }
+            .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12).stroke(DesignTokens.separator, lineWidth: 0.5)
+            }
+        }
+    }
+
+    private func transposedRow(header: [String], row: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if let title = row.first, !title.isEmpty {
+                renderText(title, font: .subheadline.weight(.semibold), color: DesignTokens.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(Array(zip(header, row).dropFirst().enumerated()), id: \.offset) { _, pair in
+                if !pair.1.isEmpty {
+                    HStack(alignment: .top, spacing: 8) {
+                        renderText(pair.0, font: .caption.weight(.semibold), color: DesignTokens.accent)
+                            .frame(width: 62, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                        renderText(pair.1, font: .footnote, color: DesignTokens.ink)
+                            .lineSpacing(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12).stroke(DesignTokens.separator, lineWidth: 0.5)
+        }
+    }
+
+    private func tableRow(_ cells: [String], isHeader: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { index, cell in
+                if index > 0 {
+                    Rectangle()
+                        .fill(DesignTokens.separator)
+                        .frame(width: 0.5)
+                        .frame(maxHeight: .infinity)
+                }
+                renderText(
+                    cell,
+                    font: isHeader ? .footnote.weight(.semibold) : .footnote,
+                    color: isHeader ? DesignTokens.accent : DesignTokens.ink
+                )
+                .lineSpacing(4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+            }
+        }
         .fixedSize(horizontal: false, vertical: true)
     }
 

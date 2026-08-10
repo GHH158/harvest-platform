@@ -10,6 +10,9 @@ struct AskView: View {
     @State private var draft = ""
     @State private var lenses: [QuestionLens] = []
     @State private var isSending = false
+    /// Shown the instant you send, before the round trip returns. Without it the text
+    /// you just typed disappears into a bare spinner and the answer lands as a wall.
+    @State private var pendingQuestion: String?
     @State private var errorMessage: String?
     @FocusState private var isInputFocused: Bool
 
@@ -54,10 +57,20 @@ struct AskView: View {
                         AskBubble(message: message)
                             .id(message.id)
                     }
+                    if let pendingQuestion {
+                        AskQuestionBubble(text: pendingQuestion)
+                            .id("pending-question")
+                    }
                     if isSending {
-                        ProgressView()
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.vertical, 8)
+                        HStack(spacing: 9) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(DesignTokens.accent)
+                            Text("老师正在整理…")
+                                .font(.footnote)
+                                .foregroundStyle(DesignTokens.muted)
+                        }
+                        .id("pending-answer")
                     }
                 }
                 // Narrower than the standard page inset: with no card around the answer
@@ -69,6 +82,10 @@ struct AskView: View {
             .onChange(of: messages.count) {
                 guard let last = messages.last else { return }
                 withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
+            .onChange(of: pendingQuestion) {
+                guard pendingQuestion != nil else { return }
+                withAnimation { proxy.scrollTo("pending-answer", anchor: .bottom) }
             }
         }
     }
@@ -157,13 +174,24 @@ struct AskView: View {
         let value = trimmed
         guard !isSending, !value.isEmpty, let client else { return }
         isSending = true
+        // Echo locally right away. With an angle the server decides the wording, so
+        // show the text being asked about rather than guessing the final question.
+        pendingQuestion = value
         draft = ""
         isInputFocused = false
         errorMessage = nil
         do {
             let reply = try await client.ask(text: value, lens: lens)
-            messages += [reply.user, reply.assistant]
+            pendingQuestion = nil
+            messages += [reply.user]
+            // Let the question settle before the answer arrives, so a long reply reads
+            // as a response rather than appearing in the same frame as the question.
+            try? await Task.sleep(for: .milliseconds(120))
+            withAnimation(.easeOut(duration: 0.18)) {
+                messages += [reply.assistant]
+            }
         } catch {
+            pendingQuestion = nil
             draft = value
             errorMessage = error.localizedDescription
         }
@@ -181,17 +209,25 @@ private struct AskBubble: View {
 
     var body: some View {
         if isUser {
-            Text(message.content)
-                .foregroundStyle(DesignTokens.ink)
-                .lineSpacing(4)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .background(DesignTokens.accentWash, in: RoundedRectangle(cornerRadius: 14))
+            AskQuestionBubble(text: message.content)
         } else {
             MarkdownMessageView(markdown: message.content)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+private struct AskQuestionBubble: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .foregroundStyle(DesignTokens.ink)
+            .lineSpacing(4)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(DesignTokens.accentWash, in: RoundedRectangle(cornerRadius: 14))
     }
 }

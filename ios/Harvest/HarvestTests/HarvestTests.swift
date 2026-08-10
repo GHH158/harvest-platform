@@ -165,6 +165,54 @@ struct HarvestTests {
         #expect(composer.canSend)
     }
 
+    @Test func markdownParsesPipeTablesInsteadOfShowingRawPipes() {
+        let blocks = markdownBlocks(from: """
+        对照如下：
+
+        | 词 | 频率 | 语感 |
+        |---|:---:|---|
+        | たまに | 低 | 非计划 |
+        | ときどき | 中 | 中性 |
+
+        以上。
+        """).filter { $0 != .spacer }
+
+        #expect(blocks == [
+            .paragraph("对照如下："),
+            .table(
+                header: ["词", "频率", "语感"],
+                rows: [["たまに", "低", "非计划"], ["ときどき", "中", "中性"]]
+            ),
+            .paragraph("以上。"),
+        ])
+    }
+
+    @Test func tablesWithoutOuterPipesAndRaggedRowsStayRectangular() {
+        let blocks = markdownBlocks(from: """
+        A | B
+        --- | ---
+        1 | 2
+        | 3 |
+        收尾说明。
+        """).filter { $0 != .spacer }
+
+        #expect(blocks == [
+            // A short row is padded so the grid stays square rather than being dropped.
+            .table(header: ["A", "B"], rows: [["1", "2"], ["3", ""]]),
+            // A line with no pipe ends the table and goes back to being prose.
+            .paragraph("收尾说明。"),
+        ])
+    }
+
+    @Test func proseContainingPipesIsNotMistakenForATable() {
+        // No divider row, so this is a sentence that merely uses a pipe character.
+        let blocks = markdownBlocks(from: "「A | B」这种写法在日语里不常见。").filter { $0 != .spacer }
+
+        #expect(blocks == [.paragraph("「A | B」这种写法在日语里不常见。")])
+        #expect(!isMarkdownTableDivider("| 这不是分隔行 |"))
+        #expect(isMarkdownTableDivider("|:---|---:|"))
+    }
+
     @Test func companionMarkdownParsesBlocksAndRemovesRawInlineMarkers() {
         let blocks = markdownBlocks(from: """
         # 语法说明

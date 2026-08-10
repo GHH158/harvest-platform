@@ -860,6 +860,11 @@ def post_ask(payload: AskRequest) -> dict:
     try:
         turn = generate_companion_turn(llm_service(), messages)
     except Exception as error:
+        # A question with no answer is not evidence of anything and cannot be retried
+        # from the UI, so it must not outlive the failed call. The reader's companion
+        # keeps its question because it sits in a material's transcript; a standalone
+        # ask has no such context and would just accumulate ghosts.
+        repo.delete_companion_message(int(user["id"]))
         raise _llm_error(error) from error
     assistant = repo.add_companion_message(None, None, "assistant", turn.answer_markdown)
     if turn.grammar_keys:

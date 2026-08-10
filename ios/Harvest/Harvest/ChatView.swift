@@ -182,7 +182,7 @@ final class ChatStore: ObservableObject {
                     for run in furiganaRuns(in: text) where run.annotate {
                         await ensureFurigana(for: run.text, using: client)
                     }
-                case .code, .divider, .spacer:
+                case .code, .table, .divider, .spacer:
                     break
                 }
             }

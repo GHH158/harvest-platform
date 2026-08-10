@@ -739,6 +739,15 @@ class Repository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def delete_companion_message(self, message_id: int) -> bool:
+        """Used to drop a standalone question whose answer never arrived (§5.16)."""
+
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                text("DELETE FROM companion_message WHERE id = :id"), {"id": message_id}
+            )
+        return result.rowcount > 0
+
     def standalone_ask_messages(self, limit: int = 40) -> list[dict[str, Any]]:
         """§5.16: questions asked on their own, oldest first for display."""
 
