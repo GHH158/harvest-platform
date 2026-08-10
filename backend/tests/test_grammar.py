@@ -364,3 +364,33 @@ def test_reject_and_unreject_404_on_unknown_event(monkeypatch: pytest.MonkeyPatc
         endpoint(999)
 
     assert caught.value.status_code == 404
+
+
+def test_constructions_in_the_catalogue_have_the_particles_they_require() -> None:
+    """§11.11 (resolved 2026-08-10). giving-receiving, verb-passive and verb-causative all
+    need に marking the person — 友達にもらう, 先生に褒められた, 子供に食べさせる — and the
+    list only had に(time) and に(place). The model explained that に correctly, found no
+    matching key, and tagged the nearest one instead, which was simply wrong.
+
+    A prompt guard against picking the nearest worked 1 run in 3. Adding the missing entry
+    made it 3 in 3 — the gap was the cause, so the fix belonged in the data.
+
+    Pinned as an invariant rather than as "this key exists": if a later change removes the
+    particle while keeping the constructions, the same class of mis-tag comes back.
+    """
+
+    keys = {row[0] for row in GRAMMAR_CATALOGUE}
+    requires_agent_ni = {"giving-receiving", "verb-passive", "verb-causative"}
+    if keys & requires_agent_ni:
+        assert "particle-ni-agent" in keys
+
+
+def test_catalogue_growth_rule_is_documented_next_to_the_data() -> None:
+    """The rule that keeps this an index instead of a textbook copy (§12.1, §12.2) has to
+    live where someone adding a row will actually read it."""
+
+    import app.grammar_catalogue as catalogue
+
+    assert catalogue.__doc__ is not None
+    assert "structurally requires it" in catalogue.__doc__
+    assert "never because a" in catalogue.__doc__

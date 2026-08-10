@@ -5,9 +5,16 @@ Chinese label, a level and a category. There are no explanations and no example
 sentences here — §1.4 still rules out transcribing textbook material, and §12.1
 puts the explanation in the teaching kernel, generated on demand.
 
-Extending the list is a data change: append entries and the app picks them up.
+Extending the list is a data change: entries are upserted by key on startup, so a new
+one can be inserted where it belongs rather than appended — `sort_order` is recomputed
+for everything and `grammar_encounter` hangs off `point_id`, which is stable per key.
 Starting at N5–N4 covers every category the learner has actually tripped on so
 far (ている, てある, い-adjective past, potential form, は/が).
+
+One rule about growing this list (§11.11): add a point because something already here
+structurally requires it, or because the learner really tripped on it — never because a
+model reached for a key that did not exist. Filling the list with whatever the model
+wants to tag is how an index turns into a worse copy of a textbook (§12.1).
 """
 
 from __future__ import annotations
@@ -20,6 +27,14 @@ GRAMMAR_CATALOGUE: list[tuple[str, str, str, str, str]] = [
     ("particle-wo", "を", "动作对象", "N5", "助词"),
     ("particle-ni-time", "に（时间）", "时间点", "N5", "助词"),
     ("particle-ni-place", "に（存在・到达）", "存在或到达点", "N5", "助词"),
+    # Added 2026-08-10 (§11.11 → resolved). Not added because a model reached for it, but
+    # because three points already in this list structurally require it: giving-receiving
+    # (友達にあげる／友達にもらう), verb-passive (先生に褒められた) and verb-causative
+    # (子供に食べさせる). Without it the model explained 「友達に…てもらう」 correctly, found
+    # no matching key, and tagged the nearest one instead — particle-ni-place, which is
+    # wrong. A prompt guard against picking the nearest only worked 1 run in 3; the gap was
+    # the actual cause.
+    ("particle-ni-agent", "に（相手・動作主）", "给谁／被谁／让谁", "N5", "助词"),
     ("particle-de-place", "で（场所）", "动作发生地", "N5", "助词"),
     ("particle-de-means", "で（手段）", "手段与工具", "N5", "助词"),
     ("particle-e", "へ", "方向", "N5", "助词"),
