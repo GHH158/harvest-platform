@@ -3,7 +3,13 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from app.video import VideoDownloader, VideoProcessor, _trim_arguments
+from app.video import (
+    VideoDownloader,
+    VideoProcessor,
+    _trim_arguments,
+    _trim_placement,
+    is_hls_playlist,
+)
 
 
 def test_video_processor_uses_project_local_ffmpeg() -> None:
@@ -180,8 +186,10 @@ def test_a_windowed_cut_never_uses_stream_copy(monkeypatch: pytest.MonkeyPatch) 
     transcoder = VideoProcessor()
     seen: list[dict[str, object]] = []
 
-    def fake_video_hls(source, video_directory, *, direct_video_copy, window=()):
-        seen.append({"direct_video_copy": direct_video_copy, "window": window})
+    def fake_video_hls(source, video_directory, *, direct_video_copy, window_in=(), window_out=()):
+        seen.append(
+            {"direct_video_copy": direct_video_copy, "window_in": window_in, "window_out": window_out}
+        )
         return "software"
 
     monkeypatch.setattr(transcoder, "_video_hls", fake_video_hls)
@@ -198,7 +206,9 @@ def test_a_windowed_cut_never_uses_stream_copy(monkeypatch: pytest.MonkeyPatch) 
             end_ms=621_000,
         )
     assert seen[0]["direct_video_copy"] is False
-    assert seen[0]["window"] == ("-ss", "304.000", "-t", "317.000")
+    # A real file trims on the input side.
+    assert seen[0]["window_in"] == ("-ss", "304.000", "-t", "317.000")
+    assert seen[0]["window_out"] == ()
 
 
 def test_without_a_window_stream_copy_is_still_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,7 +219,7 @@ def test_without_a_window_stream_copy_is_still_allowed(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         transcoder,
         "_video_hls",
-        lambda source, directory, *, direct_video_copy, window=(): (
+        lambda source, directory, *, direct_video_copy, window_in=(), window_out=(): (
             seen.append(direct_video_copy) or "copy"
         ),
     )
@@ -220,3 +230,46 @@ def test_without_a_window_stream_copy_is_still_allowed(monkeypatch: pytest.Monke
             root / "source.mp4", root / "video", root / "audio", direct_video_copy=True
         )
     assert seen == [True]
+
+
+def test_hls_sources_are_detected_by_content_not_extension(tmp_path: Path) -> None:
+    """§15.10. A downloaded bundle may keep `.m3u8`/`.ts`, may have every extension
+    stripped, or may just have iOS hiding them — the bytes are the only reliable signal."""
+
+    playlist = tmp_path / "play"
+    playlist.write_text("#EXTM3U\n#EXT-X-VERSION:3\n", encoding="utf-8")
+    assert is_hls_playlist(playlist) is True
+
+    named = tmp_path / "play.m3u8"
+    named.write_text("#EXTM3U\n", encoding="utf-8")
+    assert is_hls_playlist(named) is True
+
+    movie = tmp_path / "clip.mp4"
+    movie.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    assert is_hls_playlist(movie) is False
+    assert is_hls_playlist(tmp_path / "missing.mp4") is False
+
+
+def test_hls_trims_on_the_output_side_and_plain_files_on_the_input_side(tmp_path: Path) -> None:
+    """The measured difference (§15.10), and the reason this is not a stylistic choice.
+
+    Input-side `-ss` on an HLS playlist seeks to the start of the segment containing the
+    timestamp: a 13.5s cut came out the right length but starting at 0s. Moving `-ss` after
+    `-i` made the same cut start exactly where it should.
+    """
+
+    playlist = tmp_path / "play"
+    playlist.write_text("#EXTM3U\n", encoding="utf-8")
+    movie = tmp_path / "clip.mp4"
+    movie.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    hls_in, hls_out = _trim_placement(playlist, 13_500, 20_000)
+    assert hls_in == ("-f", "hls", "-allowed_extensions", "ALL")
+    assert hls_out == ("-ss", "13.500", "-t", "6.500")
+
+    plain_in, plain_out = _trim_placement(movie, 13_500, 20_000)
+    assert plain_in == ("-ss", "13.500", "-t", "6.500")
+    assert plain_out == ()
+
+    # No window at all stays untouched on both sides.
+    assert _trim_placement(movie, None, None) == ((), ())

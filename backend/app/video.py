@@ -157,21 +157,26 @@ class VideoProcessor:
         mid-sentence (§15.4). Re-encoding was going to happen for a phone upload anyway,
         so cutting during it is frame-accurate and costs nothing extra.
         """
-        window = _trim_arguments(start_ms, end_ms)
-        if window and direct_video_copy:
+        window_in, window_out = _trim_placement(source, start_ms, end_ms)
+        if (window_in or window_out) and direct_video_copy:
             direct_video_copy = False
         for directory in (video_directory, audio_directory):
             if directory.exists():
                 shutil.rmtree(directory)
             directory.mkdir(parents=True, exist_ok=True)
         video_mode = self._video_hls(
-            source, video_directory, direct_video_copy=direct_video_copy, window=window
+            source,
+            video_directory,
+            direct_video_copy=direct_video_copy,
+            window_in=window_in,
+            window_out=window_out,
         )
         self._run(
             "-y",
-            *window,
+            *window_in,
             "-i",
             str(source),
+            *window_out,
             "-vn",
             "-ac",
             "1",
@@ -197,8 +202,12 @@ class VideoProcessor:
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         offset = "1" if at_ms is None else f"{max(0, int(at_ms)) / 1000 + 1:.3f}"
+        # Input-side seek even for HLS, where it is only segment-accurate: nobody minds a
+        # cover frame that is a few seconds off, and output-side seeking would decode the
+        # whole way to a section that starts fifty minutes in.
         arguments = (
             "-y",
+            *(("-f", "hls", "-allowed_extensions", "ALL") if is_hls_playlist(source) else ()),
             "-ss",
             offset,
             "-i",
@@ -234,7 +243,8 @@ class VideoProcessor:
         video_directory: Path,
         *,
         direct_video_copy: bool,
-        window: tuple[str, ...] = (),
+        window_in: tuple[str, ...] = (),
+        window_out: tuple[str, ...] = (),
     ) -> str:
         """Encode the 720p video HLS using the hardware Media Engine (VideoToolbox),
         which is ~10x faster and uses far less CPU than software x264. Falls back to
@@ -269,9 +279,10 @@ class VideoProcessor:
                 self._run(
                     "-y",
                     *input_args,
-                    *window,
+                    *window_in,
                     "-i",
                     str(source),
+                    *window_out,
                     "-filter_threads",
                     str(self.max_threads),
                     "-vf",
@@ -355,9 +366,19 @@ class VideoProcessor:
         end_ms: int | None = None,
     ) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        window = _trim_arguments(start_ms, end_ms)
+        window_in, window_out = _trim_placement(source, start_ms, end_ms)
         self._run(
-            "-y", *window, "-i", str(source), "-vn", "-ac", "1", "-c:a", "aac", str(destination)
+            "-y",
+            *window_in,
+            "-i",
+            str(source),
+            *window_out,
+            "-vn",
+            "-ac",
+            "1",
+            "-c:a",
+            "aac",
+            str(destination),
         )
 
     def _run(self, *arguments: str) -> None:
@@ -367,12 +388,10 @@ class VideoProcessor:
 
 
 def _trim_arguments(start_ms: int | None, end_ms: int | None) -> tuple[str, ...]:
-    """ffmpeg input-side trim for one section (§15).
+    """The `-ss`/`-t` pair for one section (§15), without deciding which side it goes on.
 
-    `-ss` goes before `-i` on purpose: input seeking jumps to the nearest keyframe and
-    discards the rest, which is both fast and — because everything downstream re-encodes —
-    frame-accurate. `-t` (duration) rather than `-to`, since after an input seek the output
-    timeline starts at zero and `-to` would be read against the original clock.
+    `-t` (duration) rather than `-to`: after a seek the output timeline restarts at zero,
+    so `-to` would be measured against the original clock and cut the wrong amount.
     """
 
     if start_ms is None and end_ms is None:
@@ -387,3 +406,43 @@ def _trim_arguments(start_ms: int | None, end_ms: int | None) -> tuple[str, ...]
             raise ValueError("拆分区间必须是正的时长。")
         arguments += ["-t", f"{duration / 1000:.3f}"]
     return tuple(arguments)
+
+
+def is_hls_playlist(source: Path) -> bool:
+    """Detected by content, not by extension (§15.10).
+
+    A downloaded HLS bundle may arrive as `play.m3u8` + `seg.ts`, or with every extension
+    stripped, or with iOS merely hiding them — the bytes are the only reliable signal.
+    """
+
+    try:
+        with source.open("rb") as handle:
+            return handle.read(7) == b"#EXTM3U"
+    except OSError:
+        return False
+
+
+def _trim_placement(
+    source: Path, start_ms: int | None, end_ms: int | None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Where the trim goes: (before `-i`, after `-i`). Measured, not assumed (§15.10).
+
+    For a plain file, input-side `-ss` is both fast and frame-accurate once the output is
+    re-encoded. **For an HLS playlist it is neither** — it seeks to the start of the segment
+    containing the timestamp, so a cut at 13.5s of a bundle with long segments produced a
+    clip of the right length that began at 0s. Output-side `-ss` decodes and discards, and
+    the same cut then started exactly where it should. Segments in the wild run 4–10s, i.e.
+    exactly the error that lands mid-sentence.
+    """
+
+    window = _trim_arguments(start_ms, end_ms)
+    if not window:
+        return (), ()
+    if is_hls_playlist(source):
+        # `-f hls` because ffmpeg refuses to probe a playlist whose name lacks `.m3u8`
+        # ("Not detecting m3u8/hls with non standard extension"), and `-allowed_extensions
+        # ALL` because it likewise refuses segments with no known extension. Both cases show
+        # up in real downloads, and forcing the demuxer is correct even when the extension
+        # happens to be there.
+        return ("-f", "hls", "-allowed_extensions", "ALL"), window
+    return window, ()
