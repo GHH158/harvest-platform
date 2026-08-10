@@ -202,16 +202,11 @@ class VideoProcessor:
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         offset = "1" if at_ms is None else f"{max(0, int(at_ms)) / 1000 + 1:.3f}"
-        # Input-side seek even for HLS, where it is only segment-accurate: nobody minds a
-        # cover frame that is a few seconds off, and output-side seeking would decode the
-        # whole way to a section that starts fifty minutes in.
-        arguments = (
-            "-y",
-            *(("-f", "hls", "-allowed_extensions", "ALL") if is_hls_playlist(source) else ()),
-            "-ss",
-            offset,
-            "-i",
-            str(source),
+        # Computed once and used by BOTH attempts. The fallback below used to omit it, so a
+        # playlist source that missed on the first try produced no cover at all — one
+        # section of the first real HLS split came out with no thumbnail because of it.
+        hls_prefix = ("-f", "hls", "-allowed_extensions", "ALL") if is_hls_playlist(source) else ()
+        tail = (
             "-frames:v",
             "1",
             "-vf",
@@ -220,22 +215,15 @@ class VideoProcessor:
             "3",
             str(destination),
         )
+        # Input-side seek even for HLS, where it is only segment-accurate: nobody minds a
+        # cover frame that is a few seconds off, and output-side seeking would decode the
+        # whole way to a section that starts fifty minutes in.
         try:
-            self._run(*arguments)
+            self._run("-y", *hls_prefix, "-ss", offset, "-i", str(source), *tail)
         except RuntimeError:
-            # Very short clips may not have a frame at one second.
-            self._run(
-                "-y",
-                "-i",
-                str(source),
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale='min(640,iw)':-2",
-                "-q:v",
-                "3",
-                str(destination),
-            )
+            # Very short clips may not have a frame at one second, and a section near the
+            # end may have none at its own offset plus one.
+            self._run("-y", *hls_prefix, "-i", str(source), *tail)
 
     def _video_hls(
         self,

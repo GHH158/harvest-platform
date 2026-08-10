@@ -10,6 +10,7 @@ import shlex
 import shutil
 import time
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +44,7 @@ from .llm import LLMService
 from .omni import relay_voice_teacher
 from .repository import Repository
 from .storage import ObjectStorage
+from .video import is_hls_playlist
 from .voice import validate_video_voice_clip, voice_separation_available
 
 logger = logging.getLogger(__name__)
@@ -465,7 +467,13 @@ async def post_video(title: Annotated[str | None, Form()] = None, video: UploadF
     return {"material_id": material_id, "job_id": job_id, "status": "pending"}
 
 
-def _validated_video_upload(video: UploadFile) -> tuple[Path, str]:
+#: §15.10: a downloaded HLS bundle arrives as one zip. It was missing from this set at
+#: first, so the phone uploaded the zip and the server rejected it after the whole transfer
+#: with "暂不支持这种视频格式" — the format was never the problem.
+VIDEO_UPLOAD_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".zip"}
+
+
+def _validated_video_upload(video: UploadFile, *, allow_bundle: bool = False) -> tuple[Path, str]:
     """Shared checks for both video upload entry points."""
 
     if not video.filename:
@@ -473,7 +481,15 @@ def _validated_video_upload(video: UploadFile) -> tuple[Path, str]:
     if not (video.content_type or "").startswith("video/"):
         raise HTTPException(status_code=415, detail="只接受视频文件。")
     suffix = Path(video.filename).suffix.lower() or ".mp4"
-    if suffix not in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}:
+    if suffix in {".m3u8", ".m3u"}:
+        # A playlist on its own is useless: its segments are separate files. Say what to do
+        # instead of what is wrong.
+        raise HTTPException(
+            status_code=415,
+            detail="这是播放列表，单独传它没用——请选它所在的整个文件夹，分片要一起上传。",
+        )
+    allowed = VIDEO_UPLOAD_SUFFIXES if allow_bundle else VIDEO_UPLOAD_SUFFIXES - {".zip"}
+    if suffix not in allowed:
         raise HTTPException(status_code=415, detail="暂不支持这种视频格式。")
     video_dir = get_settings().data_dir / "video" / "uploads"
     video_dir.mkdir(parents=True, exist_ok=True)
@@ -492,7 +508,7 @@ async def post_video_upload(video: UploadFile = File()) -> dict[str, str]:
     back to it by `upload_id`.
     """
 
-    video_dir, suffix = _validated_video_upload(video)
+    video_dir, suffix = _validated_video_upload(video, allow_bundle=True)
     destination = video_dir / f"pending-{uuid.uuid4().hex}{suffix}"
     await save_upload_stream(
         video,
@@ -501,7 +517,53 @@ async def post_video_upload(video: UploadFile = File()) -> dict[str, str]:
         get_settings().min_free_disk_bytes,
         "视频",
     )
+    if suffix == ".zip":
+        # §15.10: unpack here rather than at split time, so a broken bundle fails while the
+        # learner is still on the upload screen instead of inside a background job.
+        try:
+            playlist = _unpack_hls_bundle(destination)
+        except HTTPException:
+            destination.unlink(missing_ok=True)
+            raise
+        destination.unlink(missing_ok=True)
+        return {"upload_id": str(playlist.relative_to(video_dir)), "filename": video.filename or ""}
     return {"upload_id": destination.name, "filename": video.filename or ""}
+
+
+def _unpack_hls_bundle(archive: Path) -> Path:
+    """Extract a zipped HLS folder and return the playlist inside it (§15.10).
+
+    Every member is resolved and checked against the destination before writing: a zip is
+    attacker-shaped input, and `../` entries would otherwise write outside the directory.
+    """
+
+    target = archive.with_suffix("")
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            for member in bundle.infolist():
+                if member.is_dir():
+                    continue
+                resolved = (target / member.filename).resolve()
+                if not resolved.is_relative_to(target.resolve()):
+                    raise HTTPException(status_code=422, detail="这个压缩包的结构不对。")
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                with bundle.open(member) as source, resolved.open("wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+    except zipfile.BadZipFile as error:
+        shutil.rmtree(target, ignore_errors=True)
+        raise HTTPException(status_code=422, detail="压缩包读不出来，请重新选一次。") from error
+    playlist = next(
+        (path for path in sorted(target.rglob("*")) if path.is_file() and is_hls_playlist(path)),
+        None,
+    )
+    if playlist is None:
+        shutil.rmtree(target, ignore_errors=True)
+        raise HTTPException(
+            status_code=422,
+            detail="这个文件夹里没有播放列表（第一行是 #EXTM3U 的那个文件）。",
+        )
+    return playlist
 
 
 class CollectionCreate(BaseModel):
@@ -525,10 +587,11 @@ def post_collection(payload: CollectionCreate) -> dict[str, object]:
     """Turn a parked upload plus cut points into a collection of sections (§15.2)."""
 
     video_dir = (get_settings().data_dir / "video" / "uploads").resolve()
-    source = (video_dir / Path(payload.upload_id).name).resolve()
-    # Resolved and re-checked against the uploads directory: `upload_id` arrives from a
-    # client and must never be able to name a path outside it.
-    if source.parent != video_dir or not source.exists():
+    # An HLS bundle's handle is "<extracted dir>/<playlist>", so this is a relative path
+    # rather than a bare name. Resolved and re-checked against the uploads directory:
+    # `upload_id` arrives from a client and must never be able to name a path outside it.
+    source = (video_dir / payload.upload_id).resolve()
+    if not source.is_relative_to(video_dir) or not source.is_file():
         raise HTTPException(status_code=404, detail="这个上传已经不在了，请重新上传。")
 
     cuts = sorted({int(value) for value in payload.cuts if int(value) > 0})

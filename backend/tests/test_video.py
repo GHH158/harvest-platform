@@ -273,3 +273,31 @@ def test_hls_trims_on_the_output_side_and_plain_files_on_the_input_side(tmp_path
 
     # No window at all stays untouched on both sides.
     assert _trim_placement(movie, None, None) == ((), ())
+
+
+def test_thumbnail_fallback_keeps_the_hls_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real split left one section with no cover: the first attempt missed and the retry
+    dropped `-f hls -allowed_extensions ALL`, so it could not open the playlist at all."""
+
+    playlist = tmp_path / "play"
+    playlist.write_text("#EXTM3U\n", encoding="utf-8")
+    processor = VideoProcessor()
+    calls: list[tuple[str, ...]] = []
+
+    def failing_run(*arguments: str) -> None:
+        calls.append(arguments)
+        if len(calls) == 1:
+            raise RuntimeError("no frame there")
+
+    monkeypatch.setattr(processor, "_run", failing_run)
+    processor.create_thumbnail(playlist, tmp_path / "cover.jpg", at_ms=20_000)
+
+    assert len(calls) == 2
+    for arguments in calls:
+        assert "-f" in arguments and "hls" in arguments
+        assert "-allowed_extensions" in arguments
+    # The retry drops only the seek, nothing else.
+    assert "-ss" in calls[0]
+    assert "-ss" not in calls[1]

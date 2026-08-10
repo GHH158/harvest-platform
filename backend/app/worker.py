@@ -24,7 +24,7 @@ from .shadowing import score_transcript
 from .storage import ObjectStorage
 from .text import estimated_segments
 from .tts import TTSService
-from .video import VideoDownloader, VideoProcessor
+from .video import VideoDownloader, VideoProcessor, is_hls_playlist
 from .vision import VisionService
 from .voice import VideoVoiceExtractor, VoiceEnrollmentService, validate_voice_sample_duration
 
@@ -327,10 +327,16 @@ class Worker:
                 # while its siblings become usable.
                 failures.append(f"第 {section.get('index', material_id)} 节: {error}")
                 self.repository.mark_material_failed(material_id, str(error))
-        # §15.2 / §15.7: the source video's only purpose was this cut, so it goes — but not
-        # while a section still needs re-cutting from it.
+        # §15.2 / §15.7: the source's only purpose was this cut, so it goes — but not while
+        # a section still needs re-cutting from it.
+        #
+        # For an HLS bundle the source is a playlist inside an extracted directory, and
+        # deleting just the playlist would leave hundreds of segments behind forever.
         if not failures:
-            source.unlink(missing_ok=True)
+            if is_hls_playlist(source):
+                shutil.rmtree(source.parent, ignore_errors=True)
+            else:
+                source.unlink(missing_ok=True)
         if failures:
             raise RuntimeError("；".join(failures))
 
