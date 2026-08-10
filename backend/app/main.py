@@ -41,14 +41,6 @@ from .lenses import LENS_PROMPT_VERSION, lens_by_id, public_lenses, render_lens_
 from .llm import LLMService
 from .omni import relay_voice_teacher
 from .repository import Repository
-from .roles import (
-    ROLE_PERSPECTIVE_PROMPT_VERSION,
-    RoleOutputError,
-    build_role_messages,
-    generate_role_perspective,
-    public_role_profiles,
-    role_definition,
-)
 from .storage import ObjectStorage
 from .voice import validate_video_voice_clip, voice_separation_available
 
@@ -94,25 +86,6 @@ class ChatRequest(BaseModel):
         if not value:
             raise ValueError("会话与消息不能为空。")
         return value
-
-
-class RolePreviewRequest(BaseModel):
-    sentence_ja: str = Field(min_length=1, max_length=2_000)
-    question: str = Field(min_length=1, max_length=1_000)
-    context_zh: str | None = Field(default=None, max_length=2_000)
-
-    @field_validator("sentence_ja", "question")
-    @classmethod
-    def required_role_fields_are_not_blank(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("句子与问题不能为空。")
-        return cleaned
-
-    @field_validator("context_zh")
-    @classmethod
-    def clean_optional_role_context(cls, value: str | None) -> str | None:
-        return (value or "").strip() or None
 
 
 class ChatSessionCreate(BaseModel):
@@ -1417,74 +1390,6 @@ def list_decision_traces(
         status=status_filter,
         limit=limit,
     )
-
-
-@app.get("/roles")
-def list_roles() -> list[dict]:
-    """Version-controlled fictional role manifests. No relationship state in M2."""
-    return public_role_profiles()
-
-
-@app.post("/roles/{role_id}/preview")
-def preview_role_perspective(role_id: str, payload: RolePreviewRequest) -> dict:
-    role = role_definition(role_id)
-    if role is None:
-        raise HTTPException(status_code=404, detail="没有这个角色。")
-    if role.role_type != "participant":
-        raise HTTPException(status_code=409, detail="主持人只在 M3 的圆桌收敛阶段运行。")
-    messages = build_role_messages(
-        role,
-        sentence_ja=payload.sentence_ja,
-        question=payload.question,
-        context_zh=payload.context_zh,
-    )
-    repo = repository()
-    started = time.perf_counter()
-    try:
-        perspective = generate_role_perspective(llm_service(), role, messages)
-    except RoleOutputError as error:
-        repo.record_role_preview_trace(
-            role_id=role.id,
-            manifest_version=role.manifest_version,
-            status="failed",
-            failure_stage=error.failure_stage,
-            reason="单角色预览未产生可读取的结构化观点",
-            duration_ms=int((time.perf_counter() - started) * 1000),
-            decision_context=error.decision_context,
-            detail={
-                "repair_used": error.decision_context.get("repair_used", False),
-                "generation_calls": error.decision_context.get("generation_calls", 1),
-            },
-        )
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
-    except Exception as error:
-        repo.record_role_preview_trace(
-            role_id=role.id,
-            manifest_version=role.manifest_version,
-            status="failed",
-            failure_stage="model_call",
-            reason="单角色预览模型调用失败",
-            duration_ms=int((time.perf_counter() - started) * 1000),
-            decision_context={"prompt_version": ROLE_PERSPECTIVE_PROMPT_VERSION},
-        )
-        raise _llm_error(error) from error
-    context = perspective.decision_context
-    repo.record_role_preview_trace(
-        role_id=role.id,
-        manifest_version=role.manifest_version,
-        status="ok",
-        reason="单角色预览生成成功",
-        duration_ms=int((time.perf_counter() - started) * 1000),
-        decision_context=context,
-        detail={
-            "claim_type": perspective.claim_type,
-            "focus_tags": perspective.focus_tags,
-            "attempted_providers": context.get("attempted_providers", []),
-            "repair_used": context.get("repair_used", False),
-            "generation_calls": context.get("generation_calls", 1),
-        },
-    )
-    return {"role": role.public_profile(), "perspective": perspective.model_dump()}
 
 
 @app.get("/vocabulary")

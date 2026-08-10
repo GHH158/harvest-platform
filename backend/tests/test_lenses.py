@@ -9,7 +9,6 @@ from app.lenses import (
     public_lenses,
     render_lens_question,
 )
-from app.roles import ROLES_BY_ID
 
 
 def test_every_lens_renders_a_human_readable_question_never_an_id() -> None:
@@ -39,20 +38,14 @@ def test_unknown_lens_is_not_silently_resolved() -> None:
     assert lens_by_id("STRUCTURE") is not None  # case-insensitive, but must exist
 
 
-def test_non_meaning_lenses_mirror_the_verified_role_perspectives() -> None:
-    """The angles are deliberately the three M2 lenses so M3 can promote them
-    without renaming anything the learner has already learned to recognise."""
+def test_lens_ids_and_order_are_stable() -> None:
+    """The three non-meaning angles came from the blind-tested perspectives (see
+    docs/reviews/M2-role-blind-evaluation.md). The roles themselves were removed; the
+    ids stay fixed because they are recorded in companion_message.lens."""
 
-    mapped = {lens.id: lens.role_id for lens in QUESTION_LENSES}
-
-    assert mapped == {
-        "meaning": None,
-        "naturalness": "aoi",
-        "structure": "kei",
-        "chinese": "lin",
-    }
-    for role_id in ("aoi", "kei", "lin"):
-        assert role_id in ROLES_BY_ID
+    assert [lens.id for lens in QUESTION_LENSES] == [
+        "meaning", "naturalness", "structure", "chinese",
+    ]
 
 
 def test_lens_focus_reaches_the_model_without_replacing_the_question() -> None:
@@ -98,7 +91,7 @@ def test_lens_prompt_version_is_set() -> None:
 @pytest.mark.parametrize("lens_id", [lens.id for lens in QUESTION_LENSES])
 def test_each_lens_states_what_not_to_answer(lens_id: str) -> None:
     """An angle that only says what to cover still drifts into a full answer — the
-    same failure role-perspective-v1 had (§5.14)."""
+    same failure the first version of these prompts had."""
 
     lens = lens_by_id(lens_id)
     assert lens is not None

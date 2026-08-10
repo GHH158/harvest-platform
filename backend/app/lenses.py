@@ -26,9 +26,6 @@ class QuestionLens:
     question_with_focus_zh: str
     #: Appended to the turn's user content to aim the answer at this angle.
     focus_zh: str
-    #: The M2 participant whose lens this mirrors (§5.14). Not used to call the role
-    #: yet; recorded so M3 can promote these tabs to real roles without renaming them.
-    role_id: str | None
 
 
 QUESTION_LENSES: tuple[QuestionLens, ...] = (
@@ -38,7 +35,6 @@ QUESTION_LENSES: tuple[QuestionLens, ...] = (
         question_zh="这句话是什么意思？",
         question_with_focus_zh="「{focus}」在这里是什么意思？",
         focus_zh="回答意思与实际用法，必要时给一个同类例子。不要展开活用规则或中日对比。",
-        role_id=None,
     ),
     QuestionLens(
         id="naturalness",
@@ -50,7 +46,6 @@ QUESTION_LENSES: tuple[QuestionLens, ...] = (
             "以及更自然的落点。语法是否成立与语用是否合适分开说。"
             "语境没有说明上下级或亲疏时，明确指出这一点，不要擅自补齐关系。"
         ),
-        role_id="aoi",
     ),
     QuestionLens(
         id="structure",
@@ -61,7 +56,6 @@ QUESTION_LENSES: tuple[QuestionLens, ...] = (
             "只讲决定句意的结构关系：助词的作用、活用与接续、修饰指向、信息重心。"
             "需要对照时只给一个最小对照，不要堆砌术语，也不要展开中日对比。"
         ),
-        role_id="kei",
     ),
     QuestionLens(
         id="chinese",
@@ -73,7 +67,6 @@ QUESTION_LENSES: tuple[QuestionLens, ...] = (
             "必须指出一个具体、可验证的中文直觉；说不出具体来源就直说没有明显差异，"
             "不要凭汉字编故事，也不要把所有问题都归因于中文。"
         ),
-        role_id="lin",
     ),
 )
 

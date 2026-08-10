@@ -178,34 +178,6 @@ class Repository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
-    def record_role_preview_trace(
-        self,
-        *,
-        role_id: str,
-        manifest_version: str,
-        status: str,
-        reason: str,
-        duration_ms: int,
-        failure_stage: str | None = None,
-        decision_context: dict[str, Any] | None = None,
-        detail: dict[str, Any] | None = None,
-    ) -> None:
-        context = decision_context or {}
-        self._record_decision_trace(
-            call_source="role_perspective_preview",
-            status=status,
-            failure_stage=failure_stage,
-            reason=reason,
-            rule_version=manifest_version,
-            subject_kind="role",
-            subject_key=role_id,
-            model_provider=context.get("model_provider"),
-            model_name=context.get("model_name"),
-            prompt_version=context.get("prompt_version"),
-            duration_ms=duration_ms,
-            detail=detail,
-        )
-
     def prune_decision_traces(self, *, retention_days: int = DECISION_TRACE_RETENTION_DAYS) -> int:
         """Diagnostics are not facts: every real learning fact lives in the source
         tables and `learning_event`, so dropping old traces loses no history."""
