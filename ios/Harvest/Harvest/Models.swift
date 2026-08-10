@@ -20,9 +20,20 @@ struct Material: Codable, Identifiable, Hashable {
     let retryable: Bool?
     let failureTitle: String?
     let failureSummary: String?
+    /// §15.5: present only for a section of a split collection.
+    let collectionID: Int?
+    let collectionIndex: Int?
+    /// Where this section began in the source video, so a row can say 「从 10:21 开始」.
+    let sourceOffsetMs: Int?
+
+    /// §15.6: transcription is on demand, and `downloaded` is the state that says so.
+    var awaitsTranscription: Bool { status == "downloaded" }
 
     enum CodingKeys: String, CodingKey {
         case id, kind, title, status
+        case collectionID = "collection_id"
+        case collectionIndex = "collection_index"
+        case sourceOffsetMs = "source_offset_ms"
         case sourceType = "source_type"
         case sourceRef = "source_ref"
         case errorMessage = "error_message"
@@ -573,4 +584,54 @@ struct ResumeHint: Codable, Hashable {
 /// Optional; `hint == nil` means there is nothing to show and the row disappears.
 struct ResumeHintEnvelope: Codable {
     let hint: ResumeHint?
+}
+
+// MARK: - §15 长视频拆分与合集
+
+/// A video parked on the Mac, not yet turned into anything (§15.2). The phone starts this
+/// the moment a file is picked and keeps uploading while the learner marks cut points.
+struct VideoUploadHandle: Codable {
+    let uploadID: String
+    let filename: String
+
+    enum CodingKeys: String, CodingKey {
+        case uploadID = "upload_id"
+        case filename
+    }
+}
+
+struct CollectionSubmission: Codable {
+    let collectionID: Int
+    let materialIDs: [Int]
+    let jobID: Int
+
+    enum CodingKeys: String, CodingKey {
+        case collectionID = "collection_id"
+        case materialIDs = "material_ids"
+        case jobID = "job_id"
+    }
+}
+
+/// §15.5: counts are derived on read, never stored, so they cannot disagree with the
+/// sections they describe.
+struct MaterialCollection: Codable, Identifiable, Hashable {
+    let id: Int
+    let title: String
+    let createdAt: String
+    let sectionCount: Int
+    let readyCount: Int
+    let totalDurationMs: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, title
+        case createdAt = "created_at"
+        case sectionCount = "section_count"
+        case readyCount = "ready_count"
+        case totalDurationMs = "total_duration_ms"
+    }
+}
+
+struct CollectionDetail: Codable {
+    let collection: MaterialCollection
+    let sections: [Material]
 }

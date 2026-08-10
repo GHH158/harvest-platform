@@ -2272,3 +2272,27 @@ def test_collection_sections_carry_the_same_fields_as_library_materials() -> Non
             connection.execute(
                 text("DELETE FROM material_collection WHERE id = :id"), {"id": collection_id}
             )
+
+
+@pytest.mark.integration
+def test_collection_detail_and_list_return_the_same_shape() -> None:
+    """§15.5. They did not at first: the detail endpoint returned the bare row without the
+    counts, so the phone's model would have failed to decode on the very first open. Caught
+    by inspecting the live response, not by a green suite — hence this test."""
+
+    repository, engine = _collection_repo()
+    collection = repository.create_collection("shape check")
+    collection_id = int(collection["id"])
+    try:
+        listed = next(row for row in repository.collections() if int(row["id"]) == collection_id)
+        detail = repository.get_collection(collection_id)
+        assert detail is not None
+        assert set(detail.keys()) == set(listed.keys())
+        for key in ("section_count", "ready_count", "total_duration_ms"):
+            assert key in detail
+        assert detail["section_count"] == 0
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM material_collection WHERE id = :id"), {"id": collection_id}
+            )

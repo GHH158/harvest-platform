@@ -515,6 +515,9 @@ class CollectionCreate(BaseModel):
     upload_id: str = Field(min_length=1, max_length=200)
     title: str | None = Field(default=None, max_length=200)
     cuts: list[int] = Field(default_factory=list, max_length=200)
+    #: What the learner actually picked. Without it the sections would carry the internal
+    #: `pending-<uuid>` handle as their source, which is meaningless on a card.
+    source_name: str | None = Field(default=None, max_length=300)
 
 
 @app.post("/collections", status_code=status.HTTP_202_ACCEPTED)
@@ -544,7 +547,7 @@ def post_collection(payload: CollectionCreate) -> dict[str, object]:
     title = (payload.title or "").strip() or Path(payload.upload_id).stem
     collection_id, material_ids, job_id = repository().create_collection_with_sections(
         title=title,
-        source_ref=payload.upload_id,
+        source_ref=(payload.source_name or "").strip() or None,
         source_path=str(source),
         boundaries=boundaries,
     )

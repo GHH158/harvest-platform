@@ -565,6 +565,7 @@ class Repository:
         *,
         status: str | None = None,
         collection_id: int | None = None,
+        include_collection_sections: bool = False,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -584,6 +585,10 @@ class Repository:
         if collection_id is not None:
             conditions.append("m.collection_id = :collection_id")
             parameters["collection_id"] = collection_id
+        elif not include_collection_sections:
+            # §15.5: a section is reached through its collection. Leaving it in the loose
+            # library too showed every section twice and undid the grouping.
+            conditions.append("m.collection_id IS NULL")
         where_clause = " AND ".join(conditions) if conditions else "true"
         limit_clause = ""
         if limit is not None:
@@ -639,7 +644,10 @@ class Repository:
         return [dict(row) for row in rows]
 
     def count_materials(self, *, status: str | None = None) -> int:
-        conditions: list[str] = []
+        """Counts what the library actually lists, so the header cannot disagree with it —
+        sections inside a collection are excluded here for the same reason (§15.5)."""
+
+        conditions: list[str] = ["collection_id IS NULL"]
         parameters: dict[str, Any] = {}
         if status:
             conditions.append("status = :status")
@@ -2747,8 +2755,18 @@ class Repository:
             ).mappings().one()
         return dict(row)
 
+    #: One definition of a collection row. The detail endpoint and the list must return the
+    #: same shape — they did not at first, and the detail screen would have failed to decode
+    #: on the very first open (§15.5).
+    _COLLECTION_SELECT = """SELECT c.*,
+                  count(m.id) AS section_count,
+                  count(m.id) FILTER (WHERE m.status = 'ready') AS ready_count,
+                  coalesce(sum(m.duration_ms), 0) AS total_duration_ms
+           FROM material_collection c
+           LEFT JOIN material m ON m.collection_id = c.id"""
+
     def collections(self) -> list[dict[str, Any]]:
-        """Newest first, with the counts the list needs derived on read.
+        """Newest first, with the counts derived on read.
 
         §15.5 keeps no aggregate state on the collection itself: a stored "3 of 12
         transcribed" is a second version of a fact that can disagree with the sections.
@@ -2757,14 +2775,9 @@ class Repository:
         with self.engine.connect() as connection:
             rows = connection.execute(
                 text(
-                    """SELECT c.*,
-                              count(m.id) AS section_count,
-                              count(m.id) FILTER (WHERE m.status = 'ready') AS ready_count,
-                              coalesce(sum(m.duration_ms), 0) AS total_duration_ms
-                       FROM material_collection c
-                       LEFT JOIN material m ON m.collection_id = c.id
-                       GROUP BY c.id
-                       ORDER BY c.created_at DESC, c.id DESC"""
+                    f"""{self._COLLECTION_SELECT}
+                        GROUP BY c.id
+                        ORDER BY c.created_at DESC, c.id DESC"""
                 )
             ).mappings().all()
         return [dict(row) for row in rows]
@@ -2778,7 +2791,7 @@ class Repository:
     def get_collection(self, collection_id: int) -> dict[str, Any] | None:
         with self.engine.connect() as connection:
             row = connection.execute(
-                text("SELECT * FROM material_collection WHERE id = :id"),
+                text(f"{self._COLLECTION_SELECT} WHERE c.id = :id GROUP BY c.id"),
                 {"id": collection_id},
             ).mappings().first()
         return dict(row) if row else None

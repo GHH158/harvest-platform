@@ -501,3 +501,136 @@ private func makeMultipartFile(
         throw error
     }
 }
+
+// MARK: - §15 长视频拆分与合集
+
+extension APIClient {
+    /// Park the source on the Mac without creating anything yet (§15.2).
+    ///
+    /// `onProgress` exists because this runs while the learner is still cutting — a thin
+    /// line at the top of the split screen, not a modal that blocks the work.
+    func uploadVideoForSplit(
+        _ sourceURL: URL,
+        onProgress: @escaping @Sendable (Double) -> Void
+    ) async throws -> VideoUploadHandle {
+        let filename = sourceURL.lastPathComponent.isEmpty ? "video.mp4" : sourceURL.lastPathComponent
+        return try await uploadFileReportingProgress(
+            path: "videos/uploads",
+            field: "video",
+            fileURL: sourceURL,
+            filename: filename,
+            contentType: Self.uploadContentType(for: sourceURL),
+            onProgress: onProgress
+        )
+    }
+
+    func createCollection(
+        uploadID: String,
+        title: String?,
+        cuts: [Int],
+        sourceName: String? = nil
+    ) async throws -> CollectionSubmission {
+        var request = URLRequest(url: baseURL.appending(path: "collections"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = ["upload_id": uploadID, "cuts": cuts]
+        if let title, !title.isEmpty { body["title"] = title }
+        if let sourceName, !sourceName.isEmpty { body["source_name"] = sourceName }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return try await send(request)
+    }
+
+    func collections() async throws -> [MaterialCollection] {
+        try await get("collections")
+    }
+
+    func collectionDetail(id: Int) async throws -> CollectionDetail {
+        try await get("collections/\(id)")
+    }
+
+    func deleteCollection(id: Int) async throws {
+        try await delete("collections/\(id)")
+    }
+
+    /// §15.7: deleting one section deletes only that section.
+    func deleteMaterial(id: Int) async throws {
+        try await delete("materials/\(id)")
+    }
+
+    /// A zipped HLS bundle is still a video as far as this flow is concerned (§15.10).
+    static func uploadContentType(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "zip": "video/mp4"
+        case "mov": "video/quicktime"
+        default: "video/mp4"
+        }
+    }
+}
+
+private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate {
+    private let onProgress: @Sendable (Double) -> Void
+
+    init(onProgress: @escaping @Sendable (Double) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend totalBytesExpectedToSend: Int64
+    ) {
+        guard totalBytesExpectedToSend > 0 else { return }
+        onProgress(min(1, Double(totalBytesSent) / Double(totalBytesExpectedToSend)))
+    }
+}
+
+extension APIClient {
+    /// Same multipart-on-disk approach as `uploadFile`, plus progress. A one-hour video is
+    /// minutes of upload (§15.2), and a bar that never moves is indistinguishable from a
+    /// hang.
+    fileprivate func uploadFileReportingProgress<Response: Decodable>(
+        path: String,
+        field: String,
+        fileURL: URL,
+        filename: String,
+        contentType: String,
+        onProgress: @escaping @Sendable (Double) -> Void
+    ) async throws -> Response {
+        let boundary = "Harvest-\(UUID().uuidString)"
+        let multipartURL = try await Task.detached {
+            try makeMultipartFile(
+                sourceURL: fileURL,
+                boundary: boundary,
+                field: field,
+                filename: filename,
+                contentType: contentType,
+                fields: [:]
+            )
+        }.value
+        defer { try? FileManager.default.removeItem(at: multipartURL) }
+        var request = URLRequest(url: baseURL.appending(path: path))
+        request.httpMethod = "POST"
+        // A long upload must not be killed by the control-plane timeout.
+        request.timeoutInterval = 3_600
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 3_600
+        configuration.timeoutIntervalForResource = 7_200
+        let uploadSession = URLSession(configuration: configuration)
+        defer { uploadSession.finishTasksAndInvalidate() }
+        let (data, response) = try await uploadSession.upload(
+            for: request,
+            fromFile: multipartURL,
+            delegate: UploadProgressDelegate(onProgress: onProgress)
+        )
+        guard let http = response as? HTTPURLResponse else { throw APIClientError.badResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
+            throw APIClientError.server(detail ?? "服务暂时不可用（HTTP \(http.statusCode)）。")
+        }
+        do { return try JSONDecoder().decode(Response.self, from: data) } catch { throw APIClientError.badResponse }
+    }
+}

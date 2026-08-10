@@ -57,6 +57,8 @@ private enum MaterialSort: String, CaseIterable, Identifiable {
 struct MaterialListView: View {
     @EnvironmentObject private var configuration: AppConfiguration
     @State private var materials: [Material] = []
+    /// §15.5. Fetched alongside the materials; a failure here leaves the library working.
+    @State private var collections: [MaterialCollection] = []
     @State private var errorMessage: String?
     @State private var isLoading = true
     @State private var searchText = ""
@@ -85,6 +87,9 @@ struct MaterialListView: View {
         }
         .navigationDestination(for: Int.self) { materialID in
             ReaderView(materialID: materialID)
+        }
+        .navigationDestination(for: MaterialCollection.self) { collection in
+            CollectionDetailView(collection: collection)
         }
         .navigationTitle("素材库")
         .navigationBarTitleDisplayMode(.inline)
@@ -120,10 +125,67 @@ struct MaterialListView: View {
         }
     }
 
+    /// §15.5: split videos sit above the loose materials, because a collection is the thing
+    /// you actually go back to — the sections under it are how you work through it. Hidden
+    /// entirely when there are none, and never while filtering or searching, where a group
+    /// that ignores the filter would be misleading.
+    @ViewBuilder private var collectionRows: some View {
+        if !collections.isEmpty, searchText.isEmpty, statusFilter == .library {
+            ForEach(collections) { collection in
+                NavigationLink(value: collection) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "rectangle.stack")
+                            .font(.title3)
+                            .foregroundStyle(DesignTokens.accent)
+                            .frame(width: 26)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(collection.title)
+                                .font(.system(size: 17, design: .serif))
+                                .foregroundStyle(DesignTokens.ink)
+                                .lineLimit(2)
+                            Text(caption(for: collection))
+                                .font(.footnote)
+                                .foregroundStyle(DesignTokens.muted)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(DesignTokens.muted.opacity(0.5))
+                    }
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 13)
+                    .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 12))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func caption(for collection: MaterialCollection) -> String {
+        var parts = ["\(collection.sectionCount) 节"]
+        if collection.totalDurationMs > 0 {
+            let total = collection.totalDurationMs / 1_000
+            let hours = total / 3_600
+            let minutes = (total % 3_600) / 60
+            // A short collection is not "0 分": show the real figure at whatever scale it is.
+            if hours > 0 {
+                parts.append("\(hours) 小时 \(minutes) 分")
+            } else if minutes > 0 {
+                parts.append("\(minutes) 分")
+            } else {
+                parts.append("\(total) 秒")
+            }
+        }
+        parts.append(collection.readyCount > 0 ? "转录过 \(collection.readyCount) 节" : "还没转录")
+        return parts.joined(separator: " · ")
+    }
+
     private var libraryContent: some View {
         ScrollView {
             LazyVStack(spacing: 10) {
                 librarySummary
+                collectionRows
                 if statusFilter == .library, failedCount > 0, searchText.isEmpty {
                     Button {
                         statusFilter = .failed
@@ -231,6 +293,12 @@ struct MaterialListView: View {
             NavigationLink { LocalVideoImportView() } label: {
                 Label("本地视频", systemImage: "square.and.arrow.up")
             }
+            // §15: a long video is a different job from a short one — you watch it and cut
+            // it before anything is created, so it gets its own entry rather than a mode
+            // hidden inside the plain upload form.
+            NavigationLink { VideoSplitView() } label: {
+                Label("长视频，拆开学", systemImage: "scissors")
+            }
             NavigationLink { PhotoReadingView() } label: {
                 Label("拍照或照片", systemImage: "camera")
             }
@@ -306,12 +374,16 @@ struct MaterialListView: View {
         guard let endpoint = configuration.endpoint else { return }
         if showingProgress { isLoading = true }
         defer { if showingProgress { isLoading = false } }
+        let client = APIClient(baseURL: endpoint)
         do {
-            materials = try await APIClient(baseURL: endpoint).materials()
+            materials = try await client.materials()
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
+        // §15.5: collections are an addition to a working library. If this call fails the
+        // group simply is not there — it must not turn the whole list into an error.
+        collections = (try? await client.collections()) ?? []
     }
 }
 
