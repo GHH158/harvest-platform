@@ -240,6 +240,23 @@ struct APIClient {
         try await get("companion/lenses")
     }
 
+    func askMessages() async throws -> [ConversationMessage] {
+        try await get("ask")
+    }
+
+    /// §5.16: with a lens the text is what is being asked *about*; without one it is
+    /// the question itself.
+    func ask(text: String, lens: String? = nil) async throws -> ChatReply {
+        var request = URLRequest(url: baseURL.appending(path: "ask"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = ["text": text]
+        if let lens { body["lens"] = lens }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return try await send(request)
+    }
+
     /// §5.15: send a typed `question`, or a `lens` id for a one-tap angle. The server
     /// renders the angle's wording so it is defined in exactly one place.
     func sendCompanion(

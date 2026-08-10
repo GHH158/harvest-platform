@@ -14,7 +14,7 @@ struct HarvestApp: App {
                     if configuration.endpoint == nil {
                         SettingsView(isOnboarding: true)
                     } else {
-                        MainTabView()
+                        NavigationStack { HomeView() }
                     }
                 }
             }
@@ -31,35 +31,7 @@ struct HarvestApp: App {
     }
 }
 
-private enum MainTab: Hashable {
-    case materials
-    case chat
-    case downloads
-    case vocabulary
-    case settings
-}
-
-struct MainTabView: View {
-    @State private var selectedTab: MainTab = .materials
-
-    var body: some View {
-        TabView(selection: $selectedTab) {
-            NavigationStack { MaterialListView() }
-                .tabItem { Label("素材", systemImage: "text.book.closed") }
-                .tag(MainTab.materials)
-            NavigationStack { ChatView(isActive: selectedTab == .chat) }
-                .tabItem { Label("聊天", systemImage: "bubble.left.and.bubble.right") }
-                .tag(MainTab.chat)
-            NavigationStack { DownloadsView() }
-                .tabItem { Label("下载", systemImage: "arrow.down.circle") }
-                .tag(MainTab.downloads)
-            NavigationStack { AccumulationView(isActive: selectedTab == .vocabulary) }
-                .tabItem { Label("积累", systemImage: "square.stack.3d.up") }
-                .tag(MainTab.vocabulary)
-            NavigationStack { SettingsView(isOnboarding: false) }
-                .tabItem { Label("设置", systemImage: "gearshape") }
-                .tag(MainTab.settings)
-        }
-        .tint(DesignTokens.accent)
-    }
-}
+// The bottom tab bar is gone: the app opens on HomeView and everything is reached by
+// pushing from there. `isActive` on ChatView / AccumulationView existed to pause work
+// for tabs that were built but not on screen; with push navigation a view only exists
+// while it is visible, so the parameter is left at its default.

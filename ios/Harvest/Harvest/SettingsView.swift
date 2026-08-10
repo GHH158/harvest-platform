@@ -79,6 +79,7 @@ struct SettingsView: View {
                 }
 
                 if !isOnboarding, configuration.endpoint != nil {
+                    downloadsSection
                     memorySection
                 }
             }
@@ -96,6 +97,34 @@ struct SettingsView: View {
         .task(id: configuration.endpoint) {
             guard !isOnboarding else { return }
             await loadMemories()
+        }
+    }
+
+    /// Downloads used to be a bottom tab. It is device housekeeping, not a place you
+    /// go to learn, so it lives here now.
+    @ViewBuilder
+    private var downloadsSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SectionHeader(title: "离线下载", caption: "管理已下载到这台 iPhone 的材料。")
+            NavigationLink {
+                DownloadsView()
+            } label: {
+                CardView {
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.title3)
+                            .foregroundStyle(DesignTokens.accent)
+                        Text("已下载的材料")
+                            .font(.headline)
+                            .foregroundStyle(DesignTokens.ink)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(DesignTokens.muted.opacity(0.6))
+                    }
+                }
+            }
+            .buttonStyle(.plain)
         }
     }
 

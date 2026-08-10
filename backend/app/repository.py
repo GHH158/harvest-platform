@@ -739,6 +739,21 @@ class Repository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def standalone_ask_messages(self, limit: int = 40) -> list[dict[str, Any]]:
+        """§5.16: questions asked on their own, oldest first for display."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT * FROM (
+                           SELECT * FROM companion_message WHERE material_id IS NULL
+                           ORDER BY id DESC LIMIT :limit
+                       ) recent ORDER BY id"""
+                ),
+                {"limit": limit},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
     def ensure_chat_session(self, session_id: str, topic: str = "旧版聊天") -> dict[str, Any]:
         with self.engine.begin() as connection:
             row = connection.execute(

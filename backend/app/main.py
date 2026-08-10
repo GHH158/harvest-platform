@@ -823,6 +823,61 @@ def list_companion_lenses() -> list[dict]:
     return public_lenses()
 
 
+class AskRequest(BaseModel):
+    """§5.16: a question with no material behind it — a textbook sentence, a word,
+    or anything the learner is stuck on."""
+
+    text: str = Field(min_length=1, max_length=4_000)
+    lens: str | None = Field(default=None, max_length=40)
+
+
+@app.get("/ask")
+def list_ask_messages() -> list[dict]:
+    return repository().standalone_ask_messages()
+
+
+@app.post("/ask")
+def post_ask(payload: AskRequest) -> dict:
+    repo = repository()
+    typed = payload.text.strip()
+    lens = None
+    if payload.lens:
+        lens = lens_by_id(payload.lens)
+        if lens is None:
+            raise HTTPException(status_code=422, detail="未知的提问角度。")
+    # With a lens the typed text is the thing being asked about, so it becomes the
+    # focus and the angle supplies the question; without one it is the question.
+    question = render_lens_question(lens, typed) if lens else typed
+    user = repo.add_companion_message(None, None, "user", question, lens=lens.id if lens else None)
+    history = repo.standalone_ask_messages()[-12:-1]
+    messages = build_companion_messages(
+        context=[],
+        history=history,
+        question=question,
+        catalogue_subset=repo.grammar_catalogue_for_prompt(),
+        lens_focus=lens.focus_zh if lens else None,
+    )
+    try:
+        turn = generate_companion_turn(llm_service(), messages)
+    except Exception as error:
+        raise _llm_error(error) from error
+    assistant = repo.add_companion_message(None, None, "assistant", turn.answer_markdown)
+    if turn.grammar_keys:
+        try:
+            repo.record_companion_grammar_evidence(
+                int(user["id"]),
+                turn.grammar_keys,
+                decision_context={
+                    **turn.decision_context,
+                    "lens": lens.id if lens else None,
+                    "lens_prompt_version": LENS_PROMPT_VERSION if lens else None,
+                },
+            )
+        except Exception:
+            logger.exception("Failed to record ask grammar evidence")
+    return {"user": user, "assistant": assistant}
+
+
 @app.get("/companion/{material_id}")
 def get_companion_messages(material_id: int) -> list[dict]:
     if repository().get_material(material_id) is None:
