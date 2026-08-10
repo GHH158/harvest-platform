@@ -137,6 +137,24 @@ class ObjectStorage:
     def delete(self, oss_key: str) -> None:
         self._bucket().delete_object(oss_key)
 
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete every object under `prefix`, returning how many were removed.
+
+        §15.7: deleting a material has to clear its cloud objects, and it deliberately
+        does NOT swallow failures. An object left behind under a prefix whose database
+        row is gone keeps costing storage forever and nothing is left to say who owned
+        it — so the delete fails as a whole and can be retried instead.
+
+        Batched because a split collection can hold thousands of HLS segments; OSS caps
+        `batch_delete_objects` at 1000 keys per call.
+        """
+
+        bucket = self._bucket()
+        keys = [item.key for item in oss2.ObjectIterator(bucket, prefix=prefix)]
+        for start in range(0, len(keys), 1_000):
+            bucket.batch_delete_objects(keys[start : start + 1_000])
+        return len(keys)
+
     def configure_lifecycle(self) -> list[dict[str, int | str]]:
         """Merge Harvest cleanup rules without replacing unrelated bucket rules."""
         bucket = self._bucket()

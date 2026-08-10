@@ -769,6 +769,85 @@ def start_material_transcription(material_id: int) -> dict[str, int | str]:
     return {"material_id": material_id, "job_id": job_id, "status": "pending"}
 
 
+def _purge_material_media(material_id: int) -> dict[str, int]:
+    """Clears the two things the database cannot: cloud objects, then local files.
+
+    §15.7 fixes this order and it is not arbitrary. OSS goes first because it is the only
+    step that can fail for reasons outside this machine, and it must be able to fail
+    *before* the row is gone — an object left under `materials/{id}/` with no row to name
+    it keeps costing storage and can no longer be traced to an owner. Local files go
+    second because their paths live in `media_asset`, which the cascade is about to erase.
+    """
+
+    repo = repository()
+    paths = repo.material_media_paths(material_id)
+    removed_remote = 0
+    settings = get_settings()
+    if settings.oss_bucket and settings.oss_access_key_id:
+        storage = ObjectStorage(settings)
+        for prefix in (f"materials/{material_id}/", f"temporary/materials/{material_id}/"):
+            removed_remote += storage.delete_prefix(prefix)
+    removed_local = 0
+    for raw_path in paths:
+        path = Path(raw_path)
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists():
+                path.unlink()
+            else:
+                continue
+            removed_local += 1
+        except OSError:
+            # A file we cannot remove is disk clutter, not a correctness problem, and it
+            # must not strand the row that would explain what it was.
+            logger.exception("Failed to remove local media %s", path)
+    return {"remote": removed_remote, "local": removed_local}
+
+
+@app.delete("/materials/{material_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_material(material_id: int) -> Response:
+    """§15.7. Deleting one section deletes only that section."""
+
+    if repository().get_material(material_id) is None:
+        raise HTTPException(status_code=404, detail="材料不存在。")
+    _purge_material_media(material_id)
+    repository().delete_material(material_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/collections")
+def list_collections() -> list[dict]:
+    return repository().collections()
+
+
+@app.get("/collections/{collection_id}")
+def get_collection(collection_id: int) -> dict:
+    repo = repository()
+    collection = repo.get_collection(collection_id)
+    if collection is None:
+        raise HTTPException(status_code=404, detail="合集不存在。")
+    sections = [serialise_material(section) for section in repo.collection_sections(collection_id)]
+    return {"collection": collection, "sections": sections}
+
+
+@app.delete("/collections/{collection_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_collection(collection_id: int) -> Response:
+    """§15.7: deleting a collection deletes all of its sections.
+
+    Media is purged per section before the collection row goes, because once it goes the
+    sections cascade away and with them the paths and ids needed to find their bytes.
+    """
+
+    repo = repository()
+    if repo.get_collection(collection_id) is None:
+        raise HTTPException(status_code=404, detail="合集不存在。")
+    for section in repo.collection_sections(collection_id):
+        _purge_material_media(int(section["id"]))
+    repo.delete_collection(collection_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.get("/materials/{material_id}/segments")
 @app.get("/segments")
 def get_segments(material_id: int) -> list[dict]:

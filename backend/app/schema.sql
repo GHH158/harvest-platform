@@ -18,6 +18,31 @@ CREATE TABLE IF NOT EXISTS material (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- A collection (§15.5) is a grouping, not a material. The source video has no segments
+-- and cannot be consumed, so making it a material would put an exception into §4.1's
+-- foundation ("a material is audio plus timestamped sentences"). Deliberately holds no
+-- aggregate state — how many sections are transcribed, total duration — because all of
+-- that derives from `material` and storing it only creates a second version to disagree.
+CREATE TABLE IF NOT EXISTS material_collection (
+    id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    title      TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+DROP TRIGGER IF EXISTS trg_material_collection_updated ON material_collection;
+CREATE TRIGGER trg_material_collection_updated BEFORE UPDATE ON material_collection
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Which collection a section belongs to, which section it is, and where it started in the
+-- source (§15.5). `source_offset_ms` exists only so the UI can say 「从 10:21 开始」 — the
+-- source video is deleted once the cut finishes, so it is never used to re-cut.
+ALTER TABLE material ADD COLUMN IF NOT EXISTS collection_id BIGINT
+    REFERENCES material_collection(id) ON DELETE CASCADE;
+ALTER TABLE material ADD COLUMN IF NOT EXISTS collection_index INTEGER;
+ALTER TABLE material ADD COLUMN IF NOT EXISTS source_offset_ms INTEGER;
+CREATE INDEX IF NOT EXISTS idx_material_collection
+    ON material(collection_id, collection_index);
+
 DROP TRIGGER IF EXISTS trg_material_updated ON material;
 CREATE TRIGGER trg_material_updated BEFORE UPDATE ON material
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

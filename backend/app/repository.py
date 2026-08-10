@@ -564,19 +564,36 @@ class Repository:
         self,
         *,
         status: str | None = None,
+        collection_id: int | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
+        """`collection_id` narrows to one collection's sections and orders them by section
+        number instead of by date (§15.5).
+
+        Sharing this query rather than writing a second one for collections is deliberate:
+        it carries four lateral joins that the client depends on (delivery keys, current
+        job, thumbnail), and two copies would drift apart the first time one is touched.
+        """
+
         conditions: list[str] = []
         parameters: dict[str, Any] = {"offset": offset}
         if status:
             conditions.append("m.status = :status")
             parameters["status"] = status
+        if collection_id is not None:
+            conditions.append("m.collection_id = :collection_id")
+            parameters["collection_id"] = collection_id
         where_clause = " AND ".join(conditions) if conditions else "true"
         limit_clause = ""
         if limit is not None:
             limit_clause = " LIMIT :limit"
             parameters["limit"] = limit
+        order_clause = (
+            "m.collection_index, m.id"
+            if collection_id is not None
+            else "m.created_at DESC, m.id DESC"
+        )
         with self.engine.connect() as connection:
             rows = (
                 connection.execute(
@@ -610,7 +627,7 @@ class Repository:
                         ORDER BY id DESC LIMIT 1
                     ) thumbnail ON true
                     WHERE {where_clause}
-                    ORDER BY m.created_at DESC, m.id DESC
+                    ORDER BY {order_clause}
                     {limit_clause} OFFSET :offset
                     """
                     ),
@@ -2597,6 +2614,98 @@ class Repository:
             },
         )
         return self._vocabulary_row(row)
+
+    # ------------------------------------------------------------------
+    # Collections and deletion (§15). Database-only: the OSS and local-file side of a
+    # delete is orchestrated by the caller, because the order matters (§15.7) and the
+    # repository has no business holding a bucket client.
+    # ------------------------------------------------------------------
+
+    def material_media_paths(self, material_id: int) -> list[str]:
+        """Local files registered for a material, read *before* the row is deleted.
+
+        After the cascade runs these paths are unrecoverable, which is why §15.7 fixes the
+        order: read here, delete the bytes, delete the row.
+        """
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT local_path FROM media_asset
+                       WHERE material_id = :material_id AND local_path IS NOT NULL"""
+                ),
+                {"material_id": material_id},
+            ).mappings().all()
+        return [str(row["local_path"]) for row in rows]
+
+    def delete_material(self, material_id: int) -> bool:
+        """Deletes the row and lets the database converge everything hanging off it.
+
+        `segment`, `companion_message`, `job`, `media_asset` and `material_playback_state`
+        are all `ON DELETE CASCADE`, and §4.3's triggers make the matching `learning_event`
+        rows disappear with their sources — so this one statement is the whole database
+        side. It does not touch OSS or the filesystem; see §15.7 for why the caller does
+        those first.
+        """
+
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                text("DELETE FROM material WHERE id = :id"), {"id": material_id}
+            )
+        return result.rowcount > 0
+
+    def create_collection(self, title: str) -> dict[str, Any]:
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text("INSERT INTO material_collection (title) VALUES (:title) RETURNING *"),
+                {"title": title},
+            ).mappings().one()
+        return dict(row)
+
+    def collections(self) -> list[dict[str, Any]]:
+        """Newest first, with the counts the list needs derived on read.
+
+        §15.5 keeps no aggregate state on the collection itself: a stored "3 of 12
+        transcribed" is a second version of a fact that can disagree with the sections.
+        """
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT c.*,
+                              count(m.id) AS section_count,
+                              count(m.id) FILTER (WHERE m.status = 'ready') AS ready_count,
+                              coalesce(sum(m.duration_ms), 0) AS total_duration_ms
+                       FROM material_collection c
+                       LEFT JOIN material m ON m.collection_id = c.id
+                       GROUP BY c.id
+                       ORDER BY c.created_at DESC, c.id DESC"""
+                )
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def collection_sections(self, collection_id: int) -> list[dict[str, Any]]:
+        """Thin wrapper over `list_materials` so a section carries exactly the same fields
+        as a material in the library — including the delivery keys the player needs."""
+
+        return self.list_materials(collection_id=collection_id)
+
+    def get_collection(self, collection_id: int) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT * FROM material_collection WHERE id = :id"),
+                {"id": collection_id},
+            ).mappings().first()
+        return dict(row) if row else None
+
+    def delete_collection(self, collection_id: int) -> bool:
+        """Sections cascade from the collection, and everything else cascades from them."""
+
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                text("DELETE FROM material_collection WHERE id = :id"), {"id": collection_id}
+            )
+        return result.rowcount > 0
 
     def resume_hint(self) -> dict[str, Any] | None:
         """§5.18: one fact about where you left off, or nothing at all.

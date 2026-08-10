@@ -2140,3 +2140,135 @@ def test_companion_messages_filters_by_segment_and_still_works_without_one() -> 
     finally:
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
+
+
+def _collection_repo() -> tuple[Repository, Any]:
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    return Repository(engine), engine
+
+
+@pytest.mark.integration
+def test_deleting_a_material_converges_everything_hanging_off_it() -> None:
+    """§15.7. `DELETE /materials` did not exist before 2026-08-10 — writing tests that day
+    meant deleting materials with raw SQL. The database side is one statement because five
+    foreign keys cascade and §4.3's triggers follow them; this pins that it stays true."""
+
+    repository, engine = _collection_repo()
+    material_id, job_id = repository.create_material_with_job(
+        title="delete me",
+        source_type="paste",
+        source_ref=None,
+        job_kind="tts",
+        payload={"text": "消える。"},
+    )
+    repository.complete_reading(
+        material_id=material_id,
+        local_path="/tmp/delete-me.mp3",
+        oss_key="materials/delete-me.mp3",
+        bytes_count=10,
+        duration_ms=1_000,
+        segments=[{"idx": 0, "text_ja": "消える。", "start_ms": 0, "end_ms": 1_000}],
+    )
+    segment_id = int(repository.get_segments(material_id)[0]["id"])
+    repository.add_companion_message(material_id, segment_id, "user", "这句什么意思")
+    repository.save_playback_state(material_id, 500)
+
+    assert repository.delete_material(material_id) is True
+
+    with engine.connect() as connection:
+        for table, column in (
+            ("segment", "material_id"),
+            ("companion_message", "material_id"),
+            ("job", "material_id"),
+            ("media_asset", "material_id"),
+            ("material_playback_state", "material_id"),
+        ):
+            left = connection.execute(
+                text(f"SELECT count(*) FROM {table} WHERE {column} = :id"), {"id": material_id}
+            ).scalar_one()
+            assert left == 0, f"{table} still has rows"
+        orphan_events = connection.execute(
+            text(
+                """SELECT count(*) FROM learning_event
+                   WHERE source_table IN ('companion_message', 'chat_correction_item')
+                     AND source_id = :job_id"""
+            ),
+            {"job_id": job_id},
+        ).scalar_one()
+        assert orphan_events == 0
+    # Deleting again is a 404 for the caller, not an error here.
+    assert repository.delete_material(material_id) is False
+
+
+@pytest.mark.integration
+def test_collection_sections_carry_the_same_fields_as_library_materials() -> None:
+    """§15.5: sections come back through `list_materials`, so the player gets the delivery
+    keys and job fields it already relies on. A second hand-written query would drift."""
+
+    repository, engine = _collection_repo()
+    collection = repository.create_collection("敬語レッスン")
+    collection_id = int(collection["id"])
+    ids: list[int] = []
+    try:
+        for index in range(3):
+            material_id, _ = repository.create_material_with_job(
+                title=f"第 {index + 1} 节",
+                source_type="file",
+                source_ref=None,
+                job_kind="transcode",
+                payload={},
+            )
+            ids.append(material_id)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """UPDATE material
+                           SET collection_id = :collection_id,
+                               collection_index = :index,
+                               source_offset_ms = :offset,
+                               duration_ms = 300000,
+                               kind = 'video'
+                           WHERE id = :id"""
+                    ),
+                    {
+                        "collection_id": collection_id,
+                        "index": index,
+                        "offset": index * 300_000,
+                        "id": material_id,
+                    },
+                )
+
+        sections = repository.collection_sections(collection_id)
+        # Ordered by section number, not by date.
+        assert [section["collection_index"] for section in sections] == [0, 1, 2]
+        assert [int(section["id"]) for section in sections] == ids
+        # The fields the client depends on are present, not just the bare row.
+        for key in ("audio_oss_key", "video_oss_key", "current_job_id", "thumbnail_local_path"):
+            assert key in sections[0]
+        assert sections[2]["source_offset_ms"] == 600_000
+
+        listed = next(
+            row for row in repository.collections() if int(row["id"]) == collection_id
+        )
+        # Derived on read (§15.5) — nothing aggregate is stored on the collection.
+        assert listed["section_count"] == 3
+        assert listed["ready_count"] == 0
+        assert listed["total_duration_ms"] == 900_000
+
+        assert repository.delete_collection(collection_id) is True
+        with engine.connect() as connection:
+            left = connection.execute(
+                text("SELECT count(*) FROM material WHERE id = ANY(:ids)"), {"ids": ids}
+            ).scalar_one()
+        # Sections cascade from the collection (§15.7).
+        assert left == 0
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = ANY(:ids)"), {"ids": ids})
+            connection.execute(
+                text("DELETE FROM material_collection WHERE id = :id"), {"id": collection_id}
+            )
