@@ -59,7 +59,23 @@ def test_companion_output_tags_only_known_explicit_grammar_keys() -> None:
 
     assert turn.answer_markdown == "这里是て形。"
     assert turn.grammar_keys == ["verb-te"]
-    assert "只标注使用者在本轮**明确询问**的语法点" in COMPANION_SYSTEM_PROMPT
+    # v2 (2026-08-10): registers what the answer actually taught, because with §5.15's
+    # tappable angles the learner never names a point — the old "only what they explicitly
+    # asked about" no longer described the entry point.
+    assert "本轮回答实质讲解过" in COMPANION_SYSTEM_PROMPT
+    assert "使用者往往不点名语法点" in COMPANION_SYSTEM_PROMPT
+
+
+def test_companion_keeps_the_boundaries_that_stop_passive_appearance_becoming_evidence() -> None:
+    """The widened scope must not turn "it was in the sentence" into evidence: §13.2 says
+    seeing a structure is not understanding it, and a wrong fact cannot be recomputed away."""
+
+    assert "句中只是出现而本轮并没有讲的点" in COMPANION_SYSTEM_PROMPT
+    assert "你主动扩展到别处、不属于这句话的点" in COMPANION_SYSTEM_PROMPT
+    assert "使用者问的其实是词义或句意" in COMPANION_SYSTEM_PROMPT
+    assert "你没有把握" in COMPANION_SYSTEM_PROMPT
+    assert "错误登记比漏登记更糟" in COMPANION_SYSTEM_PROMPT
+    assert COMPANION_PROMPT_VERSION == "companion-turn-v2"
 
 
 def test_companion_output_gets_one_format_repair() -> None:

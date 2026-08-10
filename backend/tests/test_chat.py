@@ -507,3 +507,44 @@ def test_same_register_version_is_dropped_when_it_says_nothing() -> None:
             )
         )
         assert turn.correction.items[0].same_register_replacement is None
+
+
+def test_grammar_items_get_one_explicit_catalogue_check_before_being_left_null() -> None:
+    """§12.5 / A1 (2026-08-10). Real data: 5 grammar-category corrections, 3 tagged. The
+    diagnosable miss was 「ないですが」→「お肉は入っていませんが」 — the fix is the ～ている
+    point and that key exists in the catalogue, so it should not have been null."""
+
+    assert "look at the form your" in CHAT_SYSTEM_PROMPT
+    assert "入っていません" in CHAT_SYSTEM_PROMPT
+    # The bar itself is unchanged: over-tagging is still the worse failure (§12.5).
+    assert "It does not lower the bar" in CHAT_SYSTEM_PROMPT
+    assert "a wrong key" in CHAT_SYSTEM_PROMPT
+    assert CHAT_PROMPT_VERSION == "chat-turn-v2"
+
+
+def test_invented_grammar_keys_are_still_dropped_not_trusted() -> None:
+    """Widening when a key *should* be set must not widen what counts as a valid key."""
+
+    turn = parse_chat_turn(
+        _turn(
+            [
+                {
+                    "original": "ないですが",
+                    "replacement": "お肉は入っていませんが",
+                    "reason_zh": "て形＋いる的否定",
+                    "category": "grammar",
+                    "grammar_key": "verb-te-iru",
+                },
+                {
+                    "original": "煮込み",
+                    "replacement": "煮込んであるので",
+                    "reason_zh": "状态",
+                    "category": "grammar",
+                    "grammar_key": "this-key-does-not-exist",
+                },
+            ]
+        )
+    )
+
+    assert turn.correction.items[0].grammar_key == "verb-te-iru"
+    assert turn.correction.items[1].grammar_key is None

@@ -11,7 +11,11 @@ from .llm import LLMReply, LLMService
 from .prompts import INTERACTIVE_TEACHING_CORE_PROMPT
 
 CorrectionCategory = Literal["grammar", "word_choice", "naturalness", "register", "orthography"]
-CHAT_PROMPT_VERSION = "chat-turn-v1"
+# v2 (2026-08-10): two changes on the same day, both from reading the 14 real corrections —
+# register moves must be stated rather than made silently (§5.6), and grammar-category items
+# now get one explicit catalogue check before the key is left null (§12.5). Recorded in the
+# trace so a later diff between tagging rates has a version to attribute it to.
+CHAT_PROMPT_VERSION = "chat-turn-v2"
 
 
 class StarterTopic(BaseModel):
@@ -114,6 +118,12 @@ Output
   null for word choice, naturalness or anything you are not sure about: a wrong key
   quietly corrupts the skeleton, which is worse than leaving it empty. Unknown keys are
   discarded anyway.
+- When category is grammar, do one explicit check before leaving it null: look at the form your
+  replacement actually uses and see whether that form is in the list. A fix that turns ない into
+  入っていません is the ～ている point; a fix that turns 美味しいでした into 美味しかったです is
+  the い-adjective past. Under-tagging a real grammar mistake costs the skeleton a fact it should
+  have had, so the check is worth making. It does not lower the bar — word_choice, naturalness,
+  register and genuine uncertainty still stay null.
 
 Grammar keys (key = form, label):
 {grammar_keys}

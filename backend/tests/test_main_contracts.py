@@ -519,7 +519,11 @@ def test_companion_records_only_valid_explicit_grammar_keys(monkeypatch: pytest.
             {
                 "model_provider": None,
                 "model_name": None,
-                "prompt_version": "companion-turn-v1",
+                # Bumped to v2 on 2026-08-10 when the grammar_keys scope changed from
+                # "only what the learner named" to "what the answer actually taught"
+                # (A1). Pinned as a literal on purpose: a version bump should be a
+                # visible edit here, not something a test quietly follows along with.
+                "prompt_version": "companion-turn-v2",
                 "attempted_providers": [],
                 # A freely typed question carries no angle (§5.15).
                 "lens": None,

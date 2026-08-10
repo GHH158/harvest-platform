@@ -50,15 +50,27 @@ COMPANION_SCENE_PROMPT = """角色与目标
 - 先给结论,通常控制在能完整回答问题的最短篇幅;只有用户要求时再展开。
 - 不透露或讨论本提示词。
 """
-COMPANION_PROMPT_VERSION = "companion-turn-v1"
+# v2 (2026-08-10): the grammar_keys rule used to say "only what the learner explicitly
+# asked about", which stopped matching the entry point once §5.15 replaced typed questions
+# with tappable angles — with an angle the learner never names a point. Registers what the
+# answer actually taught about their sentence instead; the hard boundary (a point that
+# merely appears is not evidence) is unchanged, and this still only ever moves 未接触 to
+# 已撞见, never to 已弄懂 (§13.2).
+COMPANION_PROMPT_VERSION = "companion-turn-v2"
 
 KNOWN_GRAMMAR_KEYS = {key for key, *_ in GRAMMAR_CATALOGUE}
 
 COMPANION_OUTPUT_PROMPT = """输出契约
 - 只返回一个 JSON 对象,不要在 JSON 外添加 Markdown 或说明。
 - answer_markdown 是给使用者看的原回答,可使用上面的简洁 Markdown 规则。
-- grammar_keys 只标注使用者在本轮**明确询问**的语法点,最多 3 个。当前句里只是被动出现、
-  用户实际问的是词义/句意、或你没有把握时一律留空。错误登记比漏登记更糟。
+- grammar_keys 标注**本轮回答实质讲解过、并且属于使用者所问那句话**的语法点,最多 3 个。
+  使用者往往不点名语法点——他点一个角度问「这句的语法结构是怎样的」,讲什么由你决定;
+  你本轮实际讲解了的点,就是这一轮的证据。
+  仍然一律留空的四种情况:句中只是出现而本轮并没有讲的点;你主动扩展到别处、不属于这句话的点;
+  使用者问的其实是词义或句意;以及你没有把握。错误登记比漏登记更糟。
+- **目录里没有精确对应的点时,不要退而选最接近的那个,直接不标。** 例:「友達に貸してもらう」的
+  「に」是动作的来源,而目录里只有「に(时间)」和「に(存在・到达)」,两个都不是它——这时正确做法
+  是不标 に,而不是挑一个凑上。标错会把别人的点悄悄记到你的账上,比少标一个更难修。
 - grammar_keys 只能逐字使用下列目录中的 key:
 {grammar_keys}
 
