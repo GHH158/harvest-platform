@@ -1,20 +1,6 @@
 import NaturalLanguage
 import SwiftUI
 
-/// Navigation payloads instead of inline destinations.
-/// Asking about a sentence presents a sheet rather than pushing a screen: you are in
-/// the middle of reading or watching, and leaving the page to ask costs the place you
-/// were in. `Identifiable` so `.sheet(item:)` builds the destination only when one is
-/// actually requested — the old `NavigationLink { CompanionView(…) }` form built one
-/// eagerly for every word, on every re-render, ten times a second during playback.
-struct CompanionRequest: Hashable, Identifiable {
-    let materialID: Int
-    let segment: Segment
-    let focusText: String?
-
-    var id: String { "\(materialID)-\(segment.id)-\(focusText ?? "")" }
-}
-
 struct ShadowingRequest: Hashable {
     let segment: Segment
 }
@@ -44,9 +30,14 @@ struct ReaderView: View {
     /// sentence being listened to. Coming back from 陪读 restores the same position, so
     /// the current sentence never *changes* — without this the view sits at the top.
     @State private var scrollRequests = 0
-    /// Presented over the reader instead of pushed, so the place you were reading is
-    /// still there when the sheet closes.
-    @State private var companionRequest: CompanionRequest?
+    /// §16: word taps open the dictionary lookup, not a question-and-answer sheet.
+    @State private var lookupWord: LookupWord?
+    /// A brief, non-blocking confirmation for flagging a whole sentence — no sheet, so
+    /// reading is never interrupted (§16).
+    @State private var flagMessage: String?
+    /// §16: shown on the toolbar so "there are questions waiting" is visible without a
+    /// separate trip to check.
+    @State private var pendingQuestionCount = 0
     private let startsOffline: Bool
 
     init(materialID: Int) {
@@ -82,12 +73,36 @@ struct ReaderView: View {
         .navigationTitle(material?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
-        .sheet(item: $companionRequest) { request in
-            CompanionSheet(request: request)
+        .sheet(item: $lookupWord, onDismiss: {
+            // §16: the sheet's own "收纳" button can change the pending count while it is
+            // open — cheaper to just recheck on close than to thread a callback through it.
+            if let material { Task { await loadPendingQuestionCount(materialID: material.id) } }
+        }) { item in
+            WordLookupSheet(
+                word: item.word,
+                context: item.context,
+                materialID: item.materialID,
+                segmentID: item.segmentID
+            )
+            .environmentObject(configuration)
         }
         .navigationDestination(for: ShadowingRequest.self) { request in
             ShadowingView(segment: request.segment)
         }
+        .overlay(alignment: .top) {
+            if let flagMessage {
+                Text(flagMessage)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(DesignTokens.ink.opacity(0.85), in: Capsule())
+                    .padding(.top, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: flagMessage)
         .task { if !startsOffline { await load() } }
         .onChange(of: material?.id) { _, _ in rebuildReadingUnits() }
         .onChange(of: material?.tokens.count) { _, _ in rebuildReadingUnits() }
@@ -152,16 +167,15 @@ struct ReaderView: View {
                                 : nil,
                             isCurrent: current,
                             onSelect: { player.seek(to: segment.startMs) },
-                            onAsk: { focus in
-                                // Reading the answer while the audio runs on means the
-                                // sentence you asked about is long gone when you close.
-                                player.pause()
-                                companionRequest = CompanionRequest(
+                            onWordTap: { word in
+                                lookupWord = LookupWord(
+                                    word: word,
+                                    context: segment.textJA,
                                     materialID: material.id,
-                                    segment: segment,
-                                    focusText: focus
+                                    segmentID: segment.id
                                 )
-                            }
+                            },
+                            onFlagSentence: { flagSentence(segment, materialID: material.id) }
                         )
                         .equatable()
                         .id(segment.id)
@@ -207,8 +221,45 @@ struct ReaderView: View {
         .onDisappear { savePlaybackPosition(in: material, force: true) }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
+                questionsToolbarButton(material)
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
                 downloadToolbarButton(material)
             }
+        }
+        .task(id: material.id) { await loadPendingQuestionCount(materialID: material.id) }
+        .onAppear { Task { await loadPendingQuestionCount(materialID: material.id) } }
+    }
+
+    /// §16: only shown once there is something to show — an empty tray is not worth a
+    /// permanent icon (§1.4).
+    @ViewBuilder
+    private func questionsToolbarButton(_ material: MaterialDetail) -> some View {
+        if pendingQuestionCount > 0 {
+            NavigationLink(
+                value: HomeDestination.questions(materialID: material.id, materialTitle: material.title)
+            ) {
+                HStack(spacing: 3) {
+                    Image(systemName: "tray.full")
+                    Text("\(pendingQuestionCount)")
+                        .font(.caption.weight(.semibold))
+                }
+            }
+            .accessibilityLabel("\(pendingQuestionCount) 个疑问待处理")
+        }
+    }
+
+    @MainActor
+    private func loadPendingQuestionCount(materialID: Int) async {
+        guard let endpoint = configuration.endpoint else { return }
+        do {
+            let pending = try await APIClient(baseURL: endpoint).readingQuestions(
+                materialID: materialID,
+                status: "pending"
+            )
+            pendingQuestionCount = pending.count
+        } catch {
+            // Silent: a stale or missing count is not worth surfacing an error banner for.
         }
     }
 
@@ -392,6 +443,34 @@ struct ReaderView: View {
             errorMessage = error.localizedDescription
         }
     }
+
+    /// §16: flags the whole sentence with no sheet and no pause — reading keeps going.
+    /// A brief confirmation is the only feedback; explaining it happens later, in one
+    /// batch, with the chat teacher.
+    private func flagSentence(_ segment: Segment, materialID: Int) {
+        guard let endpoint = configuration.endpoint else { return }
+        Task {
+            let client = APIClient(baseURL: endpoint)
+            do {
+                _ = try await client.addReadingQuestion(
+                    materialID: materialID,
+                    excerpt: segment.textJA,
+                    segmentID: segment.id
+                )
+                await MainActor.run { pendingQuestionCount += 1 }
+                await showFlagMessage("已收纳，之后问老师")
+            } catch {
+                await showFlagMessage("收纳失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    @MainActor
+    private func showFlagMessage(_ message: String) async {
+        flagMessage = message
+        try? await Task.sleep(for: .seconds(1.8))
+        if flagMessage == message { flagMessage = nil }
+    }
 }
 
 struct JapaneseReadingUnit: Identifiable, Equatable {
@@ -509,8 +588,11 @@ struct ReadingSentenceView: View, Equatable {
     let activeUnitID: Int?
     let isCurrent: Bool
     let onSelect: () -> Void
-    /// nil asks about the whole sentence; a word asks about that word in this sentence.
-    let onAsk: (String?) -> Void
+    /// §16: a word opens the dictionary lookup sheet (with a "收纳" button inside it).
+    let onWordTap: (String) -> Void
+    /// §16: the whole sentence is flagged directly — no sheet, no interruption. Explaining
+    /// it happens later, in one batch, with the chat teacher.
+    let onFlagSentence: () -> Void
 
     init(
         materialID: Int,
@@ -519,7 +601,8 @@ struct ReadingSentenceView: View, Equatable {
         activeUnitID: Int?,
         isCurrent: Bool,
         onSelect: @escaping () -> Void,
-        onAsk: @escaping (String?) -> Void
+        onWordTap: @escaping (String) -> Void,
+        onFlagSentence: @escaping () -> Void
     ) {
         self.materialID = materialID
         self.segment = segment
@@ -527,7 +610,8 @@ struct ReadingSentenceView: View, Equatable {
         self.activeUnitID = activeUnitID
         self.isCurrent = isCurrent
         self.onSelect = onSelect
-        self.onAsk = onAsk
+        self.onWordTap = onWordTap
+        self.onFlagSentence = onFlagSentence
     }
 
     init(
@@ -537,7 +621,8 @@ struct ReadingSentenceView: View, Equatable {
         playbackPositionMs: Int,
         isCurrent: Bool,
         onSelect: @escaping () -> Void,
-        onAsk: @escaping (String?) -> Void
+        onWordTap: @escaping (String) -> Void,
+        onFlagSentence: @escaping () -> Void
     ) {
         let units = japaneseReadingUnits(text: segment.textJA, tokens: tokens)
         self.init(
@@ -547,7 +632,8 @@ struct ReadingSentenceView: View, Equatable {
             activeUnitID: isCurrent ? activeReadingUnitID(in: units, at: playbackPositionMs) : nil,
             isCurrent: isCurrent,
             onSelect: onSelect,
-            onAsk: onAsk
+            onWordTap: onWordTap,
+            onFlagSentence: onFlagSentence
         )
     }
 
@@ -565,7 +651,7 @@ struct ReadingSentenceView: View, Equatable {
                 ForEach(units) { unit in
                     if unit.isWord {
                         Button {
-                            onAsk(unit.text)
+                            onWordTap(unit.text)
                         } label: {
                             ReadingWordLabel(
                                 unit: unit,
@@ -588,7 +674,7 @@ struct ReadingSentenceView: View, Equatable {
                     .lineSpacing(3)
             }
 
-            askIcon
+            flagIcon
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
@@ -605,21 +691,21 @@ struct ReadingSentenceView: View, Equatable {
         .animation(.easeInOut(duration: 0.24), value: isCurrent)
     }
 
-    /// Per-sentence entry to the explanation. It sits under the sentence it belongs to,
-    /// so there is no "which sentence did that mean?" step — that was the weakness of a
-    /// single "ask the current one" button in the control bar.
-    private var askIcon: some View {
+    /// §16: sits under the sentence it belongs to, so there is no "which sentence did
+    /// that mean?" step. Flags straight to the reading queue — no sheet, no interruption;
+    /// explaining it is deferred to a batch session with the chat teacher after the lesson.
+    private var flagIcon: some View {
         Button {
-            onAsk(nil)
+            onFlagSentence()
         } label: {
-            Image(systemName: "sparkles")
+            Image(systemName: "tray.and.arrow.down")
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(DesignTokens.accent)
                 .frame(width: 30, height: 26)
                 .background(DesignTokens.accentWash, in: RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("讲解这句")
+        .accessibilityLabel("收纳这句，之后问老师")
     }
 }
 

@@ -58,6 +58,9 @@ struct HomeView: View {
             case let .material(materialID): ReaderView(materialID: materialID)
             case let .grammar(point): GrammarDetailView(point: point)
             case .settings: SettingsView(isOnboarding: false)
+            case let .questions(materialID, materialTitle):
+                ReadingQuestionListView(materialID: materialID, materialTitle: materialTitle)
+            case let .chatForMaterial(materialID): ChatView(initialMaterialID: materialID)
             }
         }
         .task {
@@ -308,6 +311,10 @@ enum HomeDestination: Hashable {
     case material(Int)
     case grammar(GrammarPoint)
     case settings
+    /// §16: the flagged-questions list for one material.
+    case questions(materialID: Int, materialTitle: String)
+    /// §16: "去问老师" — a chat session pre-loaded with one material's flagged questions.
+    case chatForMaterial(Int)
 }
 
 struct HomeCounts {

@@ -111,6 +111,30 @@ final class ChatStore: ObservableObject {
             pendingUserMessage = nil
             draft = ""
             errorMessage = nil
+            await loadMaterialQuestions(using: client)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// §16: the checklist shown alongside a material-linked session, so archiving can
+    /// happen right where the discussion is — not as a separate trip back to the list.
+    @Published private(set) var materialQuestions: [ReadingQuestion] = []
+
+    private func loadMaterialQuestions(using client: APIClient) async {
+        guard let materialID = activeSession?.materialID else {
+            materialQuestions = []
+            return
+        }
+        materialQuestions = (try? await client.readingQuestions(materialID: materialID, status: "pending")) ?? []
+    }
+
+    /// The archive decision is the learner's, made explicitly here — never inferred from
+    /// what the model said (§16).
+    func archiveMaterialQuestion(_ question: ReadingQuestion, using client: APIClient) async {
+        do {
+            _ = try await client.setReadingQuestionArchived(id: question.id, archived: true)
+            materialQuestions.removeAll { $0.id == question.id }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -152,6 +176,7 @@ final class ChatStore: ObservableObject {
         pendingUserMessage = nil
         draft = ""
         errorMessage = nil
+        materialQuestions = []
         if displayedTopics.isEmpty { showNextTopics() }
     }
 
@@ -206,6 +231,26 @@ final class ChatStore: ObservableObject {
             pendingUserMessage = nil
             draft = ""
             errorMessage = nil
+            materialQuestions = []
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// §16: "去问老师" — a session pre-loaded with this lesson's flagged questions,
+    /// same shape as `createSession` above but there is no topic to pick.
+    func startFromMaterial(materialID: Int, using client: APIClient) async {
+        isSending = true
+        defer { isSending = false }
+        do {
+            let creation = try await client.createChatSession(materialID: materialID)
+            activeSession = creation.session
+            messages = [creation.assistant]
+            corrections = []
+            pendingUserMessage = nil
+            draft = ""
+            errorMessage = nil
+            await loadMaterialQuestions(using: client)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -223,6 +268,12 @@ struct ChatView: View {
     @AppStorage("showFurigana") private var showFurigana = false
     /// Avoid loading chat topics until the user opens this tab (TabView would otherwise fire on cold start).
     var isActive: Bool = true
+    /// §16: "去问老师" arrives here wanting a session pre-loaded with one lesson's
+    /// flagged questions, not the topic picker. Consumed once, in `.task` below —
+    /// re-entering this same `ChatView` instance later (e.g. after `beginNewTopic()`)
+    /// must not keep recreating it.
+    var initialMaterialID: Int? = nil
+    @State private var hasStartedFromMaterial = false
 
     private var client: APIClient? {
         configuration.endpoint.map { APIClient(baseURL: $0) }
@@ -233,6 +284,9 @@ struct ChatView: View {
             if store.activeSession == nil {
                 topicHome
             } else {
+                if !store.materialQuestions.isEmpty {
+                    materialQuestionsPanel
+                }
                 conversation
             }
             if let errorMessage = store.errorMessage {
@@ -257,6 +311,11 @@ struct ChatView: View {
         }
         .task(id: "\(configuration.endpoint?.absoluteString ?? "")-\(isActive)") {
             guard isActive, let client else { return }
+            if let initialMaterialID, !hasStartedFromMaterial {
+                hasStartedFromMaterial = true
+                await store.startFromMaterial(materialID: initialMaterialID, using: client)
+                return
+            }
             await store.loadTopics(using: client)
         }
         .sheet(isPresented: $showingHistory) {
@@ -359,6 +418,45 @@ struct ChatView: View {
             .frame(maxWidth: .infinity)
         }
         .scrollDismissesKeyboard(.interactively)
+    }
+
+    /// §16: checked off right where the discussion happens, not as a separate trip back
+    /// to the material's question list. Checking a box is the learner's own judgement
+    /// call, made explicitly — never inferred from what the model just said.
+    private var materialQuestionsPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(store.materialQuestions) { question in
+                HStack(alignment: .top, spacing: 8) {
+                    Button {
+                        guard let client else { return }
+                        Task { await store.archiveMaterialQuestion(question, using: client) }
+                    } label: {
+                        Image(systemName: "circle")
+                            .foregroundStyle(DesignTokens.muted)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("标记「\(question.excerpt)」已经懂了")
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(question.excerpt)
+                            .font(.subheadline)
+                            .foregroundStyle(DesignTokens.ink)
+                        if let note = question.note, !note.isEmpty {
+                            Text(note)
+                                .font(.caption)
+                                .foregroundStyle(DesignTokens.muted)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(.horizontal, DesignTokens.pageInset)
+        .padding(.vertical, 10)
+        .background(DesignTokens.surface)
+        .overlay(alignment: .bottom) {
+            Divider().overlay(DesignTokens.separator)
+        }
     }
 
     private var conversation: some View {

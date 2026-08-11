@@ -154,6 +154,9 @@ struct ChatSession: Codable, Identifiable, Hashable {
     let createdAt: String
     let updatedAt: String
     let lastMessagePreview: String?
+    /// §16: set when this session was opened from "去问老师" on a specific lesson's
+    /// flagged questions, instead of a topic. Nil for every ordinary topic session.
+    let materialID: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, topic
@@ -161,6 +164,7 @@ struct ChatSession: Codable, Identifiable, Hashable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case lastMessagePreview = "last_message_preview"
+        case materialID = "material_id"
     }
 }
 
@@ -360,6 +364,32 @@ struct DictionaryLookupResult: Codable {
         partOfSpeech = try container.decodeIfPresent(String.self, forKey: .partOfSpeech)
         memoryHint = try container.decodeIfPresent(String.self, forKey: .memoryHint)
         examples = try container.decodeIfPresent([DictionaryExample].self, forKey: .examples) ?? []
+    }
+}
+
+// MARK: - §16 阅读疑问收纳
+
+/// A word/phrase/sentence flagged while reading or watching, to be worked through with
+/// the chat teacher after the lesson. Deliberately not typed (word vs. grammar vs.
+/// sentence) — see docs/PROJECT.md §16.
+struct ReadingQuestion: Codable, Identifiable, Hashable {
+    let id: Int
+    let materialID: Int
+    let segmentID: Int?
+    let excerpt: String
+    let note: String?
+    let status: String
+    let createdAt: String
+    let archivedAt: String?
+
+    var isArchived: Bool { status == "archived" }
+
+    enum CodingKeys: String, CodingKey {
+        case id, excerpt, note, status
+        case materialID = "material_id"
+        case segmentID = "segment_id"
+        case createdAt = "created_at"
+        case archivedAt = "archived_at"
     }
 }
 

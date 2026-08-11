@@ -18,11 +18,27 @@ func clipboardLookupQuery() -> String? {
     return compressed
 }
 
+/// Identifiable wrapper for `.sheet(item:)`. `materialID`/`segmentID` are set only when
+/// the word came from tapping a material's own text (reading/watching, §16) — that is
+/// the only context where "收纳" means anything.
+struct LookupWord: Identifiable {
+    let id = UUID()
+    let word: String
+    let context: String?
+    var materialID: Int? = nil
+    var segmentID: Int? = nil
+}
+
 /// Lookup sheet for a copied (or manually entered) Japanese word.
 struct WordLookupSheet: View {
     let word: String
     /// Surrounding sentence, when known, so the backend can disambiguate multi-sense words.
     var context: String? = nil
+    /// §16: present only when this sheet was opened from tapping a word in a material's
+    /// own text (reading or watching) — that is the only context where "收纳，之后问
+    /// 老师" means anything, since it needs a lesson to attach the question to.
+    var materialID: Int? = nil
+    var segmentID: Int? = nil
     @EnvironmentObject private var configuration: AppConfiguration
     @Environment(\.dismiss) private var dismiss
     @State private var result: DictionaryLookupResult?
@@ -33,6 +49,9 @@ struct WordLookupSheet: View {
     @State private var wasAlreadySaved = false
     @State private var vocabularyError: String?
     @State private var exampleFurigana: [String: [FuriganaSegment]] = [:]
+    @State private var isFlagging = false
+    @State private var flagged = false
+    @State private var flagError: String?
 
     private var client: APIClient? {
         configuration.endpoint.map { APIClient(baseURL: $0) }
@@ -229,6 +248,47 @@ struct WordLookupSheet: View {
                     .foregroundStyle(DesignTokens.muted)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
+
+            if materialID != nil {
+                flagSection
+            }
+        }
+    }
+
+    /// §16:查完词之后,顺手把它收纳进这一课的疑问清单,读完再一次性去问老师。跟"加入
+    /// 生词表"是两件独立的事——生词表是长期记忆,这里是一次性的待办。
+    @ViewBuilder
+    private var flagSection: some View {
+        if flagged {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(DesignTokens.accent)
+                Text("已收纳，之后问老师")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(DesignTokens.accent)
+            }
+        } else {
+            Button {
+                Task { await flag() }
+            } label: {
+                HStack(spacing: 6) {
+                    if isFlagging {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "tray.and.arrow.down")
+                    }
+                    Text(isFlagging ? "正在收纳…" : "收纳，之后问老师")
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(DesignTokens.accent)
+            .disabled(isFlagging)
+        }
+        if let flagError {
+            Text(flagError)
+                .font(.caption)
+                .foregroundStyle(DesignTokens.accent)
+                .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -321,6 +381,20 @@ struct WordLookupSheet: View {
             }
         } catch {
             vocabularyError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func flag() async {
+        guard let client, let materialID else { return }
+        isFlagging = true
+        flagError = nil
+        defer { isFlagging = false }
+        do {
+            _ = try await client.addReadingQuestion(materialID: materialID, excerpt: word, segmentID: segmentID)
+            withAnimation(.easeOut(duration: 0.2)) { flagged = true }
+        } catch {
+            flagError = error.localizedDescription
         }
     }
 }

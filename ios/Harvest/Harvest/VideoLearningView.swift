@@ -219,7 +219,12 @@ struct VideoLearningView: View {
     @State private var lastWatchPositionMs = 0
     @State private var didRestorePlayback = false
     @State private var lastSavedPositionMs = 0
-    @State private var companionRequest: CompanionRequest?
+    /// §16: word taps open the dictionary lookup, not a question-and-answer sheet.
+    @State private var lookupWord: LookupWord?
+    /// A brief, non-blocking confirmation for flagging a whole sentence (§16).
+    @State private var flagMessage: String?
+    /// §16: shown next to the title so "there are questions waiting" is visible.
+    @State private var pendingQuestionCount = 0
     @StateObject private var onlineVideo = OnlineMediaPlayer()
     @StateObject private var onlineAudio = OnlineMediaPlayer()
     @StateObject private var offlineVideoPlayer = OnlineMediaPlayer()
@@ -266,10 +271,34 @@ struct VideoLearningView: View {
         .safeAreaInset(edge: .bottom) {
             if mode == "观看" { learningControlBar }
         }
-        .sheet(item: $companionRequest) { request in
-            CompanionSheet(request: request)
+        .sheet(item: $lookupWord, onDismiss: {
+            Task { await loadPendingQuestionCount() }
+        }) { item in
+            WordLookupSheet(
+                word: item.word,
+                context: item.context,
+                materialID: item.materialID,
+                segmentID: item.segmentID
+            )
+            .environmentObject(configuration)
         }
+        .overlay(alignment: .top) {
+            if let flagMessage {
+                Text(flagMessage)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(DesignTokens.ink.opacity(0.85), in: Capsule())
+                    .padding(.top, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: flagMessage)
         .task { await restorePlaybackPosition() }
+        .task(id: material.id) { await loadPendingQuestionCount() }
+        .onAppear { Task { await loadPendingQuestionCount() } }
         .onChange(of: watchPlaybackPositionMs) { oldPosition, newPosition in
             handleSentenceLoop(from: oldPosition, to: newPosition)
             savePlaybackPositionIfNeeded(newPosition)
@@ -327,6 +356,20 @@ struct VideoLearningView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            if pendingQuestionCount > 0 {
+                NavigationLink(
+                    value: HomeDestination.questions(materialID: material.id, materialTitle: material.title)
+                ) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "tray.full")
+                        Text("\(pendingQuestionCount)")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(DesignTokens.accent)
+                }
+                .accessibilityLabel("\(pendingQuestionCount) 个疑问待处理")
+            }
 
             Picker("模式", selection: $mode) {
                 Text("观看").tag("观看")
@@ -537,7 +580,15 @@ struct VideoLearningView: View {
                             activeUnitID: highlight.segmentID == row.id ? highlight.unitID : nil,
                             isCurrent: highlight.segmentID == row.id,
                             onSelect: { seek(to: row.segment.startMs) },
-                            onAsk: { focus in ask(segment: row.segment, focusText: focus) }
+                            onWordTap: { word in
+                                lookupWord = LookupWord(
+                                    word: word,
+                                    context: row.segment.textJA,
+                                    materialID: material.id,
+                                    segmentID: row.segment.id
+                                )
+                            },
+                            onFlagSentence: { flagSentence(row.segment) }
                         )
                         .equatable()
                         .id(row.id)
@@ -598,19 +649,45 @@ struct VideoLearningView: View {
         else { offlineVideoPlayer.toggle() }
     }
 
-    /// Pauses first: the explanation is about this sentence, and letting playback run
-    /// on behind the sheet means the sentence you asked about has already gone by when
-    /// you close it.
-    private func ask(segment: Segment, focusText: String?) {
-        onlineVideo.pause()
-        offlineVideoPlayer.pause()
-        onlineAudio.pause()
-        offlineAudioPlayer.pause()
-        companionRequest = CompanionRequest(
-            materialID: material.id,
-            segment: segment,
-            focusText: focusText
-        )
+    /// §16: no sheet, no pause — flagging must not interrupt watching or listening.
+    /// Explaining it happens later, in one batch, with the chat teacher.
+    private func flagSentence(_ segment: Segment) {
+        guard let endpoint = configuration.endpoint else { return }
+        Task {
+            let client = APIClient(baseURL: endpoint)
+            do {
+                _ = try await client.addReadingQuestion(
+                    materialID: material.id,
+                    excerpt: segment.textJA,
+                    segmentID: segment.id
+                )
+                await MainActor.run { pendingQuestionCount += 1 }
+                await showFlagMessage("已收纳，之后问老师")
+            } catch {
+                await showFlagMessage("收纳失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    @MainActor
+    private func showFlagMessage(_ message: String) async {
+        flagMessage = message
+        try? await Task.sleep(for: .seconds(1.8))
+        if flagMessage == message { flagMessage = nil }
+    }
+
+    @MainActor
+    private func loadPendingQuestionCount() async {
+        guard let endpoint = configuration.endpoint else { return }
+        do {
+            let pending = try await APIClient(baseURL: endpoint).readingQuestions(
+                materialID: material.id,
+                status: "pending"
+            )
+            pendingQuestionCount = pending.count
+        } catch {
+            // Silent: a stale or missing count is not worth surfacing an error banner for.
+        }
     }
 
     private func toggleSentenceLoop() {

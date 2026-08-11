@@ -170,6 +170,71 @@ struct APIClient {
         try await delete("vocabulary/\(id)")
     }
 
+    // MARK: - §16 阅读疑问收纳
+
+    func addReadingQuestion(
+        materialID: Int,
+        excerpt: String,
+        segmentID: Int? = nil,
+        note: String? = nil
+    ) async throws -> ReadingQuestion {
+        var request = URLRequest(url: baseURL.appending(path: "materials/\(materialID)/questions"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 12
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = ["excerpt": excerpt]
+        if let segmentID { body["segment_id"] = segmentID }
+        if let note { body["note"] = note }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return try await send(request)
+    }
+
+    func readingQuestions(materialID: Int, status: String? = nil) async throws -> [ReadingQuestion] {
+        guard var components = URLComponents(
+            url: baseURL.appending(path: "materials/\(materialID)/questions"),
+            resolvingAgainstBaseURL: false
+        ) else { throw APIClientError.badResponse }
+        if let status {
+            components.queryItems = [URLQueryItem(name: "status", value: status)]
+        }
+        guard let url = components.url else { throw APIClientError.badResponse }
+        return try await get(url: url)
+    }
+
+    func updateReadingQuestionNote(id: Int, note: String) async throws -> ReadingQuestion {
+        var request = URLRequest(url: baseURL.appending(path: "questions/\(id)/note"))
+        request.httpMethod = "PATCH"
+        request.timeoutInterval = 12
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["note": note])
+        return try await send(request)
+    }
+
+    func setReadingQuestionArchived(id: Int, archived: Bool) async throws -> ReadingQuestion {
+        var request = URLRequest(url: baseURL.appending(path: "questions/\(id)/archive"))
+        request.httpMethod = "PATCH"
+        request.timeoutInterval = 12
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["archived": archived])
+        return try await send(request)
+    }
+
+    func deleteReadingQuestion(id: Int) async throws {
+        try await delete("questions/\(id)")
+    }
+
+    /// "去问老师": opens a session pre-loaded with this lesson's flagged questions
+    /// instead of a topic. The server rejects an empty queue rather than silently
+    /// starting a topic-less session (§16).
+    func createChatSession(materialID: Int) async throws -> ChatSessionCreation {
+        var request = URLRequest(url: baseURL.appending(path: "chat/sessions"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["material_id": materialID])
+        return try await send(request)
+    }
+
     func listGrammar() async throws -> [GrammarPoint] {
         try await get("grammar")
     }
@@ -217,20 +282,6 @@ struct APIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["correct": correct])
         return try await send(request)
-    }
-
-    /// §5.17 (2026-08-10): pass `segmentID` to get just that sentence's history. The sheet
-    /// opens on one sentence, so the whole material's history buried the answer you just
-    /// asked for. Omit it for the "以前问过的" view, which deliberately wants everything.
-    func companion(materialID: Int, segmentID: Int? = nil) async throws -> [ConversationMessage] {
-        guard let segmentID else { return try await get("companion/\(materialID)") }
-        var components = URLComponents(
-            url: baseURL.appending(path: "companion/\(materialID)"),
-            resolvingAgainstBaseURL: false
-        )
-        components?.queryItems = [URLQueryItem(name: "segment_id", value: String(segmentID))]
-        guard let url = components?.url else { return try await get("companion/\(materialID)") }
-        return try await get(url: url)
     }
 
     func companionLenses() async throws -> [QuestionLens] {
@@ -296,27 +347,6 @@ struct APIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         var body: [String: Any] = ["text": text]
         if let lens { body["lens"] = lens }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        return try await send(request)
-    }
-
-    /// §5.15: send a typed `question`, or a `lens` id for a one-tap angle. The server
-    /// renders the angle's wording so it is defined in exactly one place.
-    func sendCompanion(
-        materialID: Int,
-        segmentID: Int,
-        question: String? = nil,
-        lens: String? = nil,
-        focusText: String? = nil
-    ) async throws -> ChatReply {
-        var request = URLRequest(url: baseURL.appending(path: "companion"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 60
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var body: [String: Any] = ["material_id": materialID, "segment_id": segmentID]
-        if let question, !question.isEmpty { body["question"] = question }
-        if let lens { body["lens"] = lens }
-        if let focusText, !focusText.isEmpty { body["focus_text"] = focusText }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return try await send(request)
     }

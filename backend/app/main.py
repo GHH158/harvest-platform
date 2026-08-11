@@ -61,22 +61,6 @@ class MaterialCreate(BaseModel):
         return self
 
 
-class CompanionRequest(BaseModel):
-    material_id: int
-    segment_id: int | None = None
-    #: §5.15: free question, or a lens id, exactly one of them. `question` wins when
-    #: both arrive, because a typed question is always more specific than a tap.
-    question: str | None = Field(default=None, min_length=1, max_length=4_000)
-    lens: str | None = Field(default=None, max_length=40)
-    focus_text: str | None = Field(default=None, max_length=200)
-
-    @model_validator(mode="after")
-    def needs_a_question_or_a_lens(self) -> CompanionRequest:
-        if not (self.question or "").strip() and not (self.lens or "").strip():
-            raise ValueError("请给出问题，或选择一个提问角度。")
-        return self
-
-
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1, max_length=4_000)
@@ -1215,86 +1199,6 @@ def post_ask(payload: AskRequest) -> dict:
             )
         except Exception:
             logger.exception("Failed to record ask grammar evidence")
-    return {"user": user, "assistant": assistant}
-
-
-@app.get("/companion/{material_id}")
-def get_companion_messages(
-    material_id: int,
-    segment_id: int | None = Query(default=None),
-) -> list[dict]:
-    """`segment_id` narrows the history to one sentence (§5.17, 2026-08-10).
-
-    The sheet opens on a single sentence, so returning the whole material's history
-    buried the answer you just asked for under dozens of answers about other sentences.
-    The rows are kept either way — grammar evidence hangs off `companion_message.id` and
-    deleting them would erase the skeleton's provenance (§4.3). Remembering and
-    displaying are separate decisions, and they had been wired together.
-
-    Without the parameter the behaviour is unchanged, which is what the "以前问过的"
-    secondary entry uses.
-    """
-
-    if repository().get_material(material_id) is None:
-        raise HTTPException(status_code=404, detail="材料不存在。")
-    return repository().companion_messages(material_id, segment_id=segment_id)
-
-
-@app.post("/companion")
-def post_companion(payload: CompanionRequest) -> dict:
-    repo = repository()
-    if repo.get_material(payload.material_id) is None:
-        raise HTTPException(status_code=404, detail="材料不存在。")
-    context = repo.segment_context(payload.material_id, payload.segment_id) if payload.segment_id else []
-    if payload.segment_id and not context:
-        raise HTTPException(status_code=404, detail="该材料中不存在这句话。")
-    typed = (payload.question or "").strip()
-    lens = None
-    if not typed:
-        lens = lens_by_id(payload.lens or "")
-        if lens is None:
-            # No silent fallback: an unknown angle must not answer as if it were a
-            # plain lookup, or "did this angle take effect" becomes unanswerable.
-            raise HTTPException(status_code=422, detail="未知的提问角度。")
-    question = typed or render_lens_question(lens, payload.focus_text)
-    user = repo.add_companion_message(
-        payload.material_id, payload.segment_id, "user", question, lens=lens.id if lens else None
-    )
-    history = repo.companion_messages(payload.material_id)[-12:-1]
-    messages = build_companion_messages(
-        context=context,
-        history=history,
-        question=question,
-        catalogue_subset=repo.grammar_catalogue_for_prompt(),
-        lens_focus=lens.focus_zh if lens else None,
-    )
-    try:
-        turn = generate_companion_turn(llm_service(), messages)
-    except Exception as error:
-        raise _llm_error(error) from error
-    assistant = repo.add_companion_message(
-        payload.material_id,
-        payload.segment_id,
-        "assistant",
-        turn.answer_markdown,
-    )
-    if turn.grammar_keys:
-        try:
-            repo.record_companion_grammar_evidence(
-                int(user["id"]),
-                turn.grammar_keys,
-                # §5.15: without the angle and its version, "the model got worse" and
-                # "we reworded an angle" look identical in the trace.
-                decision_context={
-                    **turn.decision_context,
-                    "lens": lens.id if lens else None,
-                    "lens_prompt_version": LENS_PROMPT_VERSION if lens else None,
-                },
-            )
-        except Exception:
-            # Personalisation is supplementary: a failed evidence projection must not
-            # make a successful teaching answer look failed to the learner.
-            logger.exception("Failed to record companion grammar evidence")
     return {"user": user, "assistant": assistant}
 
 

@@ -10,11 +10,12 @@
 		A00000000000000000000039 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000039 /* HomeView.swift */; };
 		A0000000000000000000003A /* AskView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003A /* AskView.swift */; };
 		A0000000000000000000040 /* LocalMediaServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000040 /* LocalMediaServer.swift */; };
+		A0000000000000000000041 /* MarkdownRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000041 /* MarkdownRendering.swift */; };
+		A0000000000000000000042 /* ReadingQuestionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000042 /* ReadingQuestionListView.swift */; };
 		A000000000000000000003F /* CollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000003F /* CollectionView.swift */; };
 		A000000000000000000003E /* SplitSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000003E /* SplitSource.swift */; };
 		A000000000000000000003D /* VideoSplitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000003D /* VideoSplitView.swift */; };
 		A0000000000000000000003C /* JournalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003C /* JournalView.swift */; };
-		A0000000000000000000003B /* CompanionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003B /* CompanionSheet.swift */; };
 		A00000000000000000000001 /* HarvestApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000001 /* HarvestApp.swift */; };
 		A00000000000000000000002 /* DesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000002 /* DesignTokens.swift */; };
 		A00000000000000000000003 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000003 /* Models.swift */; };
@@ -33,7 +34,6 @@
 		A00000000000000000000016 /* VideoLearningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* VideoLearningView.swift */; };
 		A00000000000000000000017 /* PhotoReadingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* PhotoReadingView.swift */; };
 		A00000000000000000000018 /* VoiceTeacherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000020 /* VoiceTeacherView.swift */; };
-		A00000000000000000000019 /* CompanionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* CompanionView.swift */; };
 		A0000000000000000000001A /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* Components.swift */; };
 		A0000000000000000000001B /* WordLookupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000022 /* WordLookupSheet.swift */; };
 		A0000000000000000000001D /* WordPickSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000024 /* WordPickSheet.swift */; };
@@ -59,11 +59,12 @@
 		A10000000000000000000039 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		A1000000000000000000003A /* AskView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskView.swift; sourceTree = "<group>"; };
 		A1000000000000000000040 /* LocalMediaServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalMediaServer.swift; sourceTree = "<group>"; };
+		A1000000000000000000041 /* MarkdownRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRendering.swift; sourceTree = "<group>"; };
+		A1000000000000000000042 /* ReadingQuestionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingQuestionListView.swift; sourceTree = "<group>"; };
 		A100000000000000000003F /* CollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectionView.swift; sourceTree = "<group>"; };
 		A100000000000000000003E /* SplitSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitSource.swift; sourceTree = "<group>"; };
 		A100000000000000000003D /* VideoSplitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoSplitView.swift; sourceTree = "<group>"; };
 		A1000000000000000000003C /* JournalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JournalView.swift; sourceTree = "<group>"; };
-		A1000000000000000000003B /* CompanionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionSheet.swift; sourceTree = "<group>"; };
 		A10000000000000000000001 /* HarvestApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarvestApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000002 /* DesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
 		A10000000000000000000003 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
@@ -85,7 +86,6 @@
 		A10000000000000000000019 /* PhotoReadingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoReadingView.swift; sourceTree = "<group>"; };
 		A1000000000000000000001A /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		A10000000000000000000020 /* VoiceTeacherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTeacherView.swift; sourceTree = "<group>"; };
-		A10000000000000000000021 /* CompanionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionView.swift; sourceTree = "<group>"; };
 		A10000000000000000000022 /* WordLookupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordLookupSheet.swift; sourceTree = "<group>"; };
 		A10000000000000000000024 /* WordPickSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPickSheet.swift; sourceTree = "<group>"; };
 		A10000000000000000000025 /* SelectableText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectableText.swift; sourceTree = "<group>"; };
@@ -127,9 +127,10 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000001 /* HarvestApp.swift */,
-				A1000000000000000000003B /* CompanionSheet.swift */,
 				A1000000000000000000003A /* AskView.swift */,
 				A1000000000000000000040 /* LocalMediaServer.swift */,
+				A1000000000000000000041 /* MarkdownRendering.swift */,
+				A1000000000000000000042 /* ReadingQuestionListView.swift */,
 				A100000000000000000003F /* CollectionView.swift */,
 				A100000000000000000003E /* SplitSource.swift */,
 				A100000000000000000003D /* VideoSplitView.swift */,
@@ -151,7 +152,6 @@
 				A10000000000000000000018 /* VideoLearningView.swift */,
 				A10000000000000000000019 /* PhotoReadingView.swift */,
 				A10000000000000000000020 /* VoiceTeacherView.swift */,
-				A10000000000000000000021 /* CompanionView.swift */,
 				A1000000000000000000001A /* Components.swift */,
 				A10000000000000000000022 /* WordLookupSheet.swift */,
 				A10000000000000000000024 /* WordPickSheet.swift */,
@@ -263,9 +263,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000001 /* HarvestApp.swift in Sources */,
-				A0000000000000000000003B /* CompanionSheet.swift in Sources */,
 				A0000000000000000000003A /* AskView.swift in Sources */,
 				A0000000000000000000040 /* LocalMediaServer.swift in Sources */,
+				A0000000000000000000041 /* MarkdownRendering.swift in Sources */,
+				A0000000000000000000042 /* ReadingQuestionListView.swift in Sources */,
 				A000000000000000000003F /* CollectionView.swift in Sources */,
 				A000000000000000000003E /* SplitSource.swift in Sources */,
 				A000000000000000000003D /* VideoSplitView.swift in Sources */,
@@ -287,7 +288,6 @@
 				A00000000000000000000016 /* VideoLearningView.swift in Sources */,
 				A00000000000000000000017 /* PhotoReadingView.swift in Sources */,
 				A00000000000000000000018 /* VoiceTeacherView.swift in Sources */,
-				A00000000000000000000019 /* CompanionView.swift in Sources */,
 				A0000000000000000000001A /* Components.swift in Sources */,
 				A0000000000000000000001B /* WordLookupSheet.swift in Sources */,
 				A0000000000000000000001D /* WordPickSheet.swift in Sources */,
