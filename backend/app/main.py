@@ -93,11 +93,18 @@ class ChatRequest(BaseModel):
 class ChatSessionCreate(BaseModel):
     topic: str | None = Field(default=None, max_length=160)
     starter_id: str | None = Field(default=None, max_length=100)
+    #: §16: start from a material's flagged questions instead of a topic.
+    material_id: int | None = None
 
     @model_validator(mode="after")
-    def has_topic(self) -> ChatSessionCreate:
-        if bool((self.topic or "").strip()) == bool((self.starter_id or "").strip()):
-            raise ValueError("请选择精选主题或输入自定义主题，二选一。")
+    def has_exactly_one_start(self) -> ChatSessionCreate:
+        chosen = [
+            bool((self.topic or "").strip()),
+            bool((self.starter_id or "").strip()),
+            self.material_id is not None,
+        ]
+        if sum(chosen) != 1:
+            raise ValueError("请选择精选主题、输入自定义主题、或指定一节材料，三选一。")
         return self
 
 
@@ -1022,6 +1029,75 @@ def delete_material(material_id: int) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+# ----------------------------------------------------------------------
+# Reading questions (§16): flagged while reading/watching, worked through in one batch
+# with the chat teacher afterward instead of interrupting the moment.
+# ----------------------------------------------------------------------
+
+
+class ReadingQuestionCreate(BaseModel):
+    excerpt: str = Field(min_length=1, max_length=2_000)
+    segment_id: int | None = None
+    note: str | None = Field(default=None, max_length=2_000)
+
+
+class ReadingQuestionNoteUpdate(BaseModel):
+    note: str = Field(max_length=2_000)
+
+
+class ReadingQuestionArchiveUpdate(BaseModel):
+    archived: bool
+
+
+@app.post("/materials/{material_id}/questions", status_code=status.HTTP_201_CREATED)
+def post_reading_question(material_id: int, payload: ReadingQuestionCreate) -> dict:
+    if repository().get_material(material_id) is None:
+        raise HTTPException(status_code=404, detail="材料不存在。")
+    note = (payload.note or "").strip() or None
+    return repository().add_reading_question(
+        material_id=material_id,
+        excerpt=payload.excerpt.strip(),
+        segment_id=payload.segment_id,
+        note=note,
+    )
+
+
+@app.get("/materials/{material_id}/questions")
+def get_reading_questions(
+    material_id: int, status_filter: Annotated[str | None, Query(alias="status")] = None
+) -> list[dict]:
+    if status_filter is not None and status_filter not in {"pending", "archived"}:
+        raise HTTPException(status_code=422, detail="status 只能是 pending 或 archived。")
+    if repository().get_material(material_id) is None:
+        raise HTTPException(status_code=404, detail="材料不存在。")
+    return repository().reading_questions(material_id, status=status_filter)
+
+
+@app.patch("/questions/{question_id}/note")
+def patch_reading_question_note(question_id: int, payload: ReadingQuestionNoteUpdate) -> dict:
+    updated = repository().set_reading_question_note(question_id, payload.note.strip())
+    if updated is None:
+        raise HTTPException(status_code=404, detail="这条疑问不存在。")
+    return updated
+
+
+@app.patch("/questions/{question_id}/archive")
+def patch_reading_question_archive(question_id: int, payload: ReadingQuestionArchiveUpdate) -> dict:
+    """The archive decision belongs to the learner, never a model (§16)."""
+
+    updated = repository().set_reading_question_archived(question_id, payload.archived)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="这条疑问不存在。")
+    return updated
+
+
+@app.delete("/questions/{question_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_reading_question(question_id: int) -> Response:
+    if not repository().delete_reading_question(question_id):
+        raise HTTPException(status_code=404, detail="这条疑问不存在。")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.get("/collections")
 def list_collections() -> list[dict]:
     return repository().collections()
@@ -1228,12 +1304,14 @@ def _chat_turn(
     history: list[dict],
     user_message: str | None,
     catalogue_subset: list[tuple[str, str, str, str, str]],
+    material_questions: list[dict[str, str]] | None = None,
 ):
     messages = chat_messages(
         topic=topic,
         history=history,
         user_message=user_message,
         catalogue_subset=catalogue_subset,
+        material_questions=material_questions,
     )
     try:
         turn = generate_chat_turn(llm_service(), messages)
@@ -1251,11 +1329,38 @@ def get_chat_topics() -> list[dict]:
 
 @app.post("/chat/sessions", status_code=status.HTTP_201_CREATED)
 def create_chat_session(payload: ChatSessionCreate) -> dict:
+    repo = repository()
+    if payload.material_id is not None:
+        # §16: "去问老师" — open a session pre-loaded with this lesson's flagged
+        # questions instead of a topic. Rejecting an empty queue here rather than
+        # silently starting a topic-less session is what keeps `material_id` on a
+        # session meaning "there was something to discuss", not just "a button existed".
+        material = repo.get_material(payload.material_id)
+        if material is None:
+            raise HTTPException(status_code=404, detail="材料不存在。")
+        pending = repo.reading_questions(payload.material_id, status="pending")
+        if not pending:
+            raise HTTPException(status_code=422, detail="这一课还没有收纳任何疑问。")
+        topic = str(material["title"])
+        turn = _chat_turn(
+            topic=topic,
+            history=[],
+            user_message=None,
+            catalogue_subset=repo.grammar_catalogue_for_prompt(),
+            material_questions=[{"excerpt": item["excerpt"], "note": item["note"] or ""} for item in pending],
+        )
+        session, assistant = repo.create_chat_session(
+            session_id=str(uuid.uuid4()),
+            topic=topic,
+            starter_id=None,
+            assistant_content=assistant_content(turn),
+            material_id=payload.material_id,
+        )
+        return {"session": session, "assistant": assistant}
     try:
         topic, starter_id = topic_for(payload.starter_id, payload.topic)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    repo = repository()
     turn = _chat_turn(
         topic=topic,
         history=[],

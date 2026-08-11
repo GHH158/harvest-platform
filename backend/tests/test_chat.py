@@ -194,9 +194,17 @@ class ChatRepository:
         self.completed = False
         self.created: dict[str, Any] | None = None
         self.session = {"id": "session-1", "topic": "週末"}
+        self.material: dict[str, Any] | None = None
+        self.pending_questions: list[dict[str, Any]] = []
 
     def grammar_catalogue_for_prompt(self) -> list[tuple[str, str, str, str, str]]:
         return [("verb-te", "～て", "て形与连接", "N5", "动词变形")]
+
+    def get_material(self, material_id: int) -> dict[str, Any] | None:
+        return self.material
+
+    def reading_questions(self, material_id: int, *, status: str | None = None) -> list[dict[str, Any]]:
+        return self.pending_questions
 
     def create_chat_session(self, **values: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         self.created = values
@@ -240,6 +248,90 @@ def test_session_creation_returns_ai_opener(monkeypatch: pytest.MonkeyPatch) -> 
         "user_message": None,
         "catalogue_subset": repository.grammar_catalogue_for_prompt(),
     }
+
+
+def test_session_creation_from_material_uses_its_pending_questions(monkeypatch: pytest.MonkeyPatch) -> None:
+    # §16: "去问老师" — the session opens from this lesson's flagged questions instead
+    # of a topic, and the topic column becomes the material's own title.
+    repository = ChatRepository()
+    repository.material = {"id": 7, "title": "しいカフェ"}
+    repository.pending_questions = [
+        {"excerpt": "せっかく", "note": "跟中文「难得」感觉不一样"},
+        {"excerpt": "空はとてもきれいです。", "note": None},
+    ]
+    opener = parse_chat_turn(model_json())
+    captured: dict[str, Any] = {}
+
+    def turn(**values: Any):
+        captured.update(values)
+        return opener
+
+    monkeypatch.setattr(main, "repository", lambda: repository)
+    monkeypatch.setattr(main, "_chat_turn", turn)
+
+    result = main.create_chat_session(main.ChatSessionCreate(material_id=7))
+
+    assert result["session"]["topic"] == "しいカフェ"
+    assert captured["material_questions"] == [
+        {"excerpt": "せっかく", "note": "跟中文「难得」感觉不一样"},
+        {"excerpt": "空はとてもきれいです。", "note": ""},
+    ]
+    assert repository.created is not None
+    assert repository.created["material_id"] == 7
+    assert repository.created["starter_id"] is None
+
+
+def test_session_creation_from_material_rejects_an_empty_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Starting a "session about this lesson" with nothing flagged would just be a topic
+    # session wearing a material_id — reject it rather than silently degrading.
+    repository = ChatRepository()
+    repository.material = {"id": 7, "title": "しいカフェ"}
+    repository.pending_questions = []
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    with pytest.raises(HTTPException) as caught:
+        main.create_chat_session(main.ChatSessionCreate(material_id=7))
+    assert caught.value.status_code == 422
+
+
+def test_session_creation_from_material_rejects_an_unknown_material(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = ChatRepository()
+    repository.material = None
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    with pytest.raises(HTTPException) as caught:
+        main.create_chat_session(main.ChatSessionCreate(material_id=99))
+    assert caught.value.status_code == 404
+
+
+def test_chat_session_create_requires_exactly_one_starting_point() -> None:
+    with pytest.raises(ValueError):
+        main.ChatSessionCreate()
+    with pytest.raises(ValueError):
+        main.ChatSessionCreate(topic="週末の予定", material_id=7)
+    with pytest.raises(ValueError):
+        main.ChatSessionCreate(starter_id="daily-weekend", material_id=7)
+    # Exactly one is fine, whichever it is.
+    main.ChatSessionCreate(topic="週末の予定")
+    main.ChatSessionCreate(starter_id="daily-weekend")
+    main.ChatSessionCreate(material_id=7)
+
+
+def test_chat_messages_folds_material_questions_into_the_opening_turn() -> None:
+    messages = chat_messages(
+        topic="しいカフェ",
+        history=[],
+        user_message=None,
+        material_questions=[
+            {"excerpt": "せっかく", "note": "跟中文「难得」感觉不一样"},
+            {"excerpt": "空はとてもきれいです。", "note": ""},
+        ],
+    )
+    opening = messages[-1]
+    assert opening["role"] == "user"
+    assert "1. 「せっかく」(备注:跟中文「难得」感觉不一样)" in opening["content"]
+    assert "2. 「空はとてもきれいです。」" in opening["content"]
+    assert "correction.needed to false" in opening["content"]
 
 
 def test_model_contract_failure_writes_no_partial_turn(monkeypatch: pytest.MonkeyPatch) -> None:

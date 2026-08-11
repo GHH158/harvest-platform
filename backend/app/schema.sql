@@ -116,6 +116,26 @@ CREATE TABLE IF NOT EXISTS companion_message (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- §16: a word/phrase/sentence flagged while reading or watching, to be worked through in
+-- one batch with the chat teacher after the lesson instead of interrupting it in the
+-- moment. Deliberately not typed (word vs. grammar vs. sentence) — the learner often does
+-- not know which it is at the moment of flagging, and forcing a choice is friction this
+-- table exists specifically to avoid. `status='archived'` is a plain checkbox set by the
+-- learner once they feel they understand it; it does not feed §12's grammar skeleton —
+-- that is a deliberate, separate decision (see docs/PROJECT.md §16).
+CREATE TABLE IF NOT EXISTS reading_question (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    material_id   BIGINT NOT NULL REFERENCES material(id) ON DELETE CASCADE,
+    segment_id    BIGINT REFERENCES segment(id) ON DELETE SET NULL,
+    excerpt       TEXT NOT NULL,
+    note          TEXT,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    archived_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_reading_question_material
+    ON reading_question(material_id, status, created_at);
+
 CREATE TABLE IF NOT EXISTS chat_session (
     id            TEXT PRIMARY KEY,
     topic         TEXT NOT NULL,
@@ -126,6 +146,10 @@ CREATE TABLE IF NOT EXISTS chat_session (
 DROP TRIGGER IF EXISTS trg_chat_session_updated ON chat_session;
 CREATE TRIGGER trg_chat_session_updated BEFORE UPDATE ON chat_session
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+-- §16: lets a session start from "this lesson's flagged questions" instead of a topic.
+-- Nullable and SET NULL on delete — a material being deleted should not erase a
+-- conversation that already happened, only its "which lesson" label.
+ALTER TABLE chat_session ADD COLUMN IF NOT EXISTS material_id BIGINT REFERENCES material(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS chat_message (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

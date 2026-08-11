@@ -2205,6 +2205,48 @@ def test_deleting_a_material_converges_everything_hanging_off_it() -> None:
 
 
 @pytest.mark.integration
+def test_deleting_a_material_cascades_questions_and_detaches_chat_sessions() -> None:
+    """§16. `reading_question` rows are worthless without the material they were flagged
+    on, so they cascade. A chat session that already happened is not — it only loses the
+    "which lesson" label, which is why that foreign key is SET NULL rather than CASCADE."""
+
+    repository, engine = _collection_repo()
+    material_id, _ = repository.create_material_with_job(
+        title="delete me too",
+        source_type="paste",
+        source_ref=None,
+        job_kind="tts",
+        payload={"text": "消える。"},
+    )
+    question = repository.add_reading_question(material_id=material_id, excerpt="消える")
+    session, _ = repository.create_chat_session(
+        session_id=f"test-{question['id']}",
+        topic="delete me too",
+        starter_id=None,
+        assistant_content="わかりました。",
+        material_id=material_id,
+    )
+
+    assert repository.delete_material(material_id) is True
+
+    with engine.connect() as connection:
+        remaining_questions = connection.execute(
+            text("SELECT count(*) FROM reading_question WHERE material_id = :id"), {"id": material_id}
+        ).scalar_one()
+        assert remaining_questions == 0
+        session_row = connection.execute(
+            text("SELECT material_id FROM chat_session WHERE id = :id"), {"id": session["id"]}
+        ).mappings().one()
+        assert session_row["material_id"] is None
+        message_count = connection.execute(
+            text("SELECT count(*) FROM chat_message WHERE session_id = :id"), {"id": session["id"]}
+        ).scalar_one()
+        assert message_count == 1
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session["id"]})
+
+
+@pytest.mark.integration
 def test_collection_sections_carry_the_same_fields_as_library_materials() -> None:
     """§15.5: sections come back through `list_materials`, so the player gets the delivery
     keys and job fields it already relies on. A second hand-written query would drift."""

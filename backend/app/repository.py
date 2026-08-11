@@ -819,14 +819,20 @@ class Repository:
         topic: str,
         starter_id: str | None,
         assistant_content: str,
+        material_id: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         with self.engine.begin() as connection:
             session = connection.execute(
                 text(
-                    """INSERT INTO chat_session (id, topic, starter_id)
-                    VALUES (:session_id, :topic, :starter_id) RETURNING *"""
+                    """INSERT INTO chat_session (id, topic, starter_id, material_id)
+                    VALUES (:session_id, :topic, :starter_id, :material_id) RETURNING *"""
                 ),
-                {"session_id": session_id, "topic": topic, "starter_id": starter_id},
+                {
+                    "session_id": session_id,
+                    "topic": topic,
+                    "starter_id": starter_id,
+                    "material_id": material_id,
+                },
             ).mappings().one()
             assistant = connection.execute(
                 text(
@@ -2950,6 +2956,85 @@ class Repository:
                     "at": encountered["last_evidence_at"],
                 }
         return None
+
+    # ------------------------------------------------------------------
+    # Reading questions (§16): a word/phrase/sentence flagged while reading or watching,
+    # to be worked through in one batch with the chat teacher after the lesson instead of
+    # interrupting it in the moment. Deliberately not typed and deliberately not wired
+    # into §12's grammar skeleton — see docs/PROJECT.md §16 for why.
+    # ------------------------------------------------------------------
+
+    def add_reading_question(
+        self,
+        *,
+        material_id: int,
+        excerpt: str,
+        segment_id: int | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    """INSERT INTO reading_question (material_id, segment_id, excerpt, note)
+                    VALUES (:material_id, :segment_id, :excerpt, :note) RETURNING *"""
+                ),
+                {"material_id": material_id, "segment_id": segment_id, "excerpt": excerpt, "note": note},
+            ).mappings().one()
+        return dict(row)
+
+    def reading_questions(self, material_id: int, *, status: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM reading_question WHERE material_id = :material_id"
+        parameters: dict[str, Any] = {"material_id": material_id}
+        if status is not None:
+            query += " AND status = :status"
+            parameters["status"] = status
+        query += " ORDER BY created_at"
+        with self.engine.connect() as connection:
+            rows = connection.execute(text(query), parameters).mappings().all()
+        return [dict(row) for row in rows]
+
+    def get_reading_question(self, question_id: int) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT * FROM reading_question WHERE id = :id"), {"id": question_id}
+            ).mappings().first()
+        return dict(row) if row else None
+
+    def set_reading_question_note(self, question_id: int, note: str) -> dict[str, Any] | None:
+        """A separate method from archiving on purpose: editing the note and checking the
+        box off are two different actions with no ambiguity about "did you mean to clear
+        it" — `note` here always becomes exactly what is passed, including empty."""
+
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    "UPDATE reading_question SET note = :note WHERE id = :id RETURNING *"
+                ),
+                {"id": question_id, "note": note},
+            ).mappings().first()
+        return dict(row) if row else None
+
+    def set_reading_question_archived(self, question_id: int, archived: bool) -> dict[str, Any] | None:
+        """The archive decision belongs to the learner, never to a model (§16) — this is
+        the only path that flips `status`, and nothing calls it automatically."""
+
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    """UPDATE reading_question
+                    SET status = :status, archived_at = CASE WHEN :archived THEN now() ELSE NULL END
+                    WHERE id = :id RETURNING *"""
+                ),
+                {"id": question_id, "status": "archived" if archived else "pending", "archived": archived},
+            ).mappings().first()
+        return dict(row) if row else None
+
+    def delete_reading_question(self, question_id: int) -> bool:
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                text("DELETE FROM reading_question WHERE id = :id"), {"id": question_id}
+            )
+        return result.rowcount > 0
 
     # ------------------------------------------------------------------
     # Private journal (§14) — nothing below this line touches learning data.

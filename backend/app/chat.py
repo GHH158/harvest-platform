@@ -284,6 +284,7 @@ def chat_messages(
     history: list[dict],
     user_message: str | None,
     catalogue_subset: list[tuple[str, str, str, str, str]] | None = None,
+    material_questions: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     context = f"Session topic: {topic}"
     system_prompt = build_chat_system_prompt(catalogue_subset)
@@ -293,7 +294,27 @@ def chat_messages(
         content = str(message.get("content", "")).strip()
         if role in {"user", "assistant"} and content:
             messages.append({"role": role, "content": content})
-    if user_message is None:
+    if material_questions is not None:
+        # §16: the opening turn for a session started from "this lesson's flagged
+        # questions" rather than a topic. Not persisted as a chat_message — same
+        # precedent as the plain topic icebreaker below, which is also only ever a
+        # prompt-time instruction, never a stored line the learner is made to have "said".
+        listed = "\n".join(
+            f"{index}. 「{item['excerpt']}」" + (f"(备注:{item['note']})" if item.get("note") else "")
+            for index, item in enumerate(material_questions, start=1)
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"我在学《{topic}》的时候,有几个地方还不明白,请你一条一条帮我讲清楚,"
+                    f"一次只讲一条:\n{listed}\n\n"
+                    "There is no learner sentence to correct in this instruction itself. "
+                    "Set correction.needed to false for this turn."
+                ),
+            }
+        )
+    elif user_message is None:
         messages.append(
             {
                 "role": "user",

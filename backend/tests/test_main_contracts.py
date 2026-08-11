@@ -164,6 +164,128 @@ def test_playback_position_rejects_unknown_material(
     assert caught.value.status_code == 404
 
 
+class ReadingQuestionRepository:
+    """§16: a word/phrase/sentence flagged while reading, worked through later."""
+
+    def __init__(self, *, material_exists: bool = True) -> None:
+        self.material_exists = material_exists
+        self.rows: dict[int, dict[str, Any]] = {}
+        self.next_id = 1
+
+    def get_material(self, material_id: int) -> dict[str, Any] | None:
+        return {"id": material_id} if self.material_exists else None
+
+    def add_reading_question(
+        self, *, material_id: int, excerpt: str, segment_id: int | None = None, note: str | None = None
+    ) -> dict[str, Any]:
+        row = {
+            "id": self.next_id,
+            "material_id": material_id,
+            "segment_id": segment_id,
+            "excerpt": excerpt,
+            "note": note,
+            "status": "pending",
+            "archived_at": None,
+        }
+        self.rows[self.next_id] = row
+        self.next_id += 1
+        return row
+
+    def reading_questions(self, material_id: int, *, status: str | None = None) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in self.rows.values()
+            if row["material_id"] == material_id and (status is None or row["status"] == status)
+        ]
+
+    def set_reading_question_note(self, question_id: int, note: str) -> dict[str, Any] | None:
+        row = self.rows.get(question_id)
+        if row is None:
+            return None
+        row["note"] = note
+        return row
+
+    def set_reading_question_archived(self, question_id: int, archived: bool) -> dict[str, Any] | None:
+        row = self.rows.get(question_id)
+        if row is None:
+            return None
+        row["status"] = "archived" if archived else "pending"
+        row["archived_at"] = "now" if archived else None
+        return row
+
+    def delete_reading_question(self, question_id: int) -> bool:
+        return self.rows.pop(question_id, None) is not None
+
+
+def test_reading_question_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = ReadingQuestionRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    created = main.post_reading_question(
+        7, main.ReadingQuestionCreate(excerpt="せっかく", note="  跟中文难得感觉不一样  ")
+    )
+    assert created["excerpt"] == "せっかく"
+    assert created["note"] == "跟中文难得感觉不一样"
+    assert created["status"] == "pending"
+
+    listed = main.get_reading_questions(7, status_filter=None)
+    assert [item["id"] for item in listed] == [created["id"]]
+
+    noted = main.patch_reading_question_note(created["id"], main.ReadingQuestionNoteUpdate(note="改一下备注"))
+    assert noted["note"] == "改一下备注"
+
+    archived = main.patch_reading_question_archive(created["id"], main.ReadingQuestionArchiveUpdate(archived=True))
+    assert archived["status"] == "archived"
+    assert archived["archived_at"] is not None
+
+    # Archiving is reversible — it is a checkbox, not a one-way trapdoor.
+    unarchived = main.patch_reading_question_archive(
+        created["id"], main.ReadingQuestionArchiveUpdate(archived=False)
+    )
+    assert unarchived["status"] == "pending"
+    assert unarchived["archived_at"] is None
+
+    main.delete_reading_question(created["id"])
+    assert main.get_reading_questions(7, status_filter=None) == []
+
+
+def test_reading_question_create_rejects_unknown_material(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = ReadingQuestionRepository(material_exists=False)
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    with pytest.raises(HTTPException) as caught:
+        main.post_reading_question(99, main.ReadingQuestionCreate(excerpt="せっかく"))
+    assert caught.value.status_code == 404
+
+
+def test_reading_question_list_rejects_an_invalid_status_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = ReadingQuestionRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    with pytest.raises(HTTPException) as caught:
+        main.get_reading_questions(7, status_filter="done")
+    assert caught.value.status_code == 422
+
+
+def test_reading_question_note_and_archive_and_delete_404_on_unknown_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = ReadingQuestionRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    with pytest.raises(HTTPException) as caught:
+        main.patch_reading_question_note(999, main.ReadingQuestionNoteUpdate(note="x"))
+    assert caught.value.status_code == 404
+
+    with pytest.raises(HTTPException) as caught:
+        main.patch_reading_question_archive(999, main.ReadingQuestionArchiveUpdate(archived=True))
+    assert caught.value.status_code == 404
+
+    with pytest.raises(HTTPException) as caught:
+        main.delete_reading_question(999)
+    assert caught.value.status_code == 404
+
+
 def test_video_upload_rejects_wrong_type_before_writing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
