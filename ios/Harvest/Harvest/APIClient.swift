@@ -568,6 +568,97 @@ extension APIClient {
     }
 }
 
+// MARK: - §15.11 网络不够快时改走 OSS 直传
+
+extension APIClient {
+    /// A small, fast `PUT` timed against the Mac to decide whether the direct upload
+    /// path is worth trying at all.
+    ///
+    /// §3.3 already found that HLS *playback* over Tailscale does not survive cellular;
+    /// the same weak link cuts the other direction for a raw upload. Wi-Fi vs. cellular
+    /// was considered and rejected as the signal — a phone can be on someone else's
+    /// Wi-Fi, nowhere near the Mac, and still look "fast" by that test. Measuring the
+    /// actual path is the only thing that is actually true of *this* attempt.
+    ///
+    /// Any failure (timeout, no route, Mac asleep) counts as "not adequate": OSS is the
+    /// safer default when the direct path cannot even be measured.
+    func probeUploadSpeedIsAdequate() async -> Bool {
+        let payload = Data(count: 256 * 1_024)
+        var request = URLRequest(url: baseURL.appending(path: "videos/uploads/probe"))
+        request.httpMethod = "PUT"
+        request.httpBody = payload
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 6
+        configuration.timeoutIntervalForResource = 8
+        configuration.waitsForConnectivity = false
+        let probeSession = URLSession(configuration: configuration)
+        defer { probeSession.finishTasksAndInvalidate() }
+        let started = DispatchTime.now()
+        do {
+            let (_, response) = try await probeSession.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return false
+            }
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000_000
+            guard elapsed > 0 else { return true }
+            let bytesPerSecond = Double(payload.count) / elapsed
+            // ~600 KB/s (≈4.8 Mbps): comfortably above what a healthy LAN or a good direct
+            // Tailscale connection measures, comfortably below what a DERP-relayed or
+            // congested-uplink path measures. Not a precise number — a fast/slow binary is
+            // all this decision needs.
+            return bytesPerSecond >= 600 * 1_024
+        } catch {
+            return false
+        }
+    }
+
+    /// `POST /videos/oss-upload-url`: a presigned target for the raw upload itself.
+    func requestOSSUploadURL(filename: String) async throws -> OSSUploadTicket {
+        try await post("videos/oss-upload-url", body: ["filename": filename])
+    }
+
+    /// `PUT`s the file straight to OSS — no multipart envelope, no `Content-Type`, because
+    /// the presigned URL was not signed for either (`ObjectStorage.presigned_put_url`).
+    func putFileToOSS(
+        _ fileURL: URL,
+        to uploadURL: URL,
+        onProgress: @escaping @Sendable (Double) -> Void
+    ) async throws {
+        var request = URLRequest(url: uploadURL)
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 3_600
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 3_600
+        configuration.timeoutIntervalForResource = 7_200
+        let uploadSession = URLSession(configuration: configuration)
+        defer { uploadSession.finishTasksAndInvalidate() }
+        let (_, response) = try await uploadSession.upload(
+            for: request,
+            fromFile: fileURL,
+            delegate: UploadProgressDelegate(onProgress: onProgress)
+        )
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIClientError.server("传到云端失败（HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)）。")
+        }
+    }
+
+    /// `POST /videos/uploads/from-oss`: hand the Mac the key it should pull down.
+    func notifyOSSUpload(ossKey: String, filename: String) async throws -> Int {
+        let job: OSSUploadFetchJob = try await post(
+            "videos/uploads/from-oss",
+            body: ["oss_key": ossKey, "filename": filename]
+        )
+        return job.jobID
+    }
+
+    /// Polls the `fetch_video_upload` job until the Mac has pulled the object down from
+    /// OSS and unpacked it (§15.11) — the counterpart to the multipart upload's progress
+    /// bar, except there is no byte count to show, only "the Mac is working on it".
+    func fetchUploadJobStatus(id: Int) async throws -> VideoUploadFetchStatus {
+        try await get("jobs/\(id)")
+    }
+}
+
 private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate {
     private let onProgress: @Sendable (Double) -> Void
 

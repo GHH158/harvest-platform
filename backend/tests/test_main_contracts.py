@@ -533,6 +533,100 @@ def test_companion_records_only_valid_explicit_grammar_keys(monkeypatch: pytest.
     ]
 
 
+class RecordingOSSPresignStorage:
+    """Stands in for `ObjectStorage` in the §15.11 endpoint tests below."""
+
+    last_instance: RecordingOSSPresignStorage | None = None
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.signed: tuple[str, int] | None = None
+        RecordingOSSPresignStorage.last_instance = self
+
+    def presigned_put_url(self, oss_key: str, *, expires_in: int) -> str:
+        self.signed = (oss_key, expires_in)
+        return f"https://example-oss.aliyuncs.com/{oss_key}?signed=1"
+
+
+def test_upload_probe_accepts_a_small_body_and_returns_no_content() -> None:
+    # §15.11: the phone times exactly this call to decide whether the direct-to-Mac
+    # upload path is fast enough, or whether to go through OSS instead.
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"x" * 1_000, "more_body": False}
+
+    request = Request({"type": "http", "method": "PUT", "path": "/videos/uploads/probe", "headers": []}, receive)
+
+    response = asyncio.run(main.put_upload_probe(request))
+
+    assert response.status_code == 204
+
+
+def test_upload_probe_rejects_a_payload_larger_than_the_probe_itself() -> None:
+    # A confused client sending something big here would otherwise measure the Mac's
+    # throughput honestly but cost real bandwidth doing it — reject before reading it all.
+    async def receive() -> dict[str, Any]:
+        return {
+            "type": "http.request",
+            "body": b"x" * (main.UPLOAD_PROBE_MAX_BYTES + 1),
+            "more_body": False,
+        }
+
+    request = Request({"type": "http", "method": "PUT", "path": "/videos/uploads/probe", "headers": []}, receive)
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(main.put_upload_probe(request))
+    assert caught.value.status_code == 413
+
+
+def test_oss_upload_url_signs_a_temporary_raw_uploads_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "ObjectStorage", RecordingOSSPresignStorage)
+    monkeypatch.setattr(main, "get_settings", lambda: Settings())
+
+    result = main.post_oss_upload_url(main.OSSUploadURLRequest(filename="下载的HLS.zip"))
+
+    assert result["oss_key"].startswith("temporary/raw-uploads/")
+    assert result["oss_key"].endswith(".zip")
+    assert result["upload_url"] == f"https://example-oss.aliyuncs.com/{result['oss_key']}?signed=1"
+    assert RecordingOSSPresignStorage.last_instance is not None
+    assert RecordingOSSPresignStorage.last_instance.signed == (result["oss_key"], result["expires_in"])
+
+
+def test_oss_upload_url_rejects_a_bare_playlist_with_the_same_friendly_message() -> None:
+    # Same rule as `POST /videos/uploads` (§15.10): a lone `.m3u8` is useless without its
+    # segments, and this endpoint never even sees the file to tell the two cases apart —
+    # it only has the filename, so the message has to be filename-driven too.
+    with pytest.raises(HTTPException) as caught:
+        main.post_oss_upload_url(main.OSSUploadURLRequest(filename="play.m3u8"))
+    assert caught.value.status_code == 415
+    assert "单独传它没用" in caught.value.detail
+
+
+def test_video_upload_from_oss_rejects_a_key_outside_the_expected_prefix() -> None:
+    # `oss_key` arrives from the client; accepting an arbitrary key would let it point
+    # `fetch_video_upload` at any object in the bucket, not just one this service issued.
+    with pytest.raises(HTTPException) as caught:
+        main.post_video_upload_from_oss(
+            main.OSSUploadNotify(oss_key="materials/7/hls/video/index.m3u8", filename="v.mp4")
+        )
+    assert caught.value.status_code == 422
+
+
+def test_video_upload_from_oss_enqueues_a_fetch_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = StandaloneJobRepository()
+    monkeypatch.setattr(main, "repository", lambda: repository)
+
+    result = main.post_video_upload_from_oss(
+        main.OSSUploadNotify(oss_key="temporary/raw-uploads/abc123.zip", filename="下载的HLS.zip")
+    )
+
+    assert result == {"job_id": 91, "status": "pending"}
+    assert repository.enqueued == {
+        "kind": "fetch_video_upload",
+        "material_id": None,
+        "payload": {"oss_key": "temporary/raw-uploads/abc123.zip", "filename": "下载的HLS.zip"},
+    }
+
+
 def test_dictionary_prompt_ranks_the_chinese_difference_first() -> None:
     # ① same-form-different-use, ② kanji composition, ③ everything else — in that order,
     # because the first two are the only angles that give a Chinese native both a hook

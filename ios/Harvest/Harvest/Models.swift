@@ -612,6 +612,55 @@ struct CollectionSubmission: Codable {
     }
 }
 
+// MARK: - §15.11 网络不够快时改走 OSS 直传
+
+/// A presigned target for `PUT`-ing the raw upload straight to OSS, bypassing the Mac for
+/// the one transfer that is actually big.
+struct OSSUploadTicket: Codable {
+    let ossKey: String
+    let uploadURL: URL
+
+    enum CodingKeys: String, CodingKey {
+        case ossKey = "oss_key"
+        case uploadURL = "upload_url"
+    }
+}
+
+/// `POST /videos/uploads/from-oss` — the phone finished `PUT`-ing to OSS, and this is the
+/// job that pulls it back onto the Mac.
+struct OSSUploadFetchJob: Codable {
+    let jobID: Int
+
+    enum CodingKeys: String, CodingKey {
+        case jobID = "job_id"
+    }
+}
+
+/// What `GET /jobs/{id}` looks like for a `fetch_video_upload` job — the Mac pulling the
+/// object back down from OSS and unpacking it. Richer than `JobStatus` because the result
+/// this particular job produces (`upload_id`) lives in its `payload`, not in a dedicated
+/// field.
+struct VideoUploadFetchStatus: Codable {
+    let status: String
+    let errorMessage: String?
+    let payload: Payload?
+
+    struct Payload: Codable {
+        let uploadID: String?
+        let filename: String?
+
+        enum CodingKeys: String, CodingKey {
+            case uploadID = "upload_id"
+            case filename
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status, payload
+        case errorMessage = "error_message"
+    }
+}
+
 /// §15.5: counts are derived on read, never stored, so they cannot disagree with the
 /// sections they describe.
 struct MaterialCollection: Codable, Identifiable, Hashable {

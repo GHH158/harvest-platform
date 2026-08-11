@@ -1,14 +1,17 @@
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 
 import pytest
 from app.video import (
+    HLSBundleError,
     VideoDownloader,
     VideoProcessor,
     _trim_arguments,
     _trim_placement,
     is_hls_playlist,
+    unpack_hls_bundle,
 )
 
 
@@ -301,3 +304,55 @@ def test_thumbnail_fallback_keeps_the_hls_arguments(
     # The retry drops only the seek, nothing else.
     assert "-ss" in calls[0]
     assert "-ss" not in calls[1]
+
+
+def _write_zip(path: Path, members: dict[str, bytes]) -> Path:
+    with zipfile.ZipFile(path, "w") as bundle:
+        for name, content in members.items():
+            bundle.writestr(name, content)
+    return path
+
+
+def test_unpack_hls_bundle_finds_the_playlist_by_content_not_extension(tmp_path: Path) -> None:
+    # §15.10/§15.11: a downloader may strip every extension, so the playlist has to be
+    # found by its first bytes (`#EXTM3U`), not by a `.m3u8` name.
+    archive = _write_zip(
+        tmp_path / "pending-abc.zip",
+        {
+            "play": b"#EXTM3U\n#EXTINF:6,\nTZhO-00000\n#EXT-X-ENDLIST\n",
+            "TZhO-00000": b"segment-bytes",
+        },
+    )
+
+    playlist = unpack_hls_bundle(archive)
+
+    assert playlist.name == "play"
+    assert playlist.read_text(encoding="utf-8").startswith("#EXTM3U")
+    assert (playlist.parent / "TZhO-00000").read_bytes() == b"segment-bytes"
+
+
+def test_unpack_hls_bundle_rejects_a_zip_slip_member(tmp_path: Path) -> None:
+    # The zip is client-supplied input (directly, or relayed through OSS since §15.11) —
+    # a `../` entry must not be able to write outside the extracted directory.
+    archive = tmp_path / "pending-evil.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("play.m3u8", "#EXTM3U\n")
+        bundle.writestr("../../etc/escape.ts", b"nope")
+
+    with pytest.raises(HLSBundleError, match="结构不对"):
+        unpack_hls_bundle(archive)
+
+
+def test_unpack_hls_bundle_rejects_a_bundle_without_any_playlist(tmp_path: Path) -> None:
+    archive = _write_zip(tmp_path / "pending-noplaylist.zip", {"segment-00000.ts": b"not a playlist"})
+
+    with pytest.raises(HLSBundleError, match="没有播放列表"):
+        unpack_hls_bundle(archive)
+
+
+def test_unpack_hls_bundle_rejects_a_corrupt_zip(tmp_path: Path) -> None:
+    archive = tmp_path / "pending-corrupt.zip"
+    archive.write_bytes(b"not actually a zip file")
+
+    with pytest.raises(HLSBundleError, match="读不出来"):
+        unpack_hls_bundle(archive)

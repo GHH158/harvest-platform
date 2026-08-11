@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import imageio_ffmpeg
 import yt_dlp
+
+
+class HLSBundleError(Exception):
+    """A zipped HLS bundle could not be unpacked into something playable (§15.10).
+
+    Kept independent of FastAPI so both the request path (`main.py`, wants an HTTP error
+    right away) and the worker path (`worker.py`, §15.11 — the OSS-relayed upload arrives
+    inside a job, not a request) can catch this and translate it their own way.
+    """
 
 
 @dataclass(frozen=True)
@@ -408,6 +418,41 @@ def is_hls_playlist(source: Path) -> bool:
             return handle.read(7) == b"#EXTM3U"
     except OSError:
         return False
+
+
+def unpack_hls_bundle(archive: Path) -> Path:
+    """Extract a zipped HLS folder and return the playlist inside it (§15.10).
+
+    Every member is resolved and checked against the destination before writing: a zip is
+    attacker-shaped input (uploaded by a client, or — as of §15.11 — relayed through OSS,
+    which does not make it any more trustworthy), and a `../` entry would otherwise write
+    outside the directory.
+    """
+
+    target = archive.with_suffix("")
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            for member in bundle.infolist():
+                if member.is_dir():
+                    continue
+                resolved = (target / member.filename).resolve()
+                if not resolved.is_relative_to(target.resolve()):
+                    raise HLSBundleError("这个压缩包的结构不对。")
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                with bundle.open(member) as source, resolved.open("wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+    except zipfile.BadZipFile as error:
+        shutil.rmtree(target, ignore_errors=True)
+        raise HLSBundleError("压缩包读不出来，请重新选一次。") from error
+    playlist = next(
+        (path for path in sorted(target.rglob("*")) if path.is_file() and is_hls_playlist(path)),
+        None,
+    )
+    if playlist is None:
+        shutil.rmtree(target, ignore_errors=True)
+        raise HLSBundleError("这个文件夹里没有播放列表（第一行是 #EXTM3U 的那个文件）。")
+    return playlist
 
 
 def _trim_placement(

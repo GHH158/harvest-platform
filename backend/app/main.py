@@ -10,7 +10,6 @@ import shlex
 import shutil
 import time
 import uuid
-import zipfile
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,7 +43,7 @@ from .llm import LLMService
 from .omni import relay_voice_teacher
 from .repository import Repository
 from .storage import ObjectStorage
-from .video import is_hls_playlist
+from .video import HLSBundleError, unpack_hls_bundle
 from .voice import validate_video_voice_clip, voice_separation_available
 
 logger = logging.getLogger(__name__)
@@ -473,14 +472,15 @@ async def post_video(title: Annotated[str | None, Form()] = None, video: UploadF
 VIDEO_UPLOAD_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".zip"}
 
 
-def _validated_video_upload(video: UploadFile, *, allow_bundle: bool = False) -> tuple[Path, str]:
-    """Shared checks for both video upload entry points."""
+def _validated_video_filename(filename: str, *, allow_bundle: bool) -> str:
+    """The suffix half of `_validated_video_upload`, usable without an `UploadFile`.
 
-    if not video.filename:
-        raise HTTPException(status_code=422, detail="请选择一个视频文件。")
-    if not (video.content_type or "").startswith("video/"):
-        raise HTTPException(status_code=415, detail="只接受视频文件。")
-    suffix = Path(video.filename).suffix.lower() or ".mp4"
+    §15.11's OSS-relayed endpoints only ever see a filename — the bytes go straight from
+    the phone to OSS and never pass through this process — so this is split out from the
+    content-type sniffing and disk-space check, which need an actual upload in hand.
+    """
+
+    suffix = Path(filename).suffix.lower() or ".mp4"
     if suffix in {".m3u8", ".m3u"}:
         # A playlist on its own is useless: its segments are separate files. Say what to do
         # instead of what is wrong.
@@ -491,6 +491,17 @@ def _validated_video_upload(video: UploadFile, *, allow_bundle: bool = False) ->
     allowed = VIDEO_UPLOAD_SUFFIXES if allow_bundle else VIDEO_UPLOAD_SUFFIXES - {".zip"}
     if suffix not in allowed:
         raise HTTPException(status_code=415, detail="暂不支持这种视频格式。")
+    return suffix
+
+
+def _validated_video_upload(video: UploadFile, *, allow_bundle: bool = False) -> tuple[Path, str]:
+    """Shared checks for both video upload entry points."""
+
+    if not video.filename:
+        raise HTTPException(status_code=422, detail="请选择一个视频文件。")
+    if not (video.content_type or "").startswith("video/"):
+        raise HTTPException(status_code=415, detail="只接受视频文件。")
+    suffix = _validated_video_filename(video.filename, allow_bundle=allow_bundle)
     video_dir = get_settings().data_dir / "video" / "uploads"
     video_dir.mkdir(parents=True, exist_ok=True)
     if shutil.disk_usage(video_dir).free < get_settings().min_free_disk_bytes:
@@ -521,49 +532,87 @@ async def post_video_upload(video: UploadFile = File()) -> dict[str, str]:
         # §15.10: unpack here rather than at split time, so a broken bundle fails while the
         # learner is still on the upload screen instead of inside a background job.
         try:
-            playlist = _unpack_hls_bundle(destination)
-        except HTTPException:
+            playlist = unpack_hls_bundle(destination)
+        except HLSBundleError as error:
             destination.unlink(missing_ok=True)
-            raise
+            raise HTTPException(status_code=422, detail=str(error)) from error
         destination.unlink(missing_ok=True)
         return {"upload_id": str(playlist.relative_to(video_dir)), "filename": video.filename or ""}
     return {"upload_id": destination.name, "filename": video.filename or ""}
 
 
-def _unpack_hls_bundle(archive: Path) -> Path:
-    """Extract a zipped HLS folder and return the playlist inside it (§15.10).
+#: §15.11: the phone times a `PUT` of this many bytes against `/videos/uploads/probe`
+#: before choosing where the real upload goes. A payload much bigger than this would just
+#: mean the phone is confused about what this endpoint is for.
+UPLOAD_PROBE_MAX_BYTES = 2_000_000
 
-    Every member is resolved and checked against the destination before writing: a zip is
-    attacker-shaped input, and `../` entries would otherwise write outside the directory.
+
+@app.put("/videos/uploads/probe", status_code=status.HTTP_204_NO_CONTENT)
+async def put_upload_probe(request: Request) -> Response:
+    """A small, fast target the phone times before choosing how to send the real file.
+
+    §15.11: §3.3 already found that HLS streaming over Tailscale does not work on
+    cellular; the same weak link cuts the other direction too when uploading a raw
+    bundle. Rather than guess from Wi-Fi vs. cellular — which does not actually say
+    whether *this* phone, on *this* network, can reach *this* Mac fast enough, since a
+    phone can just as easily be on someone else's Wi-Fi, nowhere near home — the phone
+    measures the path directly with a small `PUT` and switches to OSS when it is slow.
     """
 
-    target = archive.with_suffix("")
-    target.mkdir(parents=True, exist_ok=True)
-    try:
-        with zipfile.ZipFile(archive) as bundle:
-            for member in bundle.infolist():
-                if member.is_dir():
-                    continue
-                resolved = (target / member.filename).resolve()
-                if not resolved.is_relative_to(target.resolve()):
-                    raise HTTPException(status_code=422, detail="这个压缩包的结构不对。")
-                resolved.parent.mkdir(parents=True, exist_ok=True)
-                with bundle.open(member) as source, resolved.open("wb") as output:
-                    shutil.copyfileobj(source, output, length=1024 * 1024)
-    except zipfile.BadZipFile as error:
-        shutil.rmtree(target, ignore_errors=True)
-        raise HTTPException(status_code=422, detail="压缩包读不出来，请重新选一次。") from error
-    playlist = next(
-        (path for path in sorted(target.rglob("*")) if path.is_file() and is_hls_playlist(path)),
-        None,
+    body = await request.body()
+    if len(body) > UPLOAD_PROBE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="探测负载太大。")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class OSSUploadURLRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=300)
+
+
+@app.post("/videos/oss-upload-url", status_code=status.HTTP_201_CREATED)
+def post_oss_upload_url(payload: OSSUploadURLRequest) -> dict[str, object]:
+    """Issue a presigned URL so the phone can `PUT` the raw bundle straight to OSS,
+    skipping the Mac for the one transfer that is actually big (§15.11).
+
+    The key lives under `temporary/`, which already carries a same-day lifecycle rule
+    (`ObjectStorage.configure_lifecycle`) — nothing extra to clean up if the phone never
+    follows through with `POST /videos/uploads/from-oss`. No `Content-Type` goes into
+    the request or the signature on either side of this call; see
+    `ObjectStorage.presigned_put_url` for why that has to match exactly.
+    """
+
+    suffix = _validated_video_filename(payload.filename, allow_bundle=True)
+    oss_key = f"temporary/raw-uploads/{uuid.uuid4().hex}{suffix}"
+    expires_in = 21_600  # 6h: generous for a slow link uploading an hour-long bundle.
+    upload_url = ObjectStorage(get_settings()).presigned_put_url(oss_key, expires_in=expires_in)
+    return {"oss_key": oss_key, "upload_url": upload_url, "expires_in": expires_in}
+
+
+class OSSUploadNotify(BaseModel):
+    oss_key: str = Field(min_length=1, max_length=300)
+    filename: str = Field(min_length=1, max_length=300)
+
+
+@app.post("/videos/uploads/from-oss", status_code=status.HTTP_202_ACCEPTED)
+def post_video_upload_from_oss(payload: OSSUploadNotify) -> dict[str, int | str]:
+    """The phone finished `PUT`-ing the raw bundle to OSS; pull it onto the Mac and
+    unpack it there (§15.11).
+
+    `POST /collections` still needs a local `upload_id` — the split itself still runs on
+    the Mac against a local file, that part of §15.2/§15.10 is unchanged — so this hands
+    off to `fetch_video_upload`, which does on the Mac's own (usually much better)
+    downlink what `POST /videos/uploads` used to do inline within the request.
+    """
+
+    if not payload.oss_key.startswith("temporary/raw-uploads/"):
+        raise HTTPException(status_code=422, detail="这个上传凭证不是由本服务签发的。")
+    _validated_video_filename(payload.filename, allow_bundle=True)
+    job_id = repository().enqueue_job(
+        kind="fetch_video_upload",
+        material_id=None,
+        payload={"oss_key": payload.oss_key, "filename": payload.filename},
     )
-    if playlist is None:
-        shutil.rmtree(target, ignore_errors=True)
-        raise HTTPException(
-            status_code=422,
-            detail="这个文件夹里没有播放列表（第一行是 #EXTM3U 的那个文件）。",
-        )
-    return playlist
+    return {"job_id": job_id, "status": "pending"}
 
 
 class CollectionCreate(BaseModel):

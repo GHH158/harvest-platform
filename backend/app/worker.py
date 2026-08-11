@@ -4,6 +4,7 @@ import argparse
 import json
 import shutil
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -24,7 +25,7 @@ from .shadowing import score_transcript
 from .storage import ObjectStorage
 from .text import estimated_segments
 from .tts import TTSService
-from .video import VideoDownloader, VideoProcessor, is_hls_playlist
+from .video import HLSBundleError, VideoDownloader, VideoProcessor, is_hls_playlist, unpack_hls_bundle
 from .vision import VisionService
 from .voice import VideoVoiceExtractor, VoiceEnrollmentService, validate_voice_sample_duration
 
@@ -36,7 +37,15 @@ TRANSLATION_BATCH_SIZE = 40
 # Jobs that legitimately belong to no single material. `split_video` is one because it
 # produces many of them at once (§15.2) — attaching it to any one section would make that
 # section's status and error message stand in for the whole cut.
-STANDALONE_JOB_KINDS = {"shadowing", "voice_enrollment", "voice_enrollment_video", "split_video"}
+STANDALONE_JOB_KINDS = {
+    "shadowing",
+    "voice_enrollment",
+    "voice_enrollment_video",
+    "split_video",
+    # §15.11: relayed through OSS rather than the request body, so no material exists
+    # yet — same reason `split_video` is on this list.
+    "fetch_video_upload",
+}
 
 
 class Worker:
@@ -101,6 +110,8 @@ class Worker:
                 self._enroll_voice(job)
             elif job.kind == "voice_enrollment_video":
                 self._enroll_voice_from_video(job)
+            elif job.kind == "fetch_video_upload":
+                self._fetch_video_upload(job)
             else:
                 raise RuntimeError(f"不支持的任务类型: {job.kind}")
         except Exception as error:  # The error must be persisted for the ingest UI and diagnostics.
@@ -275,6 +286,57 @@ class Worker:
         except Exception:
             duration_ms = None
         self.repository.mark_material_downloaded(job.material_id, duration_ms=duration_ms)
+
+    def _fetch_video_upload(self, job: Job) -> None:
+        """Pull a raw upload down from OSS and land it exactly where §15.2 expects one to
+        already be (§15.11).
+
+        This exists because the phone's own uplink to the Mac over Tailscale is
+        sometimes the bottleneck — §3.3 measured this for HLS *playback*, and the same
+        weak link cuts the other direction for a raw upload. When the phone measures that
+        and picks OSS instead of `POST /videos/uploads`, this job is the other half: OSS
+        has already taken the bytes, so what is slow now is only the Mac's own downlink,
+        which is usually the strong side of a home connection rather than the weak one.
+
+        The result is written into the same `pending-<uuid>` shape that
+        `POST /videos/uploads` produces inline, so `POST /collections` cannot tell which
+        path a given upload took.
+        """
+
+        oss_key = str(job.payload.get("oss_key", ""))
+        filename = str(job.payload.get("filename", ""))
+        if not oss_key.startswith("temporary/raw-uploads/") or not filename:
+            raise RuntimeError("fetch_video_upload 任务缺少来源信息。")
+        self.storage.validate_configuration()
+        # Checked before spending any bandwidth or disk on the download: a direct upload
+        # is checked against this same limit while it streams in, but going through OSS
+        # skips that check entirely until this line runs.
+        size = self.storage.object_size(oss_key)
+        if size > self.settings.max_video_upload_bytes:
+            self.storage.delete(oss_key)
+            raise RuntimeError("视频太大，超出了单次上传的限制。")
+        suffix = Path(filename).suffix.lower() or ".mp4"
+        video_dir = self.settings.data_dir / "video" / "uploads"
+        video_dir.mkdir(parents=True, exist_ok=True)
+        if shutil.disk_usage(video_dir).free < self.settings.min_free_disk_bytes:
+            raise RuntimeError("本机磁盘空间不足，暂不能接收视频。")
+        destination = video_dir / f"pending-{uuid.uuid4().hex}{suffix}"
+        self.storage.download_to_file(oss_key, destination)
+        try:
+            self.storage.delete(oss_key)
+        except Exception as error:
+            print(f"job={job.id} 无法删除临时上传对象: {error}", flush=True)
+        if suffix == ".zip":
+            try:
+                playlist = unpack_hls_bundle(destination)
+            except HLSBundleError as error:
+                destination.unlink(missing_ok=True)
+                raise RuntimeError(str(error)) from error
+            destination.unlink(missing_ok=True)
+            upload_id = str(playlist.relative_to(video_dir))
+        else:
+            upload_id = destination.name
+        self.repository.merge_job_payload(job.id, {"upload_id": upload_id, "filename": filename})
 
     def _split_video(self, job: Job) -> None:
         """Cut one uploaded video into the sections the learner marked on their phone (§15).

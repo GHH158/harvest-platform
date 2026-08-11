@@ -35,12 +35,23 @@ struct VideoSplitView: View {
     enum UploadState: Equatable {
         case idle
         case preparing
-        case uploading(Double)
+        case uploadingDirect(Double)
+        /// §15.11: chosen instead of `uploadingDirect` when a quick probe finds the
+        /// direct-to-Mac path too slow (measured, not guessed from Wi-Fi vs. cellular).
+        case uploadingViaOSS(Double)
+        /// The phone is done sending bytes; the Mac is now pulling the object back from
+        /// OSS and unpacking it. No fraction to show — only that it is still happening.
+        case processingOnMac
         case ready(String)
         case failed(String)
 
         var handle: String? { if case let .ready(id) = self { id } else { nil } }
-        var fraction: Double? { if case let .uploading(value) = self { value } else { nil } }
+        var fraction: Double? {
+            switch self {
+            case let .uploadingDirect(value), let .uploadingViaOSS(value): value
+            default: nil
+            }
+        }
     }
 
     var body: some View {
@@ -99,8 +110,14 @@ struct VideoSplitView: View {
             EmptyView()
         case .preparing:
             stripLabel("正在打包…", fraction: nil)
-        case let .uploading(fraction):
+        case let .uploadingDirect(fraction):
             stripLabel("正在传给 Mac \(Int(fraction * 100))%", fraction: fraction)
+        case let .uploadingViaOSS(fraction):
+            // §15.11: honest about the detour — "传给 Mac" would be wrong here, and
+            // silently keeping the old label would hide why this run is slower to start.
+            stripLabel("网络不够快，改走云端 \(Int(fraction * 100))%", fraction: fraction)
+        case .processingOnMac:
+            stripLabel("已传到云端，Mac 正在取回…", fraction: nil)
         case .ready:
             stripLabel("已传完，可以存了", fraction: 1)
         case let .failed(message):
@@ -528,9 +545,16 @@ struct VideoSplitView: View {
         do {
             let uploadURL = try await source.uploadableCopy()
             let client = APIClient(baseURL: endpoint)
-            upload = .uploading(0)
-            let handle = try await client.uploadVideoForSplit(uploadURL) { fraction in
-                Task { @MainActor in upload = .uploading(fraction) }
+            let handle: VideoUploadHandle
+            // §15.11: measured, not guessed — a phone can be on Wi-Fi far from the Mac and
+            // still be the slow case, or on cellular with a good direct connection.
+            if await client.probeUploadSpeedIsAdequate() {
+                upload = .uploadingDirect(0)
+                handle = try await client.uploadVideoForSplit(uploadURL) { fraction in
+                    Task { @MainActor in upload = .uploadingDirect(fraction) }
+                }
+            } else {
+                handle = try await uploadViaOSS(client: client, fileURL: uploadURL)
             }
             if uploadURL != source.playbackURL {
                 try? FileManager.default.removeItem(at: uploadURL)
@@ -539,6 +563,49 @@ struct VideoSplitView: View {
         } catch {
             upload = .failed(error.localizedDescription)
         }
+    }
+
+    /// The detour when the direct path measured too slow: `PUT` straight to OSS, tell the
+    /// Mac what to go fetch, then wait for it to come back with the same `upload_id` shape
+    /// the direct path would have produced (§15.11).
+    @MainActor private func uploadViaOSS(client: APIClient, fileURL: URL) async throws -> VideoUploadHandle {
+        let filename = fileURL.lastPathComponent.isEmpty ? "video.mp4" : fileURL.lastPathComponent
+        let ticket = try await client.requestOSSUploadURL(filename: filename)
+        upload = .uploadingViaOSS(0)
+        try await client.putFileToOSS(fileURL, to: ticket.uploadURL) { fraction in
+            Task { @MainActor in upload = .uploadingViaOSS(fraction) }
+        }
+        let jobID = try await client.notifyOSSUpload(ossKey: ticket.ossKey, filename: filename)
+        upload = .processingOnMac
+        return try await pollFetchJob(client: client, jobID: jobID, fallbackFilename: filename)
+    }
+
+    /// The Mac's downlink is usually far better than the phone's uplink through Tailscale
+    /// was, but it is still a real download-then-unpack step, not instant — polled rather
+    /// than pushed because nothing here needs to be faster than "check back in a couple
+    /// seconds" (§15.11).
+    private func pollFetchJob(
+        client: APIClient,
+        jobID: Int,
+        fallbackFilename: String
+    ) async throws -> VideoUploadHandle {
+        // 900 × 2s = 30 minutes — generous for an hour-long bundle on a home downlink,
+        // which is the side doing the work once OSS already has the bytes.
+        for _ in 0..<900 {
+            let status = try await client.fetchUploadJobStatus(id: jobID)
+            switch status.status {
+            case "done":
+                guard let uploadID = status.payload?.uploadID else {
+                    throw APIClientError.server("Mac 处理完了，但没有给出上传编号。")
+                }
+                return VideoUploadHandle(uploadID: uploadID, filename: status.payload?.filename ?? fallbackFilename)
+            case "failed":
+                throw APIClientError.server(status.errorMessage ?? "Mac 取回上传失败。")
+            default:
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+        throw APIClientError.server("Mac 处理超时，请稍后在素材库确认是否已到。")
     }
 
     @MainActor private func save() async {

@@ -1,3 +1,7 @@
+import zipfile
+from pathlib import Path
+
+import pytest
 from app.config import Settings
 from app.repository import Job
 from app.worker import Worker, extract_article_html
@@ -70,3 +74,129 @@ def test_url_fetch_keeps_a_user_supplied_title(monkeypatch) -> None:
     )
 
     assert repository.updated_title is None
+
+
+# --- §15.11: fetching a raw upload back from OSS when the phone chose that path ---
+
+
+class FetchUploadRepository:
+    def __init__(self) -> None:
+        self.merged: tuple[int, dict] | None = None
+
+    def merge_job_payload(self, job_id: int, values: dict) -> None:
+        self.merged = (job_id, values)
+
+
+class RecordingFetchStorage:
+    def __init__(self, size: int, written: bytes) -> None:
+        self.size = size
+        self.written = written
+        self.downloaded: tuple[str, str] | None = None
+        self.deleted: str | None = None
+        self.validated = False
+
+    def validate_configuration(self) -> None:
+        self.validated = True
+
+    def object_size(self, oss_key: str) -> int:
+        return self.size
+
+    def download_to_file(self, oss_key: str, destination: Path) -> None:
+        self.downloaded = (oss_key, str(destination))
+        destination.write_bytes(self.written)
+
+    def delete(self, oss_key: str) -> None:
+        self.deleted = oss_key
+
+
+def test_fetch_video_upload_unpacks_a_zip_bundle_and_records_the_upload_id(tmp_path: Path) -> None:
+    archive_bytes_path = tmp_path / "source-for-bytes.zip"
+    with zipfile.ZipFile(archive_bytes_path, "w") as bundle:
+        bundle.writestr("play", "#EXTM3U\n#EXTINF:6,\nTZhO-00000\n#EXT-X-ENDLIST\n")
+        bundle.writestr("TZhO-00000", "segment-bytes")
+    zip_bytes = archive_bytes_path.read_bytes()
+
+    repository = FetchUploadRepository()
+    worker = Worker(repository, Settings(data_dir=tmp_path, min_free_disk_bytes=0))
+    worker.storage = RecordingFetchStorage(size=len(zip_bytes), written=zip_bytes)
+
+    worker._fetch_video_upload(
+        Job(
+            id=5,
+            kind="fetch_video_upload",
+            material_id=None,
+            payload={"oss_key": "temporary/raw-uploads/abc.zip", "filename": "下载的HLS.zip"},
+            attempts=1,
+        )
+    )
+
+    assert worker.storage.validated
+    assert worker.storage.downloaded[0] == "temporary/raw-uploads/abc.zip"
+    assert worker.storage.deleted == "temporary/raw-uploads/abc.zip"
+    assert repository.merged is not None
+    job_id, values = repository.merged
+    assert job_id == 5
+    assert values["filename"] == "下载的HLS.zip"
+    video_dir = tmp_path / "video" / "uploads"
+    upload_id = Path(values["upload_id"])
+    assert (video_dir / upload_id).exists()
+    assert (video_dir / upload_id).read_text(encoding="utf-8").startswith("#EXTM3U")
+    # The zip itself is gone once unpacked — only the extracted folder remains.
+    assert not list(video_dir.glob("pending-*.zip"))
+
+
+def test_fetch_video_upload_keeps_a_plain_video_file_as_is(tmp_path: Path) -> None:
+    repository = FetchUploadRepository()
+    worker = Worker(repository, Settings(data_dir=tmp_path, min_free_disk_bytes=0))
+    worker.storage = RecordingFetchStorage(size=4, written=b"1234")
+
+    worker._fetch_video_upload(
+        Job(
+            id=6,
+            kind="fetch_video_upload",
+            material_id=None,
+            payload={"oss_key": "temporary/raw-uploads/abc.mp4", "filename": "旅行.mp4"},
+            attempts=1,
+        )
+    )
+
+    _, values = repository.merged
+    video_dir = tmp_path / "video" / "uploads"
+    saved = video_dir / values["upload_id"]
+    assert saved.exists()
+    assert saved.read_bytes() == b"1234"
+    assert saved.name.startswith("pending-") and saved.suffix == ".mp4"
+
+
+def test_fetch_video_upload_rejects_an_oversized_object_without_downloading_it(tmp_path: Path) -> None:
+    repository = FetchUploadRepository()
+    worker = Worker(
+        repository,
+        Settings(data_dir=tmp_path, min_free_disk_bytes=0, max_video_upload_bytes=100),
+    )
+    storage = RecordingFetchStorage(size=200, written=b"x" * 200)
+    worker.storage = storage
+
+    with pytest.raises(RuntimeError, match="太大"):
+        worker._fetch_video_upload(
+            Job(
+                id=7,
+                kind="fetch_video_upload",
+                material_id=None,
+                payload={"oss_key": "temporary/raw-uploads/big.mp4", "filename": "big.mp4"},
+                attempts=1,
+            )
+        )
+
+    assert storage.downloaded is None
+    assert storage.deleted == "temporary/raw-uploads/big.mp4"
+    assert repository.merged is None
+
+
+def test_fetch_video_upload_rejects_a_job_missing_source_info(tmp_path: Path) -> None:
+    worker = Worker(FetchUploadRepository(), Settings(data_dir=tmp_path, min_free_disk_bytes=0))
+
+    with pytest.raises(RuntimeError, match="缺少来源信息"):
+        worker._fetch_video_upload(
+            Job(id=8, kind="fetch_video_upload", material_id=None, payload={}, attempts=1)
+        )

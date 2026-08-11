@@ -189,3 +189,57 @@ class ObjectStorage:
         self.validate_configuration()
         assert self.settings.oss_public_base_url  # Narrowed by validate_configuration.
         return f"{self.settings.oss_public_base_url.rstrip('/')}/{quote(oss_key)}"
+
+    def presigned_put_url(self, oss_key: str, *, expires_in: int) -> str:
+        """A URL the phone can `PUT` a raw file to directly, bypassing the Mac (§15.11).
+
+        No `Content-Type` is folded into the signature on purpose: OSS's classic
+        signing includes whatever headers were passed here, and if the phone's actual
+        `PUT` sends a header this call didn't sign for, the request is rejected outright.
+        Leaving both sides silent about `Content-Type` is the only way to keep "sign a
+        URL" and "use it" from drifting out of sync.
+        """
+
+        self.validate_configuration()
+        return self._bucket().sign_url("PUT", oss_key, expires_in)
+
+    def object_size(self, oss_key: str) -> int:
+        """How big the object at `oss_key` actually is, straight from OSS.
+
+        Called before `download_to_file` (§15.11): a direct multipart upload is checked
+        against `max_video_upload_bytes` while it streams in, but a phone that went
+        through OSS instead skips that check entirely — this is where it happens instead,
+        before the Mac spends any bandwidth or disk pulling the object down.
+        """
+
+        self.validate_configuration()
+        return int(self._bucket().head_object(oss_key).content_length)
+
+    def download_to_file(self, oss_key: str, destination: Path) -> None:
+        """Pull an object down to local disk, with the same retry policy as uploads.
+
+        The Mac's own downlink is doing this, not the phone's uplink — that asymmetry is
+        the entire point of §15.11: a residential connection's upload side is usually the
+        weak one, and OSS's ingress from a mobile network is usually much stronger than a
+        home connection's ingress from Tailscale.
+        """
+
+        last_error: Exception | None = None
+        for attempt in range(1, self.settings.oss_upload_max_attempts + 1):
+            try:
+                self._bucket().get_object_to_file(oss_key, str(destination))
+                return
+            except Exception as error:
+                if not self._is_retryable(error) or attempt >= self.settings.oss_upload_max_attempts:
+                    raise
+                last_error = error
+                self._bucket_instance = None
+                delay = min(2 ** (attempt - 1), 8)
+                print(
+                    f"OSS 下载暂时失败，{delay} 秒后重试 {attempt + 1}/"
+                    f"{self.settings.oss_upload_max_attempts}: {oss_key}: {error}",
+                    flush=True,
+                )
+                time.sleep(delay)
+        assert last_error is not None  # pragma: no cover - loop either returns or raises.
+        raise last_error

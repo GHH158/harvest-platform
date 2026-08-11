@@ -141,6 +141,85 @@ class LifecycleRecordingBucket:
         return SimpleNamespace(status=200)
 
 
+class SigningBucket:
+    def __init__(self) -> None:
+        self.signed: tuple[str, str, int] | None = None
+
+    def sign_url(self, method: str, key: str, expires: int) -> str:
+        self.signed = (method, key, expires)
+        return f"https://oss-cn-beijing.aliyuncs.com/harvest-test/{key}?Signature=fake&Expires={expires}"
+
+
+def test_presigned_put_url_signs_a_put_without_content_type(monkeypatch) -> None:
+    # §15.11: no headers are passed to `sign_url` on purpose — the phone's actual `PUT`
+    # sends none either, and OSS rejects a presigned request whose headers do not match
+    # exactly what was signed.
+    bucket = SigningBucket()
+    storage = ObjectStorage(
+        Settings(
+            oss_endpoint="https://oss-cn-beijing.aliyuncs.com",
+            oss_bucket="harvest-test",
+            oss_access_key_id="id",
+            oss_access_key_secret="secret",
+            oss_public_base_url="https://media.example",
+        )
+    )
+    monkeypatch.setattr(storage, "_bucket", lambda: bucket)
+
+    url = storage.presigned_put_url("temporary/raw-uploads/abc.zip", expires_in=21_600)
+
+    assert bucket.signed == ("PUT", "temporary/raw-uploads/abc.zip", 21_600)
+    assert url == bucket.sign_url("PUT", "temporary/raw-uploads/abc.zip", 21_600)
+
+
+def test_object_size_reads_content_length_from_head_object(monkeypatch) -> None:
+    class HeadingBucket:
+        def head_object(self, key: str) -> SimpleNamespace:
+            assert key == "temporary/raw-uploads/abc.zip"
+            return SimpleNamespace(content_length=123_456)
+
+    storage = ObjectStorage(Settings())
+    monkeypatch.setattr(storage, "_bucket", lambda: HeadingBucket())
+
+    assert storage.object_size("temporary/raw-uploads/abc.zip") == 123_456
+
+
+def test_download_to_file_retries_a_transient_error_then_succeeds(monkeypatch, tmp_path: Path) -> None:
+    class FlakyDownloadBucket:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def get_object_to_file(self, key: str, path: str) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise oss2.exceptions.RequestError(TimeoutError("timed out"))
+            Path(path).write_bytes(b"downloaded")
+
+    bucket = FlakyDownloadBucket()
+    storage = ObjectStorage(Settings(oss_upload_max_attempts=2))
+    monkeypatch.setattr(storage, "_bucket", lambda: bucket)
+    monkeypatch.setattr("app.storage.time.sleep", lambda _: None)
+    destination = tmp_path / "pending-abc.zip"
+
+    storage.download_to_file("temporary/raw-uploads/abc.zip", destination)
+
+    assert bucket.attempts == 2
+    assert destination.read_bytes() == b"downloaded"
+
+
+def test_download_to_file_gives_up_after_exhausting_retries(monkeypatch, tmp_path: Path) -> None:
+    class AlwaysFailingBucket:
+        def get_object_to_file(self, key: str, path: str) -> None:
+            raise oss2.exceptions.RequestError(TimeoutError("timed out"))
+
+    storage = ObjectStorage(Settings(oss_upload_max_attempts=2))
+    monkeypatch.setattr(storage, "_bucket", lambda: AlwaysFailingBucket())
+    monkeypatch.setattr("app.storage.time.sleep", lambda _: None)
+
+    with pytest.raises(oss2.exceptions.RequestError):
+        storage.download_to_file("temporary/raw-uploads/abc.zip", tmp_path / "pending-abc.zip")
+
+
 def test_lifecycle_rules_preserve_unrelated_rules_and_never_match_delivery(monkeypatch) -> None:
     bucket = LifecycleRecordingBucket()
     storage = ObjectStorage(
