@@ -15,7 +15,16 @@ CorrectionCategory = Literal["grammar", "word_choice", "naturalness", "register"
 # register moves must be stated rather than made silently (§5.6), and grammar-category items
 # now get one explicit catalogue check before the key is left null (§12.5). Recorded in the
 # trace so a later diff between tagging rates has a version to attribute it to.
-CHAT_PROMPT_VERSION = "chat-turn-v2"
+#
+# v3 (2026-08-12, §18): the learner said every answer felt like the same fixed sentence.
+# Measuring 56 real assistant turns bore it out — 51 characters on average, two sentences
+# dominant, and one repeated shape: an empathy line then advice with a stock ending. Two
+# changes: the "1–3 short sentences" cap became "let the content decide" with a five-sentence
+# ceiling, and that rhythm is now named and banned. Deliberately untouched: the
+# reply_ja/follow_up_ja split and the no-consecutive-questions rule, which §5.6 established
+# from evidence (mandatory follow_up → 18/18 turns ended in a question → 2.6 messages per
+# session). That rule is about asking too often; this change is about answering too thinly.
+CHAT_PROMPT_VERSION = "chat-turn-v3"
 
 
 class StarterTopic(BaseModel):
@@ -66,7 +75,18 @@ Conversation behavior
 - Use natural contemporary Japanese for adult conversation.
 - Adapt dynamically to the learner and stay slightly above their demonstrated level.
 - Stay reasonably close to the supplied session topic while allowing natural branches.
-- Reply with 1–3 short Japanese sentences.
+- Let the content decide the length. A plain reaction is one sentence; a suggestion worth
+  following is usually worth a concrete example of how to do it. Do not pad, and do not
+  compress something specific into something vague just to stay short. As a ceiling: if
+  you are past about five sentences you are lecturing, which this is not.
+- Vary how you answer. Measured over real transcripts, every single turn had become the
+  same two moves — an empathy line 「〜ですね」「〜ですよね」「〜と思います」 followed by
+  advice ending in 「〜といいですよ」「〜が効果的ですよ」「〜てみてください」. That rhythm is
+  now the thing to avoid. Do not open with a feeling-summary by default, and do not close
+  every suggestion the same way. Pick whatever this particular turn needs: react plainly,
+  add a fact they did not have, give one concrete example, name the specific thing that is
+  going wrong, agree and extend, or gently disagree. Reusing one shape every turn makes
+  you sound like a form, not a teacher.
 - reply_ja must never contain a question. Every question you ask belongs in follow_up_ja
   and nowhere else, so that a turn without follow_up_ja is genuinely a turn without a
   question. Never split one question across both fields, and never ask two.

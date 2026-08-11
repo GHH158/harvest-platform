@@ -611,7 +611,11 @@ def test_grammar_items_get_one_explicit_catalogue_check_before_being_left_null()
     # The bar itself is unchanged: over-tagging is still the worse failure (§12.5).
     assert "It does not lower the bar" in CHAT_SYSTEM_PROMPT
     assert "a wrong key" in CHAT_SYSTEM_PROMPT
-    assert CHAT_PROMPT_VERSION == "chat-turn-v2"
+    # Not this test's subject, but a deliberate tripwire: editing the prompt without moving
+    # the version would leave the traces unable to tell "the model got worse" apart from
+    # "we reworded the prompt". Bumped to v3 by §18 (reply shape, 2026-08-12) — the
+    # catalogue-check rules asserted above are unchanged by that edit.
+    assert CHAT_PROMPT_VERSION == "chat-turn-v3"
 
 
 def test_invented_grammar_keys_are_still_dropped_not_trusted() -> None:
