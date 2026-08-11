@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A00000000000000000000039 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000039 /* HomeView.swift */; };
 		A0000000000000000000003A /* AskView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003A /* AskView.swift */; };
+		A0000000000000000000040 /* LocalMediaServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000040 /* LocalMediaServer.swift */; };
 		A000000000000000000003F /* CollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000003F /* CollectionView.swift */; };
 		A000000000000000000003E /* SplitSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000003E /* SplitSource.swift */; };
 		A000000000000000000003D /* VideoSplitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000003D /* VideoSplitView.swift */; };
@@ -57,6 +58,7 @@
 /* Begin PBXFileReference section */
 		A10000000000000000000039 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		A1000000000000000000003A /* AskView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskView.swift; sourceTree = "<group>"; };
+		A1000000000000000000040 /* LocalMediaServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalMediaServer.swift; sourceTree = "<group>"; };
 		A100000000000000000003F /* CollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectionView.swift; sourceTree = "<group>"; };
 		A100000000000000000003E /* SplitSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitSource.swift; sourceTree = "<group>"; };
 		A100000000000000000003D /* VideoSplitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoSplitView.swift; sourceTree = "<group>"; };
@@ -127,6 +129,7 @@
 				A10000000000000000000001 /* HarvestApp.swift */,
 				A1000000000000000000003B /* CompanionSheet.swift */,
 				A1000000000000000000003A /* AskView.swift */,
+				A1000000000000000000040 /* LocalMediaServer.swift */,
 				A100000000000000000003F /* CollectionView.swift */,
 				A100000000000000000003E /* SplitSource.swift */,
 				A100000000000000000003D /* VideoSplitView.swift */,
@@ -262,6 +265,7 @@
 				A00000000000000000000001 /* HarvestApp.swift in Sources */,
 				A0000000000000000000003B /* CompanionSheet.swift in Sources */,
 				A0000000000000000000003A /* AskView.swift in Sources */,
+				A0000000000000000000040 /* LocalMediaServer.swift in Sources */,
 				A000000000000000000003F /* CollectionView.swift in Sources */,
 				A000000000000000000003E /* SplitSource.swift in Sources */,
 				A000000000000000000003D /* VideoSplitView.swift in Sources */,

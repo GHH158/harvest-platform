@@ -26,6 +26,11 @@ struct VideoSplitView: View {
     @State private var isChoosingFile = false
     @State private var isConfirmingSave = false
     @State private var timeObserver: Any?
+    @State private var statusObserver: NSKeyValueObservation?
+    /// §15.10: HLS needs an HTTP origin, so a bundle is served from loopback while this
+    /// screen is open. Held here so releasing the state also closes the socket.
+    @State private var server: LocalMediaServer?
+    @Environment(\.scenePhase) private var scenePhase
 
     enum UploadState: Equatable {
         case idle
@@ -74,6 +79,15 @@ struct VideoSplitView: View {
             Text("切错了就得从手机重新传一遍。要留原片的话现在取消。")
         }
         .onDisappear { teardown() }
+        // iOS suspends the process in the background and the listener stops accepting, so
+        // coming back would otherwise show a frame that silently never plays again — the same
+        // class of quiet failure that cost an hour to find in the first place.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, let source, case .hlsBundle = source.kind else { return }
+            guard server?.isRunning != true else { return }
+            let resumeAt = position
+            Task { await attachPlayback(for: source, resumingAt: resumeAt) }
+        }
     }
 
     // MARK: - Upload strip
@@ -162,6 +176,12 @@ struct VideoSplitView: View {
                         .aspectRatio(16 / 9, contentMode: .fit)
                         .clipShape(RoundedRectangle(cornerRadius: 14))
                 }
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(DesignTokens.accent)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 transport
                 timeline
                 cutButton
@@ -174,11 +194,6 @@ struct VideoSplitView: View {
                     .overlay {
                         RoundedRectangle(cornerRadius: 14).stroke(DesignTokens.separator, lineWidth: 0.5)
                     }
-                if let errorMessage {
-                    Text(errorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(DesignTokens.accent)
-                }
                 saveButton
             }
             .padding(20)
@@ -251,7 +266,16 @@ struct VideoSplitView: View {
             }
             .frame(height: 30)
             .contentShape(Rectangle())
-            .onTapGesture { location in seek(to: duration * Double(location.x / max(1, width))) }
+            // One gesture for tapping and for dragging (`minimumDistance: 0`), for two
+            // reasons. Tapping alone made dragging feel dead, and dragging is the gesture you
+            // reach for when you want to land on an exact moment. And a drag that starts near
+            // the left edge — which is where the playhead sits at 0:00 — was being taken by
+            // the system's back swipe: the screen popped and every cut went with it. Claiming
+            // the touch here keeps that from happening.
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in seek(to: duration * Double(value.location.x / max(1, width))) }
+            )
         }
         .frame(height: 30)
     }
@@ -374,17 +398,47 @@ struct VideoSplitView: View {
             source = resolved
             title = resolved.suggestedTitle
             errorMessage = nil
-            attachPlayer(to: resolved.playbackURL)
-            Task { await beginUpload() }
+            Task {
+                await attachPlayback(for: resolved, resumingAt: 0)
+                await beginUpload()
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    private func attachPlayer(to url: URL) {
+    /// A single file plays straight from disk; a bundle goes through loopback HTTP because
+    /// `AVPlayer` will not open an HLS playlist over `file://` (§15.10). The plain path is
+    /// deliberately left alone — giving the working case a new dependency buys nothing.
+    @MainActor private func attachPlayback(for resolved: SplitSource, resumingAt seconds: Double) async {
+        switch resolved.kind {
+        case .movie:
+            attachPlayer(to: resolved.playbackURL, resumingAt: seconds)
+        case let .hlsBundle(playlist):
+            do {
+                let running = server ?? LocalMediaServer()
+                server = running
+                let base = try await running.start(serving: playlist.deletingLastPathComponent())
+                attachPlayer(to: base.appendingPathComponent(playlist.lastPathComponent), resumingAt: seconds)
+            } catch {
+                errorMessage = "本机播放服务起不来：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func attachPlayer(to url: URL, resumingAt seconds: Double = 0) {
         let item = AVPlayerItem(url: url)
         let created = AVPlayer(playerItem: item)
         player = created
+        // Without this the failure mode was a black rectangle and no explanation — the
+        // learner could not tell a broken bundle from a slow one.
+        statusObserver = item.observe(\.status, options: [.new]) { observed, _ in
+            guard observed.status == .failed else { return }
+            let reason = observed.error?.localizedDescription ?? "这个视频播不出来。"
+            Task { @MainActor in
+                errorMessage = "播不出来：\(reason)"
+            }
+        }
         timeObserver = created.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.05, preferredTimescale: 600),
             queue: .main
@@ -394,10 +448,25 @@ struct VideoSplitView: View {
                 duration = total
             }
         }
+        if seconds > 0 {
+            created.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
+            position = seconds
+        }
         Task {
             // Duration for an HLS playlist is not available synchronously.
-            if let total = try? await item.asset.load(.duration).seconds, total.isFinite, total > 0 {
-                await MainActor.run { duration = total }
+            do {
+                let total = try await item.asset.load(.duration).seconds
+                if total.isFinite, total > 0 {
+                    await MainActor.run { duration = total }
+                    return
+                }
+                await MainActor.run {
+                    errorMessage = "读不到这个视频的时长，没法按时间切。"
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = "播不出来：\(error.localizedDescription)"
+                }
             }
         }
     }
@@ -496,6 +565,13 @@ struct VideoSplitView: View {
             player.removeTimeObserver(timeObserver)
         }
         timeObserver = nil
+        statusObserver?.invalidate()
+        statusObserver = nil
+        // Explicit stop, and dropping the reference runs `deinit` as a second line of
+        // defence in case SwiftUI never delivers `onDisappear`. Either way the socket cannot
+        // outlive the process (§15.10).
+        server?.stop()
+        server = nil
         player?.pause()
         player = nil
         source?.releaseAccess()
