@@ -72,11 +72,29 @@ struct WordLookupSheet: View {
             .navigationTitle(word)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if materialID != nil {
+                    ToolbarItem(placement: .topBarLeading) {
+                        flagButton
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }
                         .foregroundStyle(DesignTokens.accent)
                 }
             }
+            .overlay(alignment: .top) {
+                if let flagError {
+                    Text(flagError)
+                        .font(.caption)
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(DesignTokens.ink.opacity(0.85), in: Capsule())
+                        .padding(.horizontal, DesignTokens.pageInset)
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: flagError)
             .task { await lookup() }
         }
         .presentationDetents([.medium, .large])
@@ -248,47 +266,42 @@ struct WordLookupSheet: View {
                     .foregroundStyle(DesignTokens.muted)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
-
-            if materialID != nil {
-                flagSection
-            }
         }
     }
 
-    /// §16:查完词之后,顺手把它收纳进这一课的疑问清单,读完再一次性去问老师。跟"加入
-    /// 生词表"是两件独立的事——生词表是长期记忆,这里是一次性的待办。
+    /// §16:收纳进这一课的疑问清单,读完再一次性去问老师。跟"加入生词表"是两件独立的
+    /// 事——生词表是长期记忆,这里是一次性的待办。
+    ///
+    /// 放在工具栏而不是正文底部:设计要求点词之后"一键"收纳,而底部按钮要先滚过释义、
+    /// 例句和"加入生词表"才够得着,实测两屏,等于没有。放这里还顺带覆盖了查词失败的
+    /// 情况——查不到的词才最该问老师,而那时正文区只有一个"重试"。
+    /// 图标 + 文字都要显示:工具栏里的 `Label` 默认会被压成纯图标,而"收纳"是这个应用
+    /// 自己的说法,不是通用图标语言,第一次见到认不出来。
     @ViewBuilder
-    private var flagSection: some View {
+    private var flagButton: some View {
         if flagged {
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(DesignTokens.accent)
-                Text("已收纳，之后问老师")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(DesignTokens.accent)
+                Text("已收纳")
             }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(DesignTokens.accent)
         } else {
             Button {
                 Task { await flag() }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     if isFlagging {
-                        ProgressView().controlSize(.small)
+                        ProgressView().controlSize(.small).tint(DesignTokens.accent)
                     } else {
                         Image(systemName: "tray.and.arrow.down")
                     }
-                    Text(isFlagging ? "正在收纳…" : "收纳，之后问老师")
+                    Text("收纳")
                 }
+                .font(.subheadline.weight(.medium))
             }
-            .buttonStyle(.plain)
             .foregroundStyle(DesignTokens.accent)
             .disabled(isFlagging)
-        }
-        if let flagError {
-            Text(flagError)
-                .font(.caption)
-                .foregroundStyle(DesignTokens.accent)
-                .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
