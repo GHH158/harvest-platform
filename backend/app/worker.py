@@ -285,6 +285,12 @@ class Worker:
             duration_ms = audio_duration_ms(asr_audio)
         except Exception:
             duration_ms = None
+        self.repository.store_downloaded_video_assets(
+            job.material_id,
+            video_directory=str(video_directory),
+            audio_directory=str(audio_directory),
+            asr_audio_path=str(asr_audio),
+        )
         self.repository.mark_material_downloaded(job.material_id, duration_ms=duration_ms)
 
     def _fetch_video_upload(self, job: Job) -> None:
@@ -383,6 +389,12 @@ class Worker:
                     duration_ms = audio_duration_ms(asr_audio)
                 except Exception:
                     duration_ms = None if end_ms is None else end_ms - start_ms
+                self.repository.store_downloaded_video_assets(
+                    material_id,
+                    video_directory=str(video_directory),
+                    audio_directory=str(audio_directory),
+                    asr_audio_path=str(asr_audio),
+                )
                 self.repository.mark_material_downloaded(material_id, duration_ms=duration_ms)
             except Exception as error:
                 # One bad section must not cost the others. It stays failed and retryable
@@ -454,6 +466,7 @@ class Worker:
             audio_playlist_path=str(audio_playlist),
             video_playlist_key=video_playlist_key,
             audio_playlist_key=audio_playlist_key,
+            asr_audio_path=str(asr_audio),
         )
         self.repository.enqueue_job(
             kind="asr_video",

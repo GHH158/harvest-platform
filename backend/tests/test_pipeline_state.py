@@ -25,6 +25,7 @@ class PipelineRepository:
         self.transcode_payload: dict[str, Any] | None = None
         self.tokens: list[dict[str, Any]] | None = None
         self.video_assets: dict[str, Any] | None = None
+        self.downloaded_video_assets: list[tuple[int, dict[str, Any]]] = []
         self.video_segments: list[dict[str, Any]] | None = None
         self.video_ready: list[int] = []
         self.translation_batches: list[tuple[int, int]] = []
@@ -91,6 +92,9 @@ class PipelineRepository:
 
     def store_video_assets(self, **values: Any) -> None:
         self.video_assets = values
+
+    def store_downloaded_video_assets(self, material_id: int, **values: Any) -> None:
+        self.downloaded_video_assets.append((material_id, values))
 
     def replace_video_segments(self, material_id: int, segments: list[dict[str, Any]]) -> None:
         self.video_segments = segments
@@ -316,6 +320,8 @@ class FakeVideoProcessor:
         audio_directory: Path,
         *,
         direct_video_copy: bool = False,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> str:
         for directory in (video_directory, audio_directory):
             directory.mkdir(parents=True, exist_ok=True)
@@ -323,7 +329,9 @@ class FakeVideoProcessor:
             (directory / "segment-00000.ts").write_bytes(b"segment")
         return "copy" if direct_video_copy else "videotoolbox"
 
-    def extract_audio(self, source: Path, destination: Path) -> None:
+    def extract_audio(
+        self, source: Path, destination: Path, *, start_ms: int | None = None, end_ms: int | None = None
+    ) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"audio")
 
@@ -485,6 +493,19 @@ def test_video_pipeline_stops_after_local_transcode(tmp_path: Path) -> None:
     assert repository.failed == []
     assert repository.video_assets is None
     assert worker.storage.uploads == []  # type: ignore[attr-defined]
+    # §15.7's local-file purge can only find what's registered here — a material deleted
+    # before its 转录 step would otherwise leave hls-video/hls-audio/asr-audio.m4a orphaned
+    # on disk forever, because `store_video_assets` does not run until upload time.
+    assert repository.downloaded_video_assets == [
+        (
+            7,
+            {
+                "video_directory": str(tmp_path / "video" / "material-7" / "hls-video"),
+                "audio_directory": str(tmp_path / "video" / "material-7" / "hls-audio"),
+                "asr_audio_path": str(tmp_path / "video" / "material-7" / "asr-audio.m4a"),
+            },
+        )
+    ]
 
 
 def test_video_link_download_stops_after_local_transcode(tmp_path: Path) -> None:
@@ -510,6 +531,47 @@ def test_video_link_download_stops_after_local_transcode(tmp_path: Path) -> None
     assert repository.updated_title == (7, "下载到的标题")
     assert repository.downloaded == [7]
     assert worker.storage.uploads == []  # type: ignore[attr-defined]
+
+
+def test_split_video_registers_local_assets_for_every_section(tmp_path: Path) -> None:
+    # §15.7's local-file purge (`_purge_material_media`) can only delete what a material's
+    # media_asset rows point it at. Before this registration existed, a section deleted
+    # while still `downloaded` (untranscribed — §15.6's default resting state) left its
+    # hls-video/hls-audio/asr-audio.m4a permanently orphaned on disk, because nothing wrote
+    # local_path into media_asset until upload time.
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    job = Job(
+        id=1,
+        kind="split_video",
+        material_id=None,
+        payload={
+            "source_path": str(source),
+            "sections": [
+                {"material_id": 40, "index": 1, "start_ms": 0, "end_ms": 10_000},
+                {"material_id": 41, "index": 2, "start_ms": 10_000, "end_ms": None},
+            ],
+        },
+        attempts=1,
+    )
+    repository = PipelineRepository([job])
+    worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
+    worker.video = FakeVideoProcessor()  # type: ignore[assignment]
+    worker.storage = FakeStorage()  # type: ignore[assignment]
+
+    while worker.run_one():
+        pass
+
+    assert repository.failed == []
+    assert repository.downloaded == [40, 41]
+    assert [material_id for material_id, _ in repository.downloaded_video_assets] == [40, 41]
+    for material_id, values in repository.downloaded_video_assets:
+        output_dir = tmp_path / "video" / f"material-{material_id}"
+        assert values == {
+            "video_directory": str(output_dir / "hls-video"),
+            "audio_directory": str(output_dir / "hls-audio"),
+            "asr_audio_path": str(output_dir / "asr-audio.m4a"),
+        }
 
 
 def test_manual_transcription_chain_completes_pipeline(tmp_path: Path) -> None:
@@ -551,6 +613,10 @@ def test_manual_transcription_chain_completes_pipeline(tmp_path: Path) -> None:
     assert repository.video_assets is not None
     assert repository.video_assets["video_playlist_key"].endswith("/hls/video/index.m3u8")
     assert repository.video_assets["audio_playlist_key"].endswith("/hls/audio/index.m3u8")
+    # §15.7: without re-registering this at upload time, store_video_assets's own blanket
+    # DELETE would remove the row store_downloaded_video_assets wrote pre-upload and leave
+    # nothing behind — the local ASR audio file would go back to being un-findable.
+    assert repository.video_assets["asr_audio_path"] == str(asr_audio)
     assert repository.video_segments == [
         {"idx": 0, "text_ja": "これは。", "start_ms": 0, "end_ms": 1_200}
     ]

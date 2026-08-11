@@ -1712,6 +1712,53 @@ class Repository:
                 {"material_id": material_id, "duration_ms": duration_ms},
             )
 
+    def store_downloaded_video_assets(
+        self,
+        material_id: int,
+        *,
+        video_directory: str,
+        audio_directory: str,
+        asr_audio_path: str,
+    ) -> None:
+        """Registers the local HLS/ASR files a transcode produces, *before* upload.
+
+        `_transcode_video` and `_split_video` stop at `status='downloaded'` — §15.6 lets a
+        section sit untranscribed indefinitely — but until this method existed nothing
+        wrote these paths into `media_asset` until `store_video_assets` ran at upload time.
+        `_purge_material_media` (§15.7) only ever deletes paths it can find there, so a
+        material deleted before its 转录 step left `hls-video/`, `hls-audio/` and
+        `asr-audio.m4a` orphaned on disk forever. `oss_key` stays NULL: nothing has reached
+        OSS yet at this point. Same delete-then-insert shape as `store_video_assets` so a
+        retried transcode does not accumulate duplicate rows, and so the later upload (which
+        also uses that shape) cleanly supersedes these rows rather than colliding with them.
+        """
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM media_asset WHERE material_id = :material_id "
+                    "AND NOT (kind = 'image' AND purpose = 'thumbnail')"
+                ),
+                {"material_id": material_id},
+            )
+            for kind, purpose, local_path in (
+                ("video", "delivery", video_directory),
+                ("audio", "delivery", audio_directory),
+                ("audio", "archive", asr_audio_path),
+            ):
+                connection.execute(
+                    text(
+                        """INSERT INTO media_asset (material_id, kind, purpose, local_path)
+                        VALUES (:material_id, :kind, :purpose, :local_path)"""
+                    ),
+                    {
+                        "material_id": material_id,
+                        "kind": kind,
+                        "purpose": purpose,
+                        "local_path": local_path,
+                    },
+                )
+
     def complete_reading(
         self,
         *,
@@ -1791,7 +1838,18 @@ class Repository:
         audio_playlist_path: str,
         video_playlist_key: str,
         audio_playlist_key: str,
+        asr_audio_path: str | None = None,
     ) -> None:
+        """`asr_audio_path` is optional only for callers on a database still missing the
+        registration this now performs pre-upload (`store_downloaded_video_assets`); a
+        freshly transcoded material always has one. Without re-registering it here, this
+        method's own blanket delete removes the row `store_downloaded_video_assets` wrote
+        and nothing replaces it — the local ASR audio file would go back to being invisible
+        to `_purge_material_media` (§15.7) the moment a material finishes uploading, which
+        is exactly the class of bug this whole method exists to prevent for the HLS
+        directories.
+        """
+
         with self.engine.begin() as connection:
             connection.execute(
                 text(
@@ -1805,6 +1863,16 @@ class Repository:
                 VALUES (:material_id, 'video', 'archive', :local_path, :bytes)"""),
                 {"material_id": material_id, "local_path": source_path, "bytes": Path(source_path).stat().st_size},
             )
+            if asr_audio_path is not None:
+                connection.execute(
+                    text("""INSERT INTO media_asset (material_id, kind, purpose, local_path, bytes)
+                    VALUES (:material_id, 'audio', 'archive', :local_path, :bytes)"""),
+                    {
+                        "material_id": material_id,
+                        "local_path": asr_audio_path,
+                        "bytes": Path(asr_audio_path).stat().st_size,
+                    },
+                )
             for kind, local_path, oss_key in (
                 ("video", video_playlist_path, video_playlist_key),
                 ("audio", audio_playlist_path, audio_playlist_key),
