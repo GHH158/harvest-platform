@@ -48,19 +48,45 @@ enum DesignTokens {
                 ? UIColor(red: 0.949, green: 0.929, blue: 0.875, alpha: 1)
                 : UIColor(red: 0.239, green: 0.224, blue: 0.161, alpha: 1)
         }
-        let appearance = UINavigationBarAppearance()
-        appearance.configureWithTransparentBackground()
-        appearance.largeTitleTextAttributes = [
-            .font: serifFont(size: 34, weight: .semibold),
-            .foregroundColor: inkColor,
-        ]
-        appearance.titleTextAttributes = [
+        let titleAttributes: [NSAttributedString.Key: Any] = [
             .font: serifFont(size: 17, weight: .semibold),
             .foregroundColor: inkColor,
         ]
-        UINavigationBar.appearance().standardAppearance = appearance
-        UINavigationBar.appearance().scrollEdgeAppearance = appearance
-        UINavigationBar.appearance().compactAppearance = appearance
+        let largeTitleAttributes: [NSAttributedString.Key: Any] = [
+            .font: serifFont(size: 34, weight: .semibold),
+            .foregroundColor: inkColor,
+        ]
+
+        // §18.3: transparent only while the content sits at the top. That state is what
+        // gives the screen its clean paper look with no rule under the title, and it was
+        // the reason this whole thing was configured transparent — but it had been applied
+        // to all three states, so anything scrolled *under* the bar showed straight
+        // through it. Real symptom: in a chat, a user bubble slid up and overlapped the
+        // title, with another bubble visible behind the status bar. Reading and watching
+        // pages had it too. The bottom composer has always been opaque; this is the top
+        // finally matching it.
+        let atTop = UINavigationBarAppearance()
+        atTop.configureWithTransparentBackground()
+        atTop.titleTextAttributes = titleAttributes
+        atTop.largeTitleTextAttributes = largeTitleAttributes
+
+        // Scrolled: a blur rather than a flat fill, so the bar still reads as paper and
+        // the text passing beneath it stays faintly sensed instead of being clipped by a
+        // hard edge — but never legible enough to compete with the title.
+        let scrolled = UINavigationBarAppearance()
+        scrolled.configureWithOpaqueBackground()
+        scrolled.backgroundColor = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.125, green: 0.118, blue: 0.102, alpha: 1)
+                : UIColor(red: 0.980, green: 0.976, blue: 0.961, alpha: 1)
+        }
+        scrolled.shadowColor = .clear
+        scrolled.titleTextAttributes = titleAttributes
+        scrolled.largeTitleTextAttributes = largeTitleAttributes
+
+        UINavigationBar.appearance().scrollEdgeAppearance = atTop
+        UINavigationBar.appearance().standardAppearance = scrolled
+        UINavigationBar.appearance().compactAppearance = scrolled
     }
 
     private static func serifFont(size: CGFloat, weight: UIFont.Weight) -> UIFont {
