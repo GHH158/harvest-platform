@@ -231,22 +231,22 @@ struct ReaderView: View {
         .onAppear { Task { await loadPendingQuestionCount(materialID: material.id) } }
     }
 
-    /// §16: only shown once there is something to show — an empty tray is not worth a
-    /// permanent icon (§1.4).
+    /// §16: 常驻,待处理为 0 时也要在——全部归档之后这里是进"已归档"的唯一入口,藏起来
+    /// 就等于把看过的记录锁死了。计数只在有待处理时显示,空托盘用空心图标区分。
     @ViewBuilder
     private func questionsToolbarButton(_ material: MaterialDetail) -> some View {
-        if pendingQuestionCount > 0 {
-            NavigationLink(
-                value: HomeDestination.questions(materialID: material.id, materialTitle: material.title)
-            ) {
-                HStack(spacing: 3) {
-                    Image(systemName: "tray.full")
+        NavigationLink(
+            value: HomeDestination.questions(materialID: material.id, materialTitle: material.title)
+        ) {
+            HStack(spacing: 3) {
+                Image(systemName: pendingQuestionCount > 0 ? "tray.full" : "tray")
+                if pendingQuestionCount > 0 {
                     Text("\(pendingQuestionCount)")
                         .font(.caption.weight(.semibold))
                 }
             }
-            .accessibilityLabel("\(pendingQuestionCount) 个疑问待处理")
         }
+        .accessibilityLabel(pendingQuestionCount > 0 ? "\(pendingQuestionCount) 个疑问待处理" : "疑问清单")
     }
 
     @MainActor

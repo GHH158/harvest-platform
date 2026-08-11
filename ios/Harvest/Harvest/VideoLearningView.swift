@@ -357,19 +357,20 @@ struct VideoLearningView: View {
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            if pendingQuestionCount > 0 {
-                NavigationLink(
-                    value: HomeDestination.questions(materialID: material.id, materialTitle: material.title)
-                ) {
-                    HStack(spacing: 3) {
-                        Image(systemName: "tray.full")
+            // §16: 常驻,待处理为 0 时也在——全部归档之后这是进"已归档"的唯一入口。
+            NavigationLink(
+                value: HomeDestination.questions(materialID: material.id, materialTitle: material.title)
+            ) {
+                HStack(spacing: 3) {
+                    Image(systemName: pendingQuestionCount > 0 ? "tray.full" : "tray")
+                    if pendingQuestionCount > 0 {
                         Text("\(pendingQuestionCount)")
                             .font(.caption.weight(.semibold))
                     }
-                    .foregroundStyle(DesignTokens.accent)
                 }
-                .accessibilityLabel("\(pendingQuestionCount) 个疑问待处理")
+                .foregroundStyle(DesignTokens.accent)
             }
+            .accessibilityLabel(pendingQuestionCount > 0 ? "\(pendingQuestionCount) 个疑问待处理" : "疑问清单")
 
             Picker("模式", selection: $mode) {
                 Text("观看").tag("观看")

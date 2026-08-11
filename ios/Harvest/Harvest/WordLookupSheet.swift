@@ -72,10 +72,9 @@ struct WordLookupSheet: View {
             .navigationTitle(word)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if materialID != nil {
-                    ToolbarItem(placement: .topBarLeading) {
-                        flagButton
-                    }
+                ToolbarItemGroup(placement: .topBarLeading) {
+                    if materialID != nil { flagButton }
+                    saveButton
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }
@@ -83,8 +82,8 @@ struct WordLookupSheet: View {
                 }
             }
             .overlay(alignment: .top) {
-                if let flagError {
-                    Text(flagError)
+                if let message = flagError ?? vocabularyError {
+                    Text(message)
                         .font(.caption)
                         .foregroundStyle(.white)
                         .multilineTextAlignment(.center)
@@ -94,7 +93,7 @@ struct WordLookupSheet: View {
                         .padding(.horizontal, DesignTokens.pageInset)
                 }
             }
-            .animation(.easeOut(duration: 0.2), value: flagError)
+            .animation(.easeOut(duration: 0.2), value: flagError ?? vocabularyError)
             .task { await lookup() }
         }
         .presentationDetents([.medium, .large])
@@ -151,9 +150,6 @@ struct WordLookupSheet: View {
                         examplesSection(result.examples)
                             .padding(.top, 22)
                     }
-
-                    saveSection(result)
-                        .padding(.top, 28)
                 }
                 .padding(DesignTokens.pageInset)
             }
@@ -227,81 +223,58 @@ struct WordLookupSheet: View {
         }
     }
 
-    private func saveSection(_ result: DictionaryLookupResult) -> some View {
-        VStack(spacing: 12) {
-            if savedToVocabulary {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.green)
-                    Text(wasAlreadySaved ? "已在生词表中" : "已加入生词表")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Color.green)
-                }
-            } else {
-                Button {
-                    Task { await save() }
-                } label: {
-                    HStack(spacing: 6) {
-                        if isSaving {
-                            ProgressView().controlSize(.small).tint(.white)
-                        } else {
-                            Image(systemName: "bookmark")
-                        }
-                        Text(isSaving ? "正在保存…" : "加入生词表")
-                    }
-                }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(!canSave)
-                .opacity(canSave ? 1 : 0.45)
-            }
-
-            if let vocabularyError {
-                Text(vocabularyError)
-                    .font(.caption)
-                    .foregroundStyle(DesignTokens.accent)
-                    .frame(maxWidth: .infinity, alignment: .center)
-            } else if !canSave, !savedToVocabulary, nonEmpty(result.meaning) == nil {
-                Text("暂无可用释义，无法加入生词表。")
-                    .font(.caption)
-                    .foregroundStyle(DesignTokens.muted)
-                    .frame(maxWidth: .infinity, alignment: .center)
-            }
-        }
-    }
-
     /// §16:收纳进这一课的疑问清单,读完再一次性去问老师。跟"加入生词表"是两件独立的
     /// 事——生词表是长期记忆,这里是一次性的待办。
     ///
-    /// 放在工具栏而不是正文底部:设计要求点词之后"一键"收纳,而底部按钮要先滚过释义、
-    /// 例句和"加入生词表"才够得着,实测两屏,等于没有。放这里还顺带覆盖了查词失败的
-    /// 情况——查不到的词才最该问老师,而那时正文区只有一个"重试"。
-    /// 图标 + 文字都要显示:工具栏里的 `Label` 默认会被压成纯图标,而"收纳"是这个应用
-    /// 自己的说法,不是通用图标语言,第一次见到认不出来。
+    /// 两个动作都放工具栏、都只用图标:原来它们排在正文最底部,弹层按 medium 高度打开时
+    /// 要滚约两屏才够得着,等于没有。收纳挂在这里还顺带覆盖了查词失败的情况——查不到的
+    /// 词才最该问老师,而那时正文区只有一个"重试"。文字说明退到 accessibilityLabel,
+    /// 屏幕上只留图标。
     @ViewBuilder
     private var flagButton: some View {
         if flagged {
-            HStack(spacing: 4) {
-                Image(systemName: "checkmark.circle.fill")
-                Text("已收纳")
-            }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(DesignTokens.accent)
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(DesignTokens.accent)
+                .accessibilityLabel("已收纳，之后问老师")
         } else {
             Button {
                 Task { await flag() }
             } label: {
-                HStack(spacing: 4) {
-                    if isFlagging {
-                        ProgressView().controlSize(.small).tint(DesignTokens.accent)
-                    } else {
-                        Image(systemName: "tray.and.arrow.down")
-                    }
-                    Text("收纳")
+                if isFlagging {
+                    ProgressView().controlSize(.small).tint(DesignTokens.accent)
+                } else {
+                    Image(systemName: "tray.and.arrow.down")
                 }
-                .font(.subheadline.weight(.medium))
             }
             .foregroundStyle(DesignTokens.accent)
             .disabled(isFlagging)
+            .accessibilityLabel("收纳，之后问老师")
+        }
+    }
+
+    /// 生词表是长期记忆(走 Leitner 复习调度),和收纳的一次性待办是两件事,所以并排两个
+    /// 图标而不是合成一个。没有释义时存不进去,按钮直接禁用——原来那句"暂无可用释义"的
+    /// 解释文字随正文底部一起去掉了。
+    @ViewBuilder
+    private var saveButton: some View {
+        if savedToVocabulary {
+            Image(systemName: "bookmark.fill")
+                .foregroundStyle(Color.green)
+                .accessibilityLabel(wasAlreadySaved ? "已在生词表中" : "已加入生词表")
+        } else {
+            Button {
+                Task { await save() }
+            } label: {
+                if isSaving {
+                    ProgressView().controlSize(.small).tint(DesignTokens.accent)
+                } else {
+                    Image(systemName: "bookmark")
+                }
+            }
+            .foregroundStyle(DesignTokens.accent)
+            .disabled(!canSave)
+            .opacity(canSave ? 1 : 0.4)
+            .accessibilityLabel("加入生词表")
         }
     }
 
