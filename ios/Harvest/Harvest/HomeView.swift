@@ -3,8 +3,9 @@ import SwiftUI
 /// The app opens here. No bottom tab bar: one clean surface you enter everything
 /// from. Tapping is deliberately the primary way to move around — a natural-language
 /// command box would cost a model call for things a single tap already does
-/// reliably. The ask field is the one exception, because "why is this sentence like
-/// this" is not something you can tap your way to (§5.16).
+/// reliably. §17 retired the standalone ask field that used to be the exception here;
+/// anything you cannot tap your way to now goes to the chat teacher, which is the
+/// headline entry below.
 ///
 /// Rebuilt 2026-08-10 after real use. It had grown four different visual treatments in
 /// one screen — a bordered card, tinted rows with accent icons, and two bare text lines —
@@ -30,7 +31,7 @@ struct HomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 resumeLine
-                askCard
+                chatCard
                 destinations
                 journalEntry
             }
@@ -50,7 +51,6 @@ struct HomeView: View {
         }
         .navigationDestination(for: HomeDestination.self) { destination in
             switch destination {
-            case .ask: AskView()
             case .materials: MaterialListView()
             case .chat: ChatView()
             case .accumulation: AccumulationView()
@@ -95,15 +95,16 @@ struct HomeView: View {
         }
     }
 
-    /// The one thing here that is not a link to a page, so it keeps a little more weight —
-    /// but as type, not as a box (§1.5: no card around what is already structured).
-    private var askCard: some View {
-        NavigationLink(value: HomeDestination.ask) {
+    /// §17: 聊天是唯一的问答入口了(独立提问退场),所以它占这个位置——正门仍然是一句
+    /// 招呼,而不是一列目录(§1.5)。版式沿用原来的 `askCard`:标题大一号、不加卡片框。
+    /// 故意不显示话题计数——头条是邀请,不是仪表盘(§1.4);计数留在下面那两行里。
+    private var chatCard: some View {
+        NavigationLink(value: HomeDestination.chat) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("哪儿卡住了？")
+                Text("今天想聊点什么？")
                     .font(.system(size: 27, design: .serif))
                     .foregroundStyle(DesignTokens.ink)
-                Text("课本上的一句话、一个词，都可以直接问")
+                Text("用日语说说话，随手纠错")
                     .font(.subheadline)
                     .foregroundStyle(DesignTokens.muted)
             }
@@ -119,10 +120,8 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 20) {
             row(.materials, title: "素材", caption: "读过的文章和视频",
                 detail: counts.materials.map { "\($0) 篇" }, order: 2)
-            row(.chat, title: "聊天", caption: "用日语说说话，随手纠错",
-                detail: counts.chatSessions.map { "\($0) 个话题" }, order: 3)
             row(.accumulation, title: "积累", caption: "撞见过的词和语法",
-                detail: counts.accumulationDetail, order: 4)
+                detail: counts.accumulationDetail, order: 3)
         }
     }
 
@@ -242,7 +241,6 @@ struct HomeView: View {
         // rows tappable, so nothing is surfaced as an error.
         let client = APIClient(baseURL: endpoint)
         async let materials = try? client.materials()
-        async let topics = try? client.chatSessions()
         async let vocabulary = try? client.listVocabulary()
         async let grammar = try? client.listGrammar()
         // §5.18 rides along in the same batch. Same failure policy as the counts: if it
@@ -251,7 +249,6 @@ struct HomeView: View {
         let points = await grammar
         let loaded = HomeCounts(
             materials: await materials?.count,
-            chatSessions: await topics?.count,
             vocabulary: await vocabulary?.count,
             grammarNeedsAttention: points?.filter(\.requiresAttention).count
         )
@@ -300,7 +297,6 @@ private struct SoftPressStyle: ButtonStyle {
 }
 
 enum HomeDestination: Hashable {
-    case ask
     case materials
     case chat
     case accumulation
@@ -319,7 +315,6 @@ enum HomeDestination: Hashable {
 
 struct HomeCounts {
     var materials: Int?
-    var chatSessions: Int?
     var vocabulary: Int?
     var grammarNeedsAttention: Int?
 

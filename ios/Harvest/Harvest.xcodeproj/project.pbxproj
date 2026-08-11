@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		A00000000000000000000039 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000039 /* HomeView.swift */; };
-		A0000000000000000000003A /* AskView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003A /* AskView.swift */; };
 		A0000000000000000000040 /* LocalMediaServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000040 /* LocalMediaServer.swift */; };
 		A0000000000000000000041 /* MarkdownRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000041 /* MarkdownRendering.swift */; };
 		A0000000000000000000042 /* ReadingQuestionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000042 /* ReadingQuestionListView.swift */; };
@@ -57,7 +56,6 @@
 
 /* Begin PBXFileReference section */
 		A10000000000000000000039 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
-		A1000000000000000000003A /* AskView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskView.swift; sourceTree = "<group>"; };
 		A1000000000000000000040 /* LocalMediaServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalMediaServer.swift; sourceTree = "<group>"; };
 		A1000000000000000000041 /* MarkdownRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRendering.swift; sourceTree = "<group>"; };
 		A1000000000000000000042 /* ReadingQuestionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingQuestionListView.swift; sourceTree = "<group>"; };
@@ -127,7 +125,6 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000001 /* HarvestApp.swift */,
-				A1000000000000000000003A /* AskView.swift */,
 				A1000000000000000000040 /* LocalMediaServer.swift */,
 				A1000000000000000000041 /* MarkdownRendering.swift */,
 				A1000000000000000000042 /* ReadingQuestionListView.swift */,
@@ -263,7 +260,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000001 /* HarvestApp.swift in Sources */,
-				A0000000000000000000003A /* AskView.swift in Sources */,
 				A0000000000000000000040 /* LocalMediaServer.swift in Sources */,
 				A0000000000000000000041 /* MarkdownRendering.swift in Sources */,
 				A0000000000000000000042 /* ReadingQuestionListView.swift in Sources */,

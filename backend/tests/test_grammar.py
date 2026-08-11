@@ -72,16 +72,6 @@ def test_chat_system_prompt_is_trimmed_to_the_supplied_catalogue_subset() -> Non
     assert "verb-te-iru" not in prompt
 
 
-def test_companion_system_prompt_is_trimmed_to_the_supplied_catalogue_subset() -> None:
-    from app.companion import build_companion_system_prompt
-
-    subset = [("verb-te", "～て", "て形与连接", "N5", "动词变形")]
-    prompt = build_companion_system_prompt(subset)
-
-    assert "verb-te = ～て" in prompt
-    assert "i-adj-past" not in prompt
-
-
 def test_learning_event_payload_is_validated_by_kind() -> None:
     from app.learning_events import validated_learning_event_payload
     from pydantic import ValidationError

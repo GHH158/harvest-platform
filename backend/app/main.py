@@ -33,12 +33,10 @@ from .chat import (
     suppress_follow_up,
     topic_for,
 )
-from .companion import build_companion_messages, generate_companion_turn
 from .config import ROOT_DIR, get_settings
 from .db import apply_schema, make_engine
 from .furigana import ruby_segments
 from .journal import JOURNAL_PROMPT_VERSION, build_journal_messages, generate_journal_reply
-from .lenses import LENS_PROMPT_VERSION, lens_by_id, public_lenses, render_lens_question
 from .llm import LLMService
 from .omni import relay_voice_teacher
 from .repository import Repository
@@ -1136,72 +1134,6 @@ def _llm_error(error: Exception) -> HTTPException:
     return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error))
 
 
-@app.get("/companion/lenses")
-def list_companion_lenses() -> list[dict]:
-    """§5.15 reading angles. The client sends an id; wording stays server-side."""
-    return public_lenses()
-
-
-class AskRequest(BaseModel):
-    """§5.16: a question with no material behind it — a textbook sentence, a word,
-    or anything the learner is stuck on."""
-
-    text: str = Field(min_length=1, max_length=4_000)
-    lens: str | None = Field(default=None, max_length=40)
-
-
-@app.get("/ask")
-def list_ask_messages() -> list[dict]:
-    return repository().standalone_ask_messages()
-
-
-@app.post("/ask")
-def post_ask(payload: AskRequest) -> dict:
-    repo = repository()
-    typed = payload.text.strip()
-    lens = None
-    if payload.lens:
-        lens = lens_by_id(payload.lens)
-        if lens is None:
-            raise HTTPException(status_code=422, detail="未知的提问角度。")
-    # With a lens the typed text is the thing being asked about, so it becomes the
-    # focus and the angle supplies the question; without one it is the question.
-    question = render_lens_question(lens, typed) if lens else typed
-    user = repo.add_companion_message(None, None, "user", question, lens=lens.id if lens else None)
-    history = repo.standalone_ask_messages()[-12:-1]
-    messages = build_companion_messages(
-        context=[],
-        history=history,
-        question=question,
-        catalogue_subset=repo.grammar_catalogue_for_prompt(),
-        lens_focus=lens.focus_zh if lens else None,
-    )
-    try:
-        turn = generate_companion_turn(llm_service(), messages)
-    except Exception as error:
-        # A question with no answer is not evidence of anything and cannot be retried
-        # from the UI, so it must not outlive the failed call. The reader's companion
-        # keeps its question because it sits in a material's transcript; a standalone
-        # ask has no such context and would just accumulate ghosts.
-        repo.delete_companion_message(int(user["id"]))
-        raise _llm_error(error) from error
-    assistant = repo.add_companion_message(None, None, "assistant", turn.answer_markdown)
-    if turn.grammar_keys:
-        try:
-            repo.record_companion_grammar_evidence(
-                int(user["id"]),
-                turn.grammar_keys,
-                decision_context={
-                    **turn.decision_context,
-                    "lens": lens.id if lens else None,
-                    "lens_prompt_version": LENS_PROMPT_VERSION if lens else None,
-                },
-            )
-        except Exception:
-            logger.exception("Failed to record ask grammar evidence")
-    return {"user": user, "assistant": assistant}
-
-
 def _chat_turn(
     *,
     topic: str,
@@ -1799,9 +1731,9 @@ def list_journal_entries() -> list[dict]:
 def post_journal_entry(payload: JournalEntryRequest) -> dict:
     """Writing is enough to save it; the reply comes automatically (§14.2).
 
-    Note the deliberate difference from `POST /ask`: there, a question whose answer
-    never arrived is deleted, because a question with no answer is a ghost row. Here
-    the entry is kept even when the model call fails — what the learner said has
+    Note the deliberate difference from the retired `POST /ask` (§17): there, a question
+    whose answer never arrived was deleted, because a question with no answer is a ghost
+    row. Here the entry is kept even when the model call fails — what the learner said has
     value on its own, and throwing away their own words because a cloud API was down
     would be the worst possible behaviour for this particular feature. The client
     gets the saved entry plus `reply_error` and can ask again.

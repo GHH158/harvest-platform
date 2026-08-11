@@ -284,14 +284,6 @@ struct APIClient {
         return try await send(request)
     }
 
-    func companionLenses() async throws -> [QuestionLens] {
-        try await get("companion/lenses")
-    }
-
-    func askMessages() async throws -> [ConversationMessage] {
-        try await get("ask")
-    }
-
     /// §5.18: at most one fact about where you left off, or nil.
     func resumeHint() async throws -> ResumeHint? {
         let envelope: ResumeHintEnvelope = try await get("home/resume")
@@ -338,18 +330,6 @@ struct APIClient {
         try await delete("journal/\(id)")
     }
 
-    /// §5.16: with a lens the text is what is being asked *about*; without one it is
-    /// the question itself.
-    func ask(text: String, lens: String? = nil) async throws -> ChatReply {
-        var request = URLRequest(url: baseURL.appending(path: "ask"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 60
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var body: [String: Any] = ["text": text]
-        if let lens { body["lens"] = lens }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        return try await send(request)
-    }
 
     func uploadShadowing(segmentID: Int, audioURL: URL) async throws -> ShadowingSubmission {
         let boundary = "Harvest-\(UUID().uuidString)"

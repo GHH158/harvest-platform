@@ -779,15 +779,34 @@ def test_grammar_projection_preserves_learner_decisions_and_tracks_real_evidence
             job_kind="tts",
             payload={"text": "旅行の前に予約しておきます。"},
         )
-        question = repository.add_companion_message(
-            material_id,
-            None,
-            "user",
-            "这里为什么要用「ておく」？",
-        )
-        assert repository.record_companion_grammar_evidence(
-            int(question["id"]), [grammar_key, "unknown-key", grammar_key]
-        ) == [grammar_key]
+        # §17: the companion writer is retired, but everything it fed is not — the
+        # projection, the backfill and the cascade trigger below all still read these
+        # two tables, so the fixture goes in directly instead of through a method that
+        # no longer exists.
+        with engine.begin() as connection:
+            question_id = int(
+                connection.execute(
+                    text(
+                        """INSERT INTO companion_message (material_id, segment_id, role, content)
+                           VALUES (:material_id, NULL, 'user', :content) RETURNING id"""
+                    ),
+                    {"material_id": material_id, "content": "这里为什么要用「ておく」？"},
+                ).scalar_one()
+            )
+            point_id = connection.execute(
+                text("SELECT id FROM grammar_point WHERE key = :key"), {"key": grammar_key}
+            ).scalar_one()
+            # Written twice on purpose: the (message_id, point_id) uniqueness is what
+            # keeps one question from being counted as two encounters.
+            for _ in range(2):
+                connection.execute(
+                    text(
+                        """INSERT INTO companion_grammar_evidence (message_id, point_id)
+                           VALUES (:message_id, :point_id) ON CONFLICT DO NOTHING"""
+                    ),
+                    {"message_id": question_id, "point_id": point_id},
+                )
+        question = {"id": question_id}
 
         with engine.begin() as connection:
             connection.execute(
@@ -1824,52 +1843,33 @@ def test_decision_trace_records_success_and_locates_the_failing_stage(
         }
         assert indexed[0]["duration_ms"] >= 0
 
-        material_id, _ = repository.create_material_with_job(
-            title="trace companion",
-            source_type="paste",
-            source_ref=None,
-            job_kind="tts",
-            payload={"text": "読んでいます。"},
-        )
-        question = repository.add_companion_message(material_id, None, "user", "为什么使用て形？")
-        repository.record_companion_grammar_evidence(
-            int(question["id"]),
-            ["verb-te"],
-            decision_context={
-                "model_provider": "dashscope",
-                "model_name": "qwen3.7-max",
-                "prompt_version": "companion-turn-v1",
-                "attempted_providers": ["dashscope"],
-            },
-        )
-        companion = repository.list_decision_traces(call_source="companion_grammar_index")
-        assert len(companion) == 1
-        assert companion[0]["model_provider"] == "dashscope"
-        assert companion[0]["model_name"] == "qwen3.7-max"
-        assert companion[0]["prompt_version"] == "companion-turn-v1"
-        assert companion[0]["detail"]["attempted_providers"] == ["dashscope"]
-
-
         # Now break an indexing path and confirm the failure is attributable to a
-        # stage. The memory rebuild used to play this role; it was removed on
-        # 2026-08-09, so the check moved to the companion grammar index — still a
-        # silent path whose only account of itself is the trace (§5.13).
+        # stage. This check has moved twice: the memory rebuild played the role until it
+        # was removed on 2026-08-09, then the companion grammar index until §17 retired
+        # it (2026-08-12). It now rides on the correction index — the remaining silent
+        # path whose only account of itself is the trace (§5.13).
         def fail_mark(*_: Any, **__: Any) -> None:
             raise RuntimeError("simulated failure")
 
         monkeypatch.setattr(repository, "mark_grammar_encounter", fail_mark)
-        question2 = repository.add_companion_message(material_id, None, "user", "て形是什么？")
-        # It records the trace and re-raises; main.py is what swallows it so the
-        # teaching answer still returns.
-        with pytest.raises(RuntimeError):
-            repository.record_companion_grammar_evidence(int(question2["id"]), ["verb-te"])
+        # Unlike the retired companion path, this one swallows the projection failure —
+        # a correction that was saved must not look failed to the learner just because
+        # the skeleton projection broke. The trace is the only place it surfaces.
+        repository.complete_chat_turn(
+            session_id=session_id,
+            user_content="読むています",
+            assistant_content="読んでいます",
+            # A grammar_key is what makes this reach the skeleton projection at all —
+            # a category-only correction never calls mark_grammar_encounter.
+            correction=_correction("読むています", "読んでいます", "grammar", grammar_key="verb-te"),
+        )
 
         failed = repository.list_decision_traces(status="failed")
         assert len(failed) == 1
-        assert failed[0]["call_source"] == "companion_grammar_index"
-        assert failed[0]["failure_stage"] == "insert_event"
-        # The teaching answer itself was never at risk.
-        assert len(repository.list_decision_traces(call_source="chat_correction_index")) == 1
+        assert failed[0]["call_source"] == "chat_correction_index"
+        assert failed[0]["failure_stage"] == "project_grammar"
+        # The successful first turn's trace is still there, untouched.
+        assert len(repository.list_decision_traces(call_source="chat_correction_index")) == 2
     finally:
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM chat_session WHERE id = :id"), {"id": session_id})
@@ -2000,40 +2000,6 @@ def test_trace_write_failure_cannot_break_the_operation_it_observes(
 
 
 @pytest.mark.integration
-def test_companion_messages_return_the_newest_turns_oldest_first() -> None:
-    """§5.17: the sheet used to fetch a material's entire history on every open.
-
-    The limit wraps the query in a subselect, which is easy to get backwards — this
-    pins that it keeps the *newest* rows but still hands them back in reading order.
-    """
-
-    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
-    if not database_url:
-        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
-
-    engine = make_engine(Settings(database_url=database_url))
-    apply_schema(engine)
-    repository = Repository(engine)
-    material_id, _ = repository.create_material_with_job(
-        title="companion limit", source_type="paste", source_ref=None,
-        job_kind="tts", payload={"text": "雨です。"},
-    )
-    try:
-        for index in range(6):
-            repository.add_companion_message(material_id, None, "user", f"第{index}问")
-
-        recent = repository.companion_messages(material_id, limit=4)
-
-        assert [row["content"] for row in recent] == ["第2问", "第3问", "第4问", "第5问"]
-        assert [row["id"] for row in recent] == sorted(row["id"] for row in recent)
-        assert len(repository.companion_messages(material_id)) == 6
-    finally:
-        with engine.begin() as connection:
-            connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
-        engine.dispose()
-
-
-@pytest.mark.integration
 def test_same_register_version_round_trips_through_the_correction_store() -> None:
     """§5.6 (2026-08-10). The parsing rules have unit tests; this pins the storage path,
     because a nullable column that is written but never read back is the kind of thing
@@ -2088,60 +2054,6 @@ def test_same_register_version_round_trips_through_the_correction_store() -> Non
         repository.delete_chat_session(session_id)
 
 
-@pytest.mark.integration
-def test_companion_messages_filters_by_segment_and_still_works_without_one() -> None:
-    """§5.17 (2026-08-10). Both paths, because the no-filter path is what every existing
-    caller uses and it had no integration coverage — the first version of the segment
-    filter returned HTTP 500 for it (Postgres cannot type a bare placeholder inside
-    `IS NULL`) and the whole suite stayed green.
-    """
-
-    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
-    if not database_url:
-        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
-
-    engine = make_engine(Settings(database_url=database_url))
-    apply_schema(engine)
-    repository = Repository(engine)
-    material_id, _ = repository.create_material_with_job(
-        title="segment filter",
-        source_type="paste",
-        source_ref=None,
-        job_kind="tts",
-        payload={"text": "一。二。"},
-    )
-    repository.complete_reading(
-        material_id=material_id,
-        local_path="/tmp/segment-filter.mp3",
-        oss_key="materials/segment-filter.mp3",
-        bytes_count=10,
-        duration_ms=2_000,
-        segments=[
-            {"idx": 0, "text_ja": "一。", "start_ms": 0, "end_ms": 1_000},
-            {"idx": 1, "text_ja": "二。", "start_ms": 1_000, "end_ms": 2_000},
-        ],
-    )
-    try:
-        segments = repository.get_segments(material_id)
-        first, second = int(segments[0]["id"]), int(segments[1]["id"])
-        repository.add_companion_message(material_id, first, "user", "第一句的问题")
-        repository.add_companion_message(material_id, first, "assistant", "第一句的回答")
-        repository.add_companion_message(material_id, second, "user", "第二句的问题")
-
-        narrowed = repository.companion_messages(material_id, segment_id=first)
-        assert [row["content"] for row in narrowed] == ["第一句的问题", "第一句的回答"]
-
-        # No filter must keep returning everything: that is what the "以前问过的" view uses
-        # and what every pre-existing caller relies on.
-        everything = repository.companion_messages(material_id)
-        assert len(everything) == 3
-
-        assert repository.companion_messages(material_id, segment_id=second)[0]["content"] == "第二句的问题"
-    finally:
-        with engine.begin() as connection:
-            connection.execute(text("DELETE FROM material WHERE id = :id"), {"id": material_id})
-
-
 def _collection_repo() -> tuple[Repository, Any]:
     database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
     if not database_url:
@@ -2174,7 +2086,16 @@ def test_deleting_a_material_converges_everything_hanging_off_it() -> None:
         segments=[{"idx": 0, "text_ja": "消える。", "start_ms": 0, "end_ms": 1_000}],
     )
     segment_id = int(repository.get_segments(material_id)[0]["id"])
-    repository.add_companion_message(material_id, segment_id, "user", "这句什么意思")
+    # §17: inserted directly — the writer is retired but the table (and this cascade)
+    # still hold the historical rows, which is exactly what must converge on delete.
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """INSERT INTO companion_message (material_id, segment_id, role, content)
+                   VALUES (:material_id, :segment_id, 'user', '这句什么意思')"""
+            ),
+            {"material_id": material_id, "segment_id": segment_id},
+        )
     repository.save_playback_state(material_id, 500)
 
     assert repository.delete_material(material_id) is True
