@@ -188,7 +188,12 @@ CREATE TABLE IF NOT EXISTS chat_correction (
     user_message_id BIGINT NOT NULL UNIQUE REFERENCES chat_message(id) ON DELETE CASCADE,
     original_text   TEXT NOT NULL,
     corrected_text  TEXT NOT NULL,
-    summary_zh      TEXT NOT NULL,
+    -- §18.2: two explanations, one per language. Nullable on purpose — new corrections
+    -- always carry both (the model contract requires it), but rows written before
+    -- migration 0007 have only one, and a null is the honest way to say "this row has no
+    -- Chinese version" rather than filling it with the Japanese one.
+    summary_ja      TEXT,
+    summary_zh      TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_chat_correction_session
@@ -202,7 +207,9 @@ CREATE TABLE IF NOT EXISTS chat_correction_item (
     idx               INTEGER NOT NULL,
     original_fragment TEXT NOT NULL,
     replacement       TEXT NOT NULL,
-    reason_zh         TEXT NOT NULL,
+    -- §18.2, same reasoning as chat_correction.summary_ja/summary_zh above.
+    reason_ja         TEXT,
+    reason_zh         TEXT,
     category          TEXT NOT NULL,
     UNIQUE (correction_id, idx)
 );

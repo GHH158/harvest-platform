@@ -271,7 +271,17 @@ class Repository:
                               jsonb_build_object(
                                   'original', ci.original_fragment,
                                   'replacement', ci.replacement,
-                                  'reason_zh', ci.reason_zh,
+                                  -- §18.2: the key stays `reason_zh` while the value now
+                                  -- comes from reason_ja. Those two words together look
+                                  -- wrong, and they are — but this payload is already
+                                  -- written into historical learning_event rows that
+                                  -- §4.3 treats as settled fact, and those rows hold
+                                  -- Japanese under this key. Renaming the key would mean
+                                  -- rewriting history; sourcing from the renamed column
+                                  -- keeps the *content* identical to what is already
+                                  -- there. The naming debt is recorded in §18.2 instead
+                                  -- of being paid with a rewrite of the fact layer.
+                                  'reason_zh', COALESCE(ci.reason_ja, ci.reason_zh),
                                   'category', ci.category
                               )
                        FROM chat_correction_item ci
@@ -297,7 +307,17 @@ class Repository:
                               jsonb_build_object(
                                   'original', ci.original_fragment,
                                   'replacement', ci.replacement,
-                                  'reason_zh', ci.reason_zh,
+                                  -- §18.2: the key stays `reason_zh` while the value now
+                                  -- comes from reason_ja. Those two words together look
+                                  -- wrong, and they are — but this payload is already
+                                  -- written into historical learning_event rows that
+                                  -- §4.3 treats as settled fact, and those rows hold
+                                  -- Japanese under this key. Renaming the key would mean
+                                  -- rewriting history; sourcing from the renamed column
+                                  -- keeps the *content* identical to what is already
+                                  -- there. The naming debt is recorded in §18.2 instead
+                                  -- of being paid with a rewrite of the fact layer.
+                                  'reason_zh', COALESCE(ci.reason_ja, ci.reason_zh),
                                   'category', ci.category
                               )
                        FROM chat_correction_item ci
@@ -870,8 +890,10 @@ class Repository:
                 correction_row = connection.execute(
                     text(
                         """INSERT INTO chat_correction
-                        (session_id, user_message_id, original_text, corrected_text, summary_zh)
-                        VALUES (:session_id, :user_message_id, :original_text, :corrected_text, :summary_zh)
+                        (session_id, user_message_id, original_text, corrected_text,
+                         summary_ja, summary_zh)
+                        VALUES (:session_id, :user_message_id, :original_text, :corrected_text,
+                                :summary_ja, :summary_zh)
                         RETURNING *"""
                     ),
                     {
@@ -879,6 +901,7 @@ class Repository:
                         "user_message_id": int(user["id"]),
                         "original_text": user_content,
                         "corrected_text": correction["corrected_text"],
+                        "summary_ja": correction.get("summary_ja"),
                         "summary_zh": correction["summary_zh"],
                     },
                 ).mappings().one()
@@ -888,12 +911,13 @@ class Repository:
                         text(
                             """INSERT INTO chat_correction_item
                             (correction_id, idx, original_fragment, replacement,
-                             same_register_replacement, reason_zh, category, grammar_key)
+                             same_register_replacement, reason_ja, reason_zh, category, grammar_key)
                             VALUES (:correction_id, :idx, :original, :replacement,
-                                    :same_register_replacement, :reason_zh, :category, :grammar_key)
+                                    :same_register_replacement, :reason_ja, :reason_zh,
+                                    :category, :grammar_key)
                             RETURNING id, correction_id, idx, original_fragment AS original,
-                                replacement, same_register_replacement, reason_zh, category,
-                                grammar_key"""
+                                replacement, same_register_replacement, reason_ja, reason_zh,
+                                category, grammar_key"""
                         ),
                         # Bound explicitly rather than splatting the item dict: the dict
                         # now carries a field the statement has to name, and a silent
@@ -905,6 +929,7 @@ class Repository:
                             "original": item["original"],
                             "replacement": item["replacement"],
                             "same_register_replacement": item.get("same_register_replacement"),
+                            "reason_ja": item.get("reason_ja"),
                             "reason_zh": item["reason_zh"],
                             "category": item["category"],
                             "grammar_key": item.get("grammar_key"),
@@ -914,7 +939,11 @@ class Repository:
                     payload = {
                         "original": stored_item["original"],
                         "replacement": stored_item["replacement"],
-                        "reason_zh": stored_item["reason_zh"],
+                        # Japanese, under the legacy key — see the payload comment above.
+                        # Falls back to the Chinese one: the payload wants *an* explanation,
+                        # and losing a whole learning event because one language is missing
+                        # would trade a fact for a formatting detail.
+                        "reason_zh": stored_item["reason_ja"] or stored_item["reason_zh"],
                         "category": stored_item["category"],
                     }
                     # Every correction is a fact worth indexing, whether or not the
@@ -1050,6 +1079,7 @@ class Repository:
                 """(
                     c.original_text ILIKE :query_pattern
                     OR c.corrected_text ILIKE :query_pattern
+                    OR c.summary_ja ILIKE :query_pattern
                     OR c.summary_zh ILIKE :query_pattern
                     OR s.topic ILIKE :query_pattern
                     OR EXISTS (
@@ -1057,6 +1087,7 @@ class Repository:
                         WHERE qi.correction_id = c.id
                           AND (qi.original_fragment ILIKE :query_pattern
                             OR qi.replacement ILIKE :query_pattern
+                            OR qi.reason_ja ILIKE :query_pattern
                             OR qi.reason_zh ILIKE :query_pattern)
                     )
                 )"""
@@ -1080,7 +1111,7 @@ class Repository:
                 items = connection.execute(
                     text(
                         """SELECT id, correction_id, idx, original_fragment AS original,
-                            replacement, same_register_replacement, reason_zh, category
+                            replacement, same_register_replacement, reason_ja, reason_zh, category
                         FROM chat_correction_item
                         WHERE correction_id = ANY(:correction_ids)
                         ORDER BY correction_id, idx"""

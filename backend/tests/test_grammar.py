@@ -41,7 +41,7 @@ def test_catalogue_rows_are_ordered_and_complete() -> None:
 def test_correction_items_only_accept_real_catalogue_keys() -> None:
     from app.chat import CorrectionItemOutput
 
-    base = {"original": "読むています", "replacement": "読んでいます", "reason_zh": "て形", "category": "grammar"}
+    base = {"original": "読むています", "replacement": "読んでいます", "reason_ja": "て形", "reason_zh": "て形", "category": "grammar"}
     assert CorrectionItemOutput(**base, grammar_key="verb-te").grammar_key == "verb-te"
     # A key the model invented is dropped rather than failing the whole turn: a bad
     # tag should cost the tag, not the correction.

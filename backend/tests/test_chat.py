@@ -28,6 +28,7 @@ def model_json(*, correction: dict[str, Any] | None = None) -> str:
             or {
                 "needed": False,
                 "corrected_text": None,
+                "summary_ja": None,
                 "summary_zh": None,
                 "items": [],
             },
@@ -43,6 +44,7 @@ def correction_json(*, category: str = "grammar", item_count: int = 1) -> str:
         {
             "original": f"映画を見ます{i}",
             "replacement": f"映画を見ました{i}",
+            "reason_ja": "已经发生的事情使用过去时。",
             "reason_zh": "已经发生的事情使用过去时。",
             "category": category,
         }
@@ -52,6 +54,7 @@ def correction_json(*, category: str = "grammar", item_count: int = 1) -> str:
         correction={
             "needed": True,
             "corrected_text": "昨日、映画を見ました。",
+            "summary_ja": "動詞を過去形にしました。",
             "summary_zh": "把动词改为过去时。",
             "items": items,
         }
@@ -109,6 +112,7 @@ def test_valid_turns_decode_correction_and_no_correction() -> None:
             correction={
                 "needed": True,
                 "corrected_text": None,
+                "summary_ja": "修正版がありません。",
                 "summary_zh": "缺少修正版。",
                 "items": [],
             }
@@ -375,7 +379,7 @@ def test_reply_without_a_follow_up_question_is_accepted() -> None:
     turn = parse_chat_turn(
         json.dumps(
             {
-                "correction": {"needed": False, "corrected_text": None, "summary_zh": None, "items": []},
+                "correction": {"needed": False, "corrected_text": None, "summary_ja": None, "summary_zh": None, "items": []},
                 "reply_ja": "「フレーズ」は決まった言い回しのことですよ。",
                 "follow_up_ja": None,
             },
@@ -391,7 +395,7 @@ def test_blank_follow_up_is_treated_as_absent() -> None:
     turn = parse_chat_turn(
         json.dumps(
             {
-                "correction": {"needed": False, "corrected_text": None, "summary_zh": None, "items": []},
+                "correction": {"needed": False, "corrected_text": None, "summary_ja": None, "summary_zh": None, "items": []},
                 "reply_ja": "なるほどですね。",
                 "follow_up_ja": "   ",
             },
@@ -489,7 +493,8 @@ def _turn(items: list[dict[str, Any]], *, needed: bool = True) -> str:
             "correction": {
                 "needed": needed,
                 "corrected_text": "話したいことが話せません" if needed else None,
-                "summary_zh": "可能形の否定を使う" if needed else None,
+                "summary_ja": "可能形の否定を使う" if needed else None,
+                "summary_zh": "用可能形的否定" if needed else None,
                 "items": items,
             },
             "reply_ja": "そうですね。",
@@ -514,6 +519,7 @@ def test_an_item_that_changes_nothing_is_dropped() -> None:
                 {
                     "original": "日本人として",
                     "replacement": "日本人として",
+                    "reason_ja": "这个说法本身没问题",
                     "reason_zh": "这个说法本身没问题",
                     "category": "register",
                     "grammar_key": None,
@@ -521,6 +527,7 @@ def test_an_item_that_changes_nothing_is_dropped() -> None:
                 {
                     "original": "会議しましょう",
                     "replacement": "Teamsで会議をしましょう",
+                    "reason_ja": "手段を加えると具体的",
                     "reason_zh": "手段を加えると具体的",
                     "category": "naturalness",
                     "grammar_key": None,
@@ -542,6 +549,7 @@ def test_a_correction_made_only_of_no_op_items_downgrades_instead_of_failing() -
                 {
                     "original": "日本人として",
                     "replacement": "日本人として",
+                    "reason_ja": "没问题",
                     "reason_zh": "没问题",
                     "category": "register",
                     "grammar_key": None,
@@ -569,6 +577,7 @@ def test_a_register_move_carries_the_same_register_version() -> None:
                     "original": "話さない",
                     "replacement": "話せません",
                     "same_register_replacement": "話せない",
+                    "reason_ja": "需要可能态否定；另外你原句是简体，这里给的是丁宁体",
                     "reason_zh": "需要可能态否定；另外你原句是简体，这里给的是丁宁体",
                     "category": "grammar",
                     "grammar_key": None,
@@ -591,6 +600,7 @@ def test_same_register_version_is_dropped_when_it_says_nothing() -> None:
                         "original": "話さない",
                         "replacement": "話せません",
                         "same_register_replacement": alternative,
+                        "reason_ja": "可能态否定",
                         "reason_zh": "可能态否定",
                         "category": "grammar",
                         "grammar_key": None,
@@ -627,6 +637,7 @@ def test_invented_grammar_keys_are_still_dropped_not_trusted() -> None:
                 {
                     "original": "ないですが",
                     "replacement": "お肉は入っていませんが",
+                    "reason_ja": "て形＋いる的否定",
                     "reason_zh": "て形＋いる的否定",
                     "category": "grammar",
                     "grammar_key": "verb-te-iru",
@@ -634,6 +645,7 @@ def test_invented_grammar_keys_are_still_dropped_not_trusted() -> None:
                 {
                     "original": "煮込み",
                     "replacement": "煮込んであるので",
+                    "reason_ja": "状态",
                     "reason_zh": "状态",
                     "category": "grammar",
                     "grammar_key": "this-key-does-not-exist",

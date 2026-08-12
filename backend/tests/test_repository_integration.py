@@ -275,11 +275,13 @@ def test_chat_repository_session_correction_filters_and_deletes() -> None:
             assistant_content="面白そうですね。どんな映画でしたか？",
             correction={
                 "corrected_text": "昨日、映画を見ました。",
+                "summary_ja": "已经发生的事情使用过去时。",
                 "summary_zh": "已经发生的事情使用过去时。",
                 "items": [
                     {
                         "original": "見る",
                         "replacement": "見ました",
+                        "reason_ja": "使用过去时并保持礼貌体。",
                         "reason_zh": "使用过去时并保持礼貌体。",
                         "category": "grammar",
                     }
@@ -326,11 +328,13 @@ def test_chat_repository_session_correction_filters_and_deletes() -> None:
             assistant_content="そうですね。最近は何を見ましたか？",
             correction={
                 "corrected_text": "映画は楽しいです。",
+                "summary_ja": "形容词礼貌体不接「だ」。",
                 "summary_zh": "形容词礼貌体不接「だ」。",
                 "items": [
                     {
                         "original": "楽しいだ",
                         "replacement": "楽しいです",
+                        "reason_ja": "い形容词直接接「です」。",
                         "reason_zh": "い形容词直接接「です」。",
                         "category": "grammar",
                     }
@@ -384,6 +388,7 @@ def test_chat_turn_transaction_rolls_back_every_partial_row() -> None:
                 assistant_content="partial assistant",
                 correction={
                     "corrected_text": "corrected",
+                    "summary_ja": "summary",
                     "summary_zh": "summary",
                     "items": [{"original": "old", "replacement": "new", "reason_zh": "reason"}],
                 },
@@ -398,6 +403,7 @@ def test_chat_turn_transaction_rolls_back_every_partial_row() -> None:
                 assistant_content="partial legacy assistant",
                 correction={
                     "corrected_text": "corrected",
+                    "summary_ja": "summary",
                     "summary_zh": "summary",
                     "items": [{"original": "old", "replacement": "new", "reason_zh": "reason"}],
                 },
@@ -424,7 +430,7 @@ def test_chat_api_end_to_end_with_mock_model(monkeypatch: pytest.MonkeyPatch) ->
     unique_topic = f"週末-{uuid.uuid4()}"
     responses = [
         """{
-          "correction":{"needed":false,"corrected_text":null,"summary_zh":null,"items":[]},
+          "correction":{"needed":false,"corrected_text":null,"summary_ja":null,"summary_zh":null,"items":[]},
           "reply_ja":"週末について話しましょう。",
           "follow_up_ja":"今週末は何をしたいですか？"
         }""",
@@ -432,9 +438,9 @@ def test_chat_api_end_to_end_with_mock_model(monkeypatch: pytest.MonkeyPatch) ->
           "correction":{
             "needed":true,
             "corrected_text":"昨日、映画を見ました。",
-            "summary_zh":"已经发生的事情使用过去时。",
+            "summary_ja":"已经发生的事情使用过去时。","summary_zh":"已经发生的事情使用过去时。",
             "items":[{
-              "original":"見る","replacement":"見ました","reason_zh":"使用过去时。","category":"grammar"
+              "original":"見る","replacement":"見ました","reason_ja":"使用过去时。","reason_zh":"使用过去时。","category":"grammar"
             }]
           },
           "reply_ja":"いいですね。映画館で見たんですか？",
@@ -691,11 +697,13 @@ def test_grammar_projection_preserves_learner_decisions_and_tracks_real_evidence
             assistant_content="準備が早いですね。",
             correction={
                 "corrected_text": "旅行の前に切符を買っておきます。",
+                "summary_ja": "使用正确的て形连接～ておく。",
                 "summary_zh": "使用正确的て形连接～ておく。",
                 "items": [
                     {
                         "original": "買うておきます",
                         "replacement": "買っておきます",
+                        "reason_ja": "五段动词「買う」的て形是「買って」。",
                         "reason_zh": "五段动词「買う」的て形是「買って」。",
                         "category": "grammar",
                         "grammar_key": grammar_key,
@@ -732,11 +740,13 @@ def test_grammar_projection_preserves_learner_decisions_and_tracks_real_evidence
             assistant_content="それなら安心ですね。",
             correction={
                 "corrected_text": "明日の会議を調べておきます。",
+                "summary_ja": "辞书形不能直接接～ておく。",
                 "summary_zh": "辞书形不能直接接～ておく。",
                 "items": [
                     {
                         "original": "調べるておきます",
                         "replacement": "調べておきます",
+                        "reason_ja": "先变成て形再接「おく」。",
                         "reason_zh": "先变成て形再接「おく」。",
                         "category": "grammar",
                         "grammar_key": grammar_key,
@@ -916,11 +926,13 @@ def test_deleting_the_only_automatic_grammar_evidence_restores_untouched_state()
             assistant_content="どんな映画でしたか？",
             correction={
                 "corrected_text": "昨日、映画を見た。",
+                "summary_ja": "过去发生的动作使用过去形。",
                 "summary_zh": "过去发生的动作使用过去形。",
                 "items": [
                     {
                         "original": "見る",
                         "replacement": "見た",
+                        "reason_ja": "昨天发生的动作要使用过去形。",
                         "reason_zh": "昨天发生的动作要使用过去形。",
                         "category": "grammar",
                         "grammar_key": grammar_key,
@@ -985,11 +997,13 @@ def test_deleting_a_mistake_does_not_forget_a_later_explicit_browse() -> None:
             assistant_content="どんな映画でしたか？",
             correction={
                 "corrected_text": "昨日、映画を見た。",
+                "summary_ja": "过去发生的动作使用过去形。",
                 "summary_zh": "过去发生的动作使用过去形。",
                 "items": [
                     {
                         "original": "見る",
                         "replacement": "見た",
+                        "reason_ja": "昨天发生的动作要使用过去形。",
                         "reason_zh": "昨天发生的动作要使用过去形。",
                         "category": "grammar",
                         "grammar_key": grammar_key,
@@ -1063,11 +1077,13 @@ def test_learning_event_dual_write_reject_unreject_and_cleanup_on_delete() -> No
             assistant_content="準備が早いですね。",
             correction={
                 "corrected_text": "旅行の前に切符を買っておきます。",
+                "summary_ja": "使用正确的て形连接～ておく。",
                 "summary_zh": "使用正确的て形连接～ておく。",
                 "items": [
                     {
                         "original": "買うておきます",
                         "replacement": "買っておきます",
+                        "reason_ja": "五段动词「買う」的て形是「買って」。",
                         "reason_zh": "五段动词「買う」的て形是「買って」。",
                         "category": "grammar",
                         "grammar_key": grammar_key,
@@ -1265,11 +1281,13 @@ def test_learning_event_failure_does_not_roll_back_a_completed_chat_turn(
             assistant_content="読んでいます。",
             correction={
                 "corrected_text": "読んでいます。",
+                "summary_ja": "て形",
                 "summary_zh": "て形",
                 "items": [
                     {
                         "original": "読むています",
                         "replacement": "読んでいます",
+                        "reason_ja": "て形",
                         "reason_zh": "て形",
                         "category": "grammar",
                         "grammar_key": grammar_key,
@@ -1709,11 +1727,13 @@ def test_backfill_covers_real_vocabulary_attempts_and_completed_shadowing() -> N
 def _correction(original: str, replacement: str, category: str, grammar_key: str | None = None):
     return {
         "corrected_text": replacement,
+        "summary_ja": "总结",
         "summary_zh": "总结",
         "items": [
             {
                 "original": original,
                 "replacement": replacement,
+                "reason_ja": "理由(日本語)",
                 "reason_zh": "理由",
                 "category": category,
                 **({"grammar_key": grammar_key} if grammar_key else {}),
@@ -2020,12 +2040,14 @@ def test_same_register_version_round_trips_through_the_correction_store() -> Non
         correction={
             "needed": True,
             "corrected_text": "話したいことが話せません",
+            "summary_ja": "可能形の否定を使う",
             "summary_zh": "可能形の否定を使う",
             "items": [
                 {
                     "original": "話さない",
                     "replacement": "話せません",
                     "same_register_replacement": "話せない",
+                    "reason_ja": "需要可能态否定；你原句是简体，这里给的是丁宁体",
                     "reason_zh": "需要可能态否定；你原句是简体，这里给的是丁宁体",
                     "category": "grammar",
                     "grammar_key": None,
@@ -2033,6 +2055,7 @@ def test_same_register_version_round_trips_through_the_correction_store() -> Non
                 {
                     "original": "話したいこと",
                     "replacement": "言いたいこと",
+                    "reason_ja": "自然な言い回し",
                     "reason_zh": "自然な言い回し",
                     "category": "naturalness",
                     "grammar_key": None,

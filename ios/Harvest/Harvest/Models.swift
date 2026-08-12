@@ -185,7 +185,10 @@ struct ChatCorrectionItem: Codable, Identifiable, Hashable {
     /// §5.6: set only when the fix also moved the register, so the politeness choice can
     /// be told apart from the correction itself. Null in the normal case.
     let sameRegisterReplacement: String?
-    let reasonZH: String
+    /// §18.2: two explanations, one per language. Both optional because rows written
+    /// before migration 0007 carry only one — new corrections always have both.
+    let reasonJA: String?
+    let reasonZH: String?
     let category: ChatCorrectionCategory
 
     enum CodingKeys: String, CodingKey {
@@ -193,6 +196,7 @@ struct ChatCorrectionItem: Codable, Identifiable, Hashable {
         case correctionID = "correction_id"
         case index = "idx"
         case sameRegisterReplacement = "same_register_replacement"
+        case reasonJA = "reason_ja"
         case reasonZH = "reason_zh"
     }
 }
@@ -203,7 +207,9 @@ struct ChatCorrection: Codable, Identifiable, Hashable {
     let userMessageID: Int
     let originalText: String
     let correctedText: String
-    let summaryZH: String
+    /// §18.2, same reasoning as ChatCorrectionItem.reasonJA/reasonZH.
+    let summaryJA: String?
+    let summaryZH: String?
     let createdAt: String
     let topic: String?
     let items: [ChatCorrectionItem]
@@ -214,6 +220,7 @@ struct ChatCorrection: Codable, Identifiable, Hashable {
         case userMessageID = "user_message_id"
         case originalText = "original_text"
         case correctedText = "corrected_text"
+        case summaryJA = "summary_ja"
         case summaryZH = "summary_zh"
         case createdAt = "created_at"
     }

@@ -685,6 +685,12 @@ private struct MessageBubble: View {
 private struct CorrectionCard: View {
     let correction: ChatCorrection
     let showsTopic: Bool
+    /// §18.2: Japanese open, Chinese closed. The Japanese explanation is the one the
+    /// learner has actually been reading (it was living in the mislabelled `_zh` field
+    /// all along); Chinese is there for when the Japanese does not land, which is not
+    /// most of the time — so it should not cost vertical space by default.
+    @State private var showsJapanese = true
+    @State private var showsChinese = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
@@ -702,9 +708,9 @@ private struct CorrectionCard: View {
             }
             correctionText(label: "原句", text: correction.originalText, muted: true)
             correctionText(label: "更自然", text: correction.correctedText, muted: false)
-            Text(correction.summaryZH)
-                .font(.subheadline)
-                .foregroundStyle(DesignTokens.ink)
+
+            // What changed stays outside the collapsible parts: it is the same in either
+            // language, and it is what you scan first to see whether the card matters.
             ForEach(correction.items.prefix(3)) { item in
                 VStack(alignment: .leading, spacing: 5) {
                     Text("\(item.original) → \(item.replacement)")
@@ -719,19 +725,24 @@ private struct CorrectionCard: View {
                             .foregroundStyle(DesignTokens.ink.opacity(0.85))
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    // The reason is the part actually worth reading, so it was the
-                    // wrong thing to set in the smallest, lightest type on the screen.
-                    // The category stays small; the explanation reads as body text.
                     Text(item.category.label)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(DesignTokens.accent.opacity(0.85))
-                    Text(item.reasonZH)
-                        .font(.subheadline)
-                        .foregroundStyle(DesignTokens.ink.opacity(0.85))
-                        .lineSpacing(5)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
+
+            explanationSection(
+                title: "日文讲解",
+                isExpanded: $showsJapanese,
+                summary: correction.summaryJA,
+                reason: { $0.reasonJA }
+            )
+            explanationSection(
+                title: "中文讲解",
+                isExpanded: $showsChinese,
+                summary: correction.summaryZH,
+                reason: { $0.reasonZH }
+            )
         }
         .padding(16)
         .background(DesignTokens.accentWash, in: RoundedRectangle(cornerRadius: DesignTokens.cardRadius))
@@ -740,6 +751,64 @@ private struct CorrectionCard: View {
                 .stroke(DesignTokens.accent.opacity(0.22), lineWidth: 0.5)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One language's explanation: the card-level summary plus each item's reason. The
+    /// whole thing is hidden when this language is missing — every correction written
+    /// after §18.2 has both, but rows from before migration 0007 have only Japanese, and
+    /// an empty disclosure row that opens onto nothing is worse than no row.
+    @ViewBuilder
+    private func explanationSection(
+        title: String,
+        isExpanded: Binding<Bool>,
+        summary: String?,
+        reason: @escaping (ChatCorrectionItem) -> String?
+    ) -> some View {
+        let items = correction.items.prefix(3).filter { !(reason($0) ?? "").isEmpty }
+        let hasSummary = !(summary ?? "").isEmpty
+        if hasSummary || !items.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { isExpanded.wrappedValue.toggle() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .rotationEffect(.degrees(isExpanded.wrappedValue ? 90 : 0))
+                        Text(title)
+                            .font(.caption.weight(.semibold))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(DesignTokens.accent)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if isExpanded.wrappedValue {
+                    if let summary, !summary.isEmpty {
+                        Text(summary)
+                            .font(.subheadline)
+                            .foregroundStyle(DesignTokens.ink)
+                            .lineSpacing(5)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    ForEach(items) { item in
+                        if let text = reason(item), !text.isEmpty {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(item.original)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(DesignTokens.muted)
+                                Text(text)
+                                    .font(.subheadline)
+                                    .foregroundStyle(DesignTokens.ink.opacity(0.85))
+                                    .lineSpacing(5)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private func correctionText(label: String, text: String, muted: Bool) -> some View {

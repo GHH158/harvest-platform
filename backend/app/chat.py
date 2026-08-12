@@ -106,15 +106,28 @@ Correction behavior
 - Evaluate grammar, word choice, naturalness, register, politeness, and orthography.
 - If the input is already correct and natural, do not manufacture a correction.
 - When correction is useful, preserve intent, provide one complete natural version, and identify at most three high-value issues.
-- Prioritize meaning, grammar, and naturalness. Explain briefly in Chinese.
-- When correction needs explanation, compress the shared learning order into the Chinese summary and reasons:
+- Prioritize meaning, grammar, and naturalness.
+- Every explanation is written twice, once per language, and both are required whenever
+  needed=true. This is not decoration: the learner reads the Japanese one by default and
+  opens the Chinese one when the Japanese does not land.
+  - summary_ja / reason_ja: Japanese, written for this learner to read directly. Keep doing
+    what you already do here — this is the version they have been reading and they asked
+    for it to stay as it is. Explain in Japanese slightly above their level, not in
+    textbook metalanguage.
+  - summary_zh / reason_zh: simplified Chinese, and genuinely written rather than
+    translated word for word. Shorter than the Japanese is fine. Spend it on what Chinese
+    speakers actually get wrong: when the word exists in Chinese with the same characters
+    but a different sense, scope or collocation, say what it is in Chinese, what it is in
+    Japanese, and why it cannot be carried across. Skip that comparison when there is no
+    real difference — do not manufacture one.
+- When correction needs explanation, compress the shared learning order into both summaries and reasons:
   why the expression fits this context, the key grammar or wording, then how to form the reusable natural expression.
   Do not add fixed section headings or change the JSON schema.
 - Distinguish actual errors from optional naturalness improvements; never call a valid alternative wrong.
 - Never emit an item whose replacement is identical to the original. If the phrase is fine as written,
   it is not a correction item — say it in the reply instead.
 - If your replacement also changes the register of what the learner wrote (they wrote plain form and you
-  answer in polite form, or the reverse), do two things: say so in reason_zh, and put the same-register
+  answer in polite form, or the reverse), do two things: say so in both reason_ja and reason_zh, and put the same-register
   version in same_register_replacement. Otherwise the learner cannot tell the fix apart from the
   politeness choice. Never raise or lower register silently. Leave same_register_replacement null when
   the register is unchanged — the normal case — and also when the register change *is* the correction
@@ -130,8 +143,8 @@ Output
 - Return exactly one JSON object, with no Markdown or surrounding commentary.
 - Allowed correction categories: grammar, word_choice, naturalness, register, orthography.
 - The exact schema is:
-{"correction":{"needed":true,"corrected_text":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","same_register_replacement":null,"reason_zh":"...","category":"grammar","grammar_key":null}]},"reply_ja":"...","follow_up_ja":"..."}
-- When correction is unnecessary, use needed=false, corrected_text=null, summary_zh=null, items=[].
+{"correction":{"needed":true,"corrected_text":"...","summary_ja":"...","summary_zh":"...","items":[{"original":"...","replacement":"...","same_register_replacement":null,"reason_ja":"...","reason_zh":"...","category":"grammar","grammar_key":null}]},"reply_ja":"...","follow_up_ja":"..."}
+- When correction is unnecessary, use needed=false, corrected_text=null, summary_ja=null, summary_zh=null, items=[].
 - follow_up_ja is optional: set it to null when this turn should not end with a question.
 - grammar_key links a correction item to the learner's grammar skeleton. Set it only when
   the mistake genuinely is that point, using a key from the list below verbatim. Leave it
@@ -171,6 +184,10 @@ class CorrectionItemOutput(BaseModel):
 
     original: str = Field(min_length=1, max_length=1_000)
     replacement: str = Field(min_length=1, max_length=1_000)
+    # §18.2: both languages required. `reason_ja` is what the card shows by default and is
+    # what the field named `reason_zh` had actually been holding until now — 15 of 16 real
+    # rows were Japanese despite the name and despite the prompt asking for Chinese.
+    reason_ja: str = Field(min_length=1, max_length=1_000)
     reason_zh: str = Field(min_length=1, max_length=1_000)
     # §5.6 (2026-08-10): only set when the fix also moved the register. Real usage had
     # 「話したいことが話さない」→「話したいことが話せません」: the learner wrote plain form,
@@ -184,7 +201,7 @@ class CorrectionItemOutput(BaseModel):
     # which is worse than no tag at all. Unknown keys are dropped server-side.
     grammar_key: str | None = Field(default=None, max_length=64)
 
-    @field_validator("original", "replacement", "reason_zh")
+    @field_validator("original", "replacement", "reason_ja", "reason_zh")
     @classmethod
     def strip_text(cls, value: str) -> str:
         value = value.strip()
@@ -214,6 +231,8 @@ class CorrectionOutput(BaseModel):
 
     needed: bool
     corrected_text: str | None = Field(default=None, max_length=4_000)
+    # §18.2: both languages, same reasoning as CorrectionItemOutput.reason_ja/reason_zh.
+    summary_ja: str | None = Field(default=None, max_length=1_000)
     summary_zh: str | None = Field(default=None, max_length=1_000)
     items: list[CorrectionItemOutput] = Field(default_factory=list, max_length=3)
 
@@ -238,16 +257,27 @@ class CorrectionOutput(BaseModel):
             # turn, not a quirk, and an existing test pins it.
             self.needed = False
             self.corrected_text = None
+            self.summary_ja = None
             self.summary_zh = None
             return self
         if self.needed:
-            if not (self.corrected_text or "").strip() or not (self.summary_zh or "").strip():
-                raise ValueError("需要纠错时必须提供完整修正版和中文总结。")
+            if (
+                not (self.corrected_text or "").strip()
+                or not (self.summary_ja or "").strip()
+                or not (self.summary_zh or "").strip()
+            ):
+                raise ValueError("需要纠错时必须提供完整修正版,以及日文和中文两份总结。")
             if not self.items:
                 raise ValueError("需要纠错时必须提供 1–3 个纠错点。")
             self.corrected_text = self.corrected_text.strip()
+            self.summary_ja = self.summary_ja.strip()
             self.summary_zh = self.summary_zh.strip()
-        elif self.corrected_text is not None or self.summary_zh is not None or self.items:
+        elif (
+            self.corrected_text is not None
+            or self.summary_ja is not None
+            or self.summary_zh is not None
+            or self.items
+        ):
             raise ValueError("无需纠错时修正版、总结和纠错点必须为空。")
         return self
 
