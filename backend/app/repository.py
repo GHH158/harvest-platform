@@ -1353,28 +1353,48 @@ class Repository:
         )
 
     def recover_stale_running_jobs(self, *, stale_seconds: int) -> int:
-        """Requeue jobs abandoned by a worker process that ended unexpectedly."""
+        """Requeue jobs abandoned by a worker process that ended unexpectedly.
+
+        Returns how many **jobs** were requeued. It used to return how many *materials*
+        were reset, which is zero for the standalone kinds that carry no `material_id` at
+        all (`split_video`, `fetch_video_upload`) — so the worker's "requeued N interrupted
+        job(s)" line stayed silent about precisely the long-running jobs most likely to be
+        interrupted in the first place.
+
+        A recovered `upload_video` sends its material back to `downloaded`, not `pending`.
+        Its bytes were already cut and registered locally; `downloaded` is the state whose
+        转录 button lets the user try again, and it is what this job's own failure path
+        (`mark_material_downloaded`) already does. `pending` would show "正在准备素材" for a
+        section sitting complete on disk, with no way to act on it.
+        """
+
         with self.engine.begin() as connection:
-            rows = connection.execute(
+            recovered = connection.execute(
                 text(
                     """
-                    WITH recovered AS (
-                        UPDATE job
-                        SET status = 'pending', error_message = 'Worker interrupted; automatically requeued.'
-                        WHERE status = 'running'
-                          AND updated_at < now() - (:stale_seconds * interval '1 second')
-                        RETURNING material_id
-                    )
-                    UPDATE material
-                    SET status = 'pending', error_message = NULL
-                    WHERE status = 'processing'
-                      AND id IN (SELECT material_id FROM recovered WHERE material_id IS NOT NULL)
-                    RETURNING id
+                    UPDATE job
+                    SET status = 'pending', error_message = 'Worker interrupted; automatically requeued.'
+                    WHERE status = 'running'
+                      AND updated_at < now() - (:stale_seconds * interval '1 second')
+                    RETURNING id, kind, material_id
                     """
                 ),
                 {"stale_seconds": stale_seconds},
-            ).all()
-        return len(rows)
+            ).mappings().all()
+            for row in recovered:
+                if row["material_id"] is None:
+                    continue
+                connection.execute(
+                    text(
+                        """UPDATE material SET status = :target, error_message = NULL
+                           WHERE status = 'processing' AND id = :material_id"""
+                    ),
+                    {
+                        "target": "downloaded" if str(row["kind"]) == "upload_video" else "pending",
+                        "material_id": int(row["material_id"]),
+                    },
+                )
+        return len(recovered)
 
     def fail_exhausted_pending_jobs(self, *, max_attempts: int) -> int:
         """Stop a repeatedly interrupted job from looping forever."""
@@ -1440,6 +1460,64 @@ class Repository:
                 {"material_id": material_id},
             ).mappings().first()
         return dict(row["payload"]) if row and row["payload"] else None
+
+    def material_cut_is_done(self, material_id: int) -> bool:
+        """Whether a split section already produced its own media (see `_split_video`).
+
+        `pending` and `failed` are the only two states that still need encoding. Anything
+        past them — `downloaded`, `processing`, `ready` — means the cut landed, and cutting
+        it again would overwrite good output with identical output at full ffmpeg cost.
+        """
+
+        with self.engine.connect() as connection:
+            status = connection.execute(
+                text("SELECT status FROM material WHERE id = :material_id"),
+                {"material_id": material_id},
+            ).scalar_one_or_none()
+        return status is not None and str(status) not in {"pending", "failed"}
+
+    def local_video_transcription_assets(self, material_id: int) -> dict[str, str] | None:
+        """The local files a `downloaded` video needs in order to start 转录.
+
+        The asset contract used to be "this material's own `transcode` job payload", and
+        that contract is unsatisfiable for a split section: the cut is one collection-level
+        `split_video` job with `material_id = NULL`, so a section never has a `transcode`
+        job of its own and 转录 answered 409 for every section of every split video.
+
+        The durable fact both paths share is the `media_asset` rows that
+        `store_downloaded_video_assets` writes when the transcode finishes — the same rows
+        `_purge_material_media` deletes by. Reading them here means "what 转录 will upload"
+        and "what deletion will remove" can never name different bytes.
+        """
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT kind, purpose, local_path FROM media_asset
+                       WHERE material_id = :material_id AND local_path IS NOT NULL
+                         AND ((kind = 'video' AND purpose = 'delivery')
+                           OR (kind = 'audio' AND purpose IN ('delivery', 'archive')))"""
+                ),
+                {"material_id": material_id},
+            ).mappings().all()
+        paths = {(str(row["kind"]), str(row["purpose"])): str(row["local_path"]) for row in rows}
+        try:
+            video_directory = Path(paths[("video", "delivery")])
+            audio_directory = Path(paths[("audio", "delivery")])
+            asr_audio = Path(paths[("audio", "archive")])
+        except KeyError:
+            return None
+        # Registered but missing bytes are not startable. Checked here rather than in the
+        # worker so the phone gets a 409 it can show, instead of a job that fails later.
+        if not (video_directory / "index.m3u8").is_file():
+            return None
+        if not (audio_directory / "index.m3u8").is_file() or not asr_audio.is_file():
+            return None
+        return {
+            "video_directory": str(video_directory),
+            "audio_directory": str(audio_directory),
+            "asr_audio_path": str(asr_audio),
+        }
 
     def merge_job_payload(self, job_id: int, values: dict[str, Any]) -> None:
         with self.engine.begin() as connection:

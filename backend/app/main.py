@@ -942,20 +942,18 @@ def enqueue_video_transcription(material_id: int) -> int:
         raise HTTPException(status_code=404, detail="素材不存在。")
     if material["kind"] != "video" or material["status"] != "downloaded":
         raise HTTPException(status_code=409, detail="只有已下载待转录的视频可以开始转录。")
-    transcode_payload = repo.latest_transcode_payload(material_id)
-    if not transcode_payload or not transcode_payload.get("source_path"):
-        raise HTTPException(status_code=409, detail="找不到本地转码记录，无法开始转录。")
-    output_dir = get_settings().data_dir / "video" / f"material-{material_id}"
+    local_assets = repo.local_video_transcription_assets(material_id)
+    if local_assets is None:
+        raise HTTPException(status_code=409, detail="找不到本地视频文件，无法开始转录。")
+    # A normal video keeps its original archive and wants it registered for §15.7's delete;
+    # a split section has none — §15.2 removes the uploaded original once the cut lands — so
+    # this stays absent rather than blocking 转录 on a file that is deliberately gone.
+    transcode_payload = repo.latest_transcode_payload(material_id) or {}
     repo.mark_material_processing(material_id)
     return repo.enqueue_job(
         kind="upload_video",
         material_id=material_id,
-        payload={
-            "source_path": transcode_payload["source_path"],
-            "video_directory": str(output_dir / "hls-video"),
-            "audio_directory": str(output_dir / "hls-audio"),
-            "asr_audio_path": str(output_dir / "asr-audio.m4a"),
-        },
+        payload={"source_path": transcode_payload.get("source_path"), **local_assets},
     )
 
 

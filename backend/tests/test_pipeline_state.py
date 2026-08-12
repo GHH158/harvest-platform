@@ -38,6 +38,12 @@ class PipelineRepository:
         self.voice_profile: tuple[str, str] | None = None
         self.job_payload_updates: tuple[int, dict[str, Any]] | None = None
         self.updated_title: tuple[int, str] | None = None
+        # Section ids that a previous (interrupted) pass already cut, so `_split_video`
+        # must skip them instead of re-encoding.
+        self.already_cut: set[int] = set()
+
+    def material_cut_is_done(self, material_id: int) -> bool:
+        return material_id in self.already_cut
 
     def fail_exhausted_pending_jobs(self, *, max_attempts: int) -> int:
         return 0
@@ -572,6 +578,46 @@ def test_split_video_registers_local_assets_for_every_section(tmp_path: Path) ->
             "audio_directory": str(output_dir / "hls-audio"),
             "asr_audio_path": str(output_dir / "asr-audio.m4a"),
         }
+
+
+def test_requeued_split_skips_sections_already_cut(tmp_path: Path) -> None:
+    """A requeued cut must not re-encode finished sections.
+
+    Real case 2026-08-12: a 1h52m video's cut was interrupted, requeued, and started over
+    from section 1 — about 12 minutes of ffmpeg per pass, with `worker_max_attempts = 3`.
+    Two interruptions therefore burned every attempt redoing completed work and then failed
+    the collection permanently.
+    """
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    job = Job(
+        id=1,
+        kind="split_video",
+        material_id=None,
+        payload={
+            "source_path": str(source),
+            "sections": [
+                {"material_id": 55, "index": 1, "start_ms": 0, "end_ms": 10_000},
+                {"material_id": 56, "index": 2, "start_ms": 10_000, "end_ms": 20_000},
+                {"material_id": 57, "index": 3, "start_ms": 20_000, "end_ms": None},
+            ],
+        },
+        attempts=2,
+    )
+    repository = PipelineRepository([job])
+    repository.already_cut = {55, 56}  # survived the interrupted first pass
+    worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
+    worker.video = FakeVideoProcessor()  # type: ignore[assignment]
+    worker.storage = FakeStorage()  # type: ignore[assignment]
+
+    while worker.run_one():
+        pass
+
+    assert repository.failed == []
+    assert repository.downloaded == [57], "只有第 3 节需要重切"
+    assert [material_id for material_id, _ in repository.downloaded_video_assets] == [57]
+    assert not source.exists(), "全部小节齐了，原片仍然要按 §15.2 删掉"
 
 
 def test_manual_transcription_chain_completes_pipeline(tmp_path: Path) -> None:

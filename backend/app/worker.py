@@ -363,6 +363,14 @@ class Worker:
         failures: list[str] = []
         for section in sections:
             material_id = int(section["material_id"])
+            # An interrupted cut is requeued whole, and re-encoding a section that already
+            # finished is the most expensive possible no-op: one 1h52m video is ~12 minutes
+            # of ffmpeg per pass, and `worker_max_attempts` is 3, so a machine that sleeps
+            # twice mid-cut used to burn every attempt redoing finished work and then fail
+            # permanently. Already-cut sections are left exactly as they are.
+            if self.repository.material_cut_is_done(material_id):
+                print(f"job={job.id} 第 {material_id} 节已经切好,跳过", flush=True)
+                continue
             start_ms = int(section["start_ms"])
             end_ms = section.get("end_ms")
             end_ms = int(end_ms) if end_ms is not None else None
@@ -448,9 +456,18 @@ class Worker:
         video_playlist = video_directory / "index.m3u8"
         audio_playlist = audio_directory / "index.m3u8"
         asr_audio = Path(str(job.payload.get("asr_audio_path", "")))
-        source = Path(str(job.payload.get("source_path", "")))
-        if not source.exists() or not video_playlist.exists() or not audio_playlist.exists() or not asr_audio.exists():
+        # The archive original is optional, and demanding it here was the second half of
+        # the bug that made 转录 impossible for split sections: §15.2 deletes the uploaded
+        # original the moment its cut lands, so `source_path` is legitimately absent for
+        # every section of every split video. What this job actually consumes is the HLS
+        # pair plus the ASR track; the archive only matters for registering it in
+        # `media_asset` so §15.7's delete can find it later.
+        source_value = str(job.payload.get("source_path") or "").strip()
+        source = Path(source_value) if source_value else None
+        if not video_playlist.exists() or not audio_playlist.exists() or not asr_audio.exists():
             raise RuntimeError("upload_video 任务缺少 HLS 或 ASR 音轨。")
+        if source is not None and not source.exists():
+            raise RuntimeError("upload_video 任务登记的原始视频已经不存在。")
         video_prefix = f"materials/{job.material_id}/hls/video"
         audio_prefix = f"materials/{job.material_id}/hls/audio"
         video_playlist_key = f"{video_prefix}/index.m3u8"
@@ -461,7 +478,7 @@ class Worker:
         self.storage.upload_file(asr_audio, temporary_audio_key)
         self.repository.store_video_assets(
             material_id=job.material_id,
-            source_path=str(source),
+            source_path=str(source) if source is not None else None,
             video_playlist_path=str(video_playlist),
             audio_playlist_path=str(audio_playlist),
             video_playlist_key=video_playlist_key,
@@ -667,9 +684,15 @@ def main() -> None:
     args = parser.parse_args()
     settings = get_settings()
     repository = Repository(make_engine(settings))
-    recovered = repository.recover_stale_running_jobs(stale_seconds=settings.worker_stale_running_seconds)
-    if recovered:
-        print(f"requeued {recovered} interrupted job(s)", flush=True)
+
+    def recover() -> None:
+        recovered = repository.recover_stale_running_jobs(
+            stale_seconds=settings.worker_stale_running_seconds
+        )
+        if recovered:
+            print(f"requeued {recovered} interrupted job(s)", flush=True)
+
+    recover()
     worker = Worker(repository, settings)
     if args.once:
         worker.run_one()
@@ -677,6 +700,18 @@ def main() -> None:
     print("Harvest worker is polling the job table.", flush=True)
     while True:
         if not worker.run_one():
+            # Recovery used to happen only in the line above the loop, so a job left
+            # `running` by a killed worker was checked exactly once — at the next startup,
+            # against a 15-minute staleness window. Miss that one window and the job was a
+            # permanent zombie: never `running`→`pending`, therefore never retried, never
+            # `failed`, and its material stuck in `processing` with no button to press.
+            # A real one happened on 2026-08-12 (job 101, stale by 9 minutes at boot).
+            #
+            # Safe to repeat here because it only runs when `run_one` found nothing to do:
+            # a single worker that is idle cannot be the one holding a `running` row, so
+            # anything still marked `running` has genuinely been abandoned. The staleness
+            # window stays as the guard against ever running a second worker alongside.
+            recover()
             time.sleep(settings.worker_poll_seconds)
 
 

@@ -12,6 +12,77 @@ from sqlalchemy import create_engine, text
 
 
 @pytest.mark.integration
+def test_interrupted_upload_video_recovers_to_downloaded_not_pending() -> None:
+    """An interrupted 转录 must hand the 转录 button back, not claim to be preparing.
+
+    Real case 2026-08-12: job 101 (`upload_video`, material 51) was left `running` by a
+    killed worker. Recovery set every recovered material to `pending`, which renders as
+    「正在准备素材」 — for a section already cut and sitting complete on disk. `downloaded`
+    is what this job's own failure path uses, and it is the state that shows 「转录」.
+    """
+
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    material_id, job_id = repository.create_material_with_job(
+        title="interrupted transcription",
+        source_type="file",
+        source_ref=None,
+        job_kind="upload_video",
+        payload={"video_directory": "/tmp/hls-video"},
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE job SET status = 'running' WHERE id = :job_id"), {"job_id": job_id}
+            )
+            connection.execute(
+                text("UPDATE material SET status = 'processing' WHERE id = :material_id"),
+                {"material_id": material_id},
+            )
+
+        assert repository.recover_stale_running_jobs(stale_seconds=-1) == 1
+        assert repository.get_job(job_id)["status"] == "pending"
+        assert repository.get_material(material_id)["status"] == "downloaded"
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = :material_id"), {"material_id": material_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_recovery_counts_standalone_jobs_that_own_no_material() -> None:
+    """`split_video` carries `material_id = NULL`, and it is the job most likely to be
+    interrupted (a 1h52m cut is ~12 minutes of ffmpeg). The count used to come from the
+    materials touched, so recovering one reported "0 requeued" and the log said nothing."""
+
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    job_id = repository.enqueue_job(kind="split_video", material_id=None, payload={"sections": []})
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE job SET status = 'running' WHERE id = :job_id"), {"job_id": job_id}
+            )
+
+        assert repository.recover_stale_running_jobs(stale_seconds=-1) == 1
+        assert repository.get_job(job_id)["status"] == "pending"
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM job WHERE id = :job_id"), {"job_id": job_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
 def test_recovery_attempt_limit_and_repeated_completion_are_safe() -> None:
     database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
     if not database_url:
