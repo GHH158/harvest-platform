@@ -651,14 +651,36 @@ extension APIClient {
         configuration.timeoutIntervalForResource = 7_200
         let uploadSession = URLSession(configuration: configuration)
         defer { uploadSession.finishTasksAndInvalidate() }
-        let (_, response) = try await uploadSession.upload(
+        let (data, response) = try await uploadSession.upload(
             for: request,
             fromFile: fileURL,
             delegate: UploadProgressDelegate(onProgress: onProgress)
         )
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw APIClientError.server("传到云端失败（HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)）。")
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+            // OSS answers a rejected PUT with a small XML body naming the real reason
+            // (e.g. SignatureDoesNotMatch, AccessDenied, RequestTimeTooSkewed) — worth
+            // more than the bare status code, which is all "403" ever says on its own.
+            let detail = ossErrorCode(from: data)
+            let suffix = detail.map { "：\($0)" } ?? ""
+            throw APIClientError.server("传到云端失败（HTTP \(statusCode)\(suffix)）。")
         }
+    }
+
+    /// Pulls `<Code>` (and `<Message>` when present) out of an OSS XML error body.
+    /// Best-effort: any parsing failure just means no detail is added, never a crash.
+    private func ossErrorCode(from data: Data) -> String? {
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        func extract(_ tag: String) -> String? {
+            guard let start = text.range(of: "<\(tag)>"), let end = text.range(of: "</\(tag)>") else { return nil }
+            let value = text[start.upperBound..<end.lowerBound]
+            return value.isEmpty ? nil : String(value)
+        }
+        guard let code = extract("Code") else { return nil }
+        if let message = extract("Message") {
+            return "\(code) - \(message)"
+        }
+        return code
     }
 
     /// `POST /videos/uploads/from-oss`: hand the Mac the key it should pull down.
