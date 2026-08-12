@@ -1970,6 +1970,7 @@ OSS 开通后先在后端设置页保存 Endpoint、Bucket、Access Key、公网
 | 2026-08-12 | **聊天没有时间感知(§14 补记)。** 使用者反馈"任何聊天的回答都没有基于时间的依据"。`build_journal_messages` 从不告诉模型现在几点——真实历史坐实此事:5 条记录集中写于同一晚(21:30-21:32),第 6 条相隔 38 小时,模型把它们当同一段对话接了下去。改为在新消息前插入相对时间提示(刚才/N分钟前/昨天/前天……),提示模型不要原样念出来;`JOURNAL_PROMPT_VERSION` 升到 `journal-v2`。 |
 | 2026-08-12 | **阅读页收纳清单改用弹窗(§16 补记)。** 使用者反馈"查看收纳内容会打开新页面,返回时要从头播放"。根因:清单原来用 `NavigationLink` 推入阅读页所在的同一个 `NavigationStack`,而 `ReaderView.onDisappear` 会 `player.stop()`——这是给已退场的陪读弹层写的,§16 砍陪读时没清理。改为 `.sheet`,内嵌独立 `NavigationStack` 承接"去问老师"的跳转;`HomeDestination.questions` 因此失去唯一调用方,一并删除。观看页(`VideoLearningView`)有相同结构,一并修过。 |
 | 2026-08-12 | **新增 §19:探索过线条插画方向(参照 [HalfAI1102/anthropic-art](https://github.com/HalfAI1102/anthropic-art) 核验过的 Claude/Anthropic 风格规范),用 `mcp__visualize` 画出真实渲染示意图放进实际页面比例后,使用者认为不好看,当场搁置。** 副产品是验证出一条"写 SVG→`qlmanage`转 PNG→读回来自查"的无依赖可视化自查回路,留作以后可用的方法。背后浮出的"最终想支持多用户"动机待定,§1.4 暂未修改 |
+| 2026-08-12 | **OSS 直传大文件仍 403,`Content-Type` 从"两侧沉默"改为"两侧显式一致"(§15.11 补记)。** 真机上传一个 1h52m 视频报 `SignatureDoesNotMatch`——此前诊断改进(解析 OSS 错误体)当场生效,拿到了真实错误码。此前所有 curl 小文件验证都用"两侧都不设 `Content-Type`"这条约定且全部成功,怀疑 `URLSession` 大文件上传路径可能自行附带一个未曾对比过的默认头。不去确认该怀疑,改为让 `presigned_put_url` 与 `putFileToOSS` 都显式声明同一个 `Content-Type: application/octet-stream`。**判据数据**:真实 OSS 上故意用不匹配的 `Content-Type` 发一次 PUT,复现出与手机完全相同的 `SignatureDoesNotMatch` 与 `StringToSign` 结构——证明只要签名值与实际请求头不一致就会是这个错,与具体谁造成不一致无关,显式对齐能保证消除这一整类问题 |
 
 ---
 
@@ -2669,6 +2670,16 @@ HLS 分片是 6 秒粒度,因此**每节的实际时长会被分片边界量化*
 - iOS 端 `putFileToOSS` 本就不设置 `Content-Type`,和 §15.11 最初验证过的约定一致,这次排查没有发现代码变过。
 
 **没能做的**:无法拿到手机那次失败请求的真实网络包,所以"OSS 具体报的是什么错"这一步只能靠猜。**已做的诊断改进**:`putFileToOSS` 失败时原来只丢弃 OSS 返回的错误体、只报 HTTP 状态码;现在解析出 `<Code>`/`<Message>` 一并显示,例如把"传到云端失败(HTTP 403)"变成"传到云端失败(HTTP 403:SignatureDoesNotMatch - ...)"。用此前一次真实 403 响应的 XML 验证过解析逻辑本身是对的。**待办**:使用者手机与 Mac 当晚重新连接后装这个新版本、复现问题,那时错误提示会给出真实原因,而不必再靠排除法猜测。
+
+**补记(2026-08-12,当晚):真机复现,诊断改进当场起效,拿到了真实错误码**。使用者上传一个 1 小时 52 分钟的视频,失败提示是"传到云底失败(HTTP 403:SignatureDoesNotMatch - The request signature we calculated does not match the signature you provided...)"——正是上面那次诊断改进要等的那个真实原因,不再是裸的 403。
+
+**根因判断**:此前用 curl 反复验证过的"两侧都不设 `Content-Type`"这条约定,在小文件测试里全部成功;这次失败的是一个大文件(视频)。怀疑点是 iOS `URLSession.upload(for:fromFile:)` 对较大文件体的上传路径可能会自行附上一个调用方没有设置过的 `Content-Type`,使实际请求携带的头和签名时(未携带任何头)不一致——`curl --data-binary` 验证过的"默认头"和 `URLSession` 大文件路径的"默认头"未必是同一回事,而两者都从未被真正对比过,这是判据不足的地方。
+
+**决定**:不去确认 `URLSession` 到底有没有这么做,而是把"两侧都不声明"这个脆弱的默契换成"两侧显式声明同一个值"——`ObjectStorage.presigned_put_url` 签名时显式带 `Content-Type: application/octet-stream`,`putFileToOSS` 发请求时显式设同一个值。谁的行为古怪不重要,两边显式对齐之后就不再有歧义空间。
+
+**实测(真实 OSS)**:签一个带显式 `Content-Type` 的 URL,`curl` 用匹配的头 `PUT`,200;另签一个,用不匹配的 `Content-Type: video/mp4` 去 `PUT`,得到和手机报的完全同一个错误——`SignatureDoesNotMatch`,`StringToSign` 里明确显示签名用的是 `video/mp4` 而请求要验证的是另一个值。这就是本节最初怀疑但没能坐实的机制的直接证据:签名内容和实际请求头不一致必定 403,不需要再猜是不是 `URLSession` 干的——只要出现不一致就会是这个错,显式对齐则不会。
+
+**验收**:`pytest tests/test_storage.py` 9 passed(重写了原先断言"不带 `Content-Type`"的用例,改断言显式值);真实 OSS 往返验证如上,测试对象已清理。
 
 ---
 

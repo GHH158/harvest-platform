@@ -190,18 +190,27 @@ class ObjectStorage:
         assert self.settings.oss_public_base_url  # Narrowed by validate_configuration.
         return f"{self.settings.oss_public_base_url.rstrip('/')}/{quote(oss_key)}"
 
+    #: §15.11 补记(2026-08-12): both sides used to stay silent about `Content-Type`
+    #: instead of agreeing on one — real-device evidence (a 1h52m video, genuine
+    #: `SignatureDoesNotMatch`) showed that contract does not hold for large uploads.
+    #: iOS's `URLSession` has documented cases of attaching a `Content-Type` on large
+    #: file uploads that the caller never set explicitly; silence on the signing side
+    #: cannot defend against a header appearing on the sending side that neither side
+    #: chose. Pinning both sides to the same explicit value removes the ambiguity
+    #: instead of relying on both staying quiet.
+    OSS_UPLOAD_CONTENT_TYPE = "application/octet-stream"
+
     def presigned_put_url(self, oss_key: str, *, expires_in: int) -> str:
         """A URL the phone can `PUT` a raw file to directly, bypassing the Mac (§15.11).
 
-        No `Content-Type` is folded into the signature on purpose: OSS's classic
-        signing includes whatever headers were passed here, and if the phone's actual
-        `PUT` sends a header this call didn't sign for, the request is rejected outright.
-        Leaving both sides silent about `Content-Type` is the only way to keep "sign a
-        URL" and "use it" from drifting out of sync.
+        Signed with an explicit `Content-Type` (see `OSS_UPLOAD_CONTENT_TYPE`) that the
+        phone's `PUT` must send verbatim — both sides agree on the same value rather
+        than both trying to omit it.
         """
 
         self.validate_configuration()
-        return self._bucket().sign_url("PUT", oss_key, expires_in)
+        headers = {"Content-Type": self.OSS_UPLOAD_CONTENT_TYPE}
+        return self._bucket().sign_url("PUT", oss_key, expires_in, headers=headers)
 
     def object_size(self, oss_key: str) -> int:
         """How big the object at `oss_key` actually is, straight from OSS.

@@ -636,8 +636,14 @@ extension APIClient {
         try await post("videos/oss-upload-url", body: ["filename": filename])
     }
 
-    /// `PUT`s the file straight to OSS — no multipart envelope, no `Content-Type`, because
-    /// the presigned URL was not signed for either (`ObjectStorage.presigned_put_url`).
+    /// `PUT`s the file straight to OSS — no multipart envelope. Sends the exact
+    /// `Content-Type` the presigned URL was signed for (`ObjectStorage.presigned_put_url`,
+    /// §15.11 补记): a real 1h52m video upload got `SignatureDoesNotMatch` under the old
+    /// "both sides stay silent" contract, most likely because `URLSession.upload(for:
+    /// fromFile:)` attaches its own `Content-Type` for large file bodies that neither side
+    /// had signed for. Setting it explicitly here keeps it identical to what the backend
+    /// signed, regardless of whether `URLSession` would have added something else on its
+    /// own.
     func putFileToOSS(
         _ fileURL: URL,
         to uploadURL: URL,
@@ -645,6 +651,7 @@ extension APIClient {
     ) async throws {
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "PUT"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 3_600
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 3_600

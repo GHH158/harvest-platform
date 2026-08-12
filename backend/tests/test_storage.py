@@ -143,17 +143,17 @@ class LifecycleRecordingBucket:
 
 class SigningBucket:
     def __init__(self) -> None:
-        self.signed: tuple[str, str, int] | None = None
+        self.signed: tuple[str, str, int, dict[str, str] | None] | None = None
 
-    def sign_url(self, method: str, key: str, expires: int) -> str:
-        self.signed = (method, key, expires)
+    def sign_url(self, method: str, key: str, expires: int, headers: dict[str, str] | None = None) -> str:
+        self.signed = (method, key, expires, headers)
         return f"https://oss-cn-beijing.aliyuncs.com/harvest-test/{key}?Signature=fake&Expires={expires}"
 
 
-def test_presigned_put_url_signs_a_put_without_content_type(monkeypatch) -> None:
-    # §15.11: no headers are passed to `sign_url` on purpose — the phone's actual `PUT`
-    # sends none either, and OSS rejects a presigned request whose headers do not match
-    # exactly what was signed.
+def test_presigned_put_url_signs_a_put_with_explicit_content_type(monkeypatch) -> None:
+    # §15.11 补记(2026-08-12): both sides now explicitly agree on `Content-Type` rather
+    # than both staying silent about it — a real large video upload got
+    # `SignatureDoesNotMatch` under the old silent contract.
     bucket = SigningBucket()
     storage = ObjectStorage(
         Settings(
@@ -168,8 +168,13 @@ def test_presigned_put_url_signs_a_put_without_content_type(monkeypatch) -> None
 
     url = storage.presigned_put_url("temporary/raw-uploads/abc.zip", expires_in=21_600)
 
-    assert bucket.signed == ("PUT", "temporary/raw-uploads/abc.zip", 21_600)
-    assert url == bucket.sign_url("PUT", "temporary/raw-uploads/abc.zip", 21_600)
+    assert bucket.signed == (
+        "PUT",
+        "temporary/raw-uploads/abc.zip",
+        21_600,
+        {"Content-Type": "application/octet-stream"},
+    )
+    assert url == "https://oss-cn-beijing.aliyuncs.com/harvest-test/temporary/raw-uploads/abc.zip?Signature=fake&Expires=21600"
 
 
 def test_object_size_reads_content_length_from_head_object(monkeypatch) -> None:
