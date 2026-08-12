@@ -709,13 +709,24 @@ struct MaterialCollection: Codable, Identifiable, Hashable {
     let createdAt: String
     let sectionCount: Int
     let readyCount: Int
+    /// Sections still waiting for or inside their encode. Server-derived, because a section
+    /// has no job of its own to report through and is excluded from the library list.
+    let cuttingCount: Int
+    let transcribingCount: Int
+    let failedCount: Int
     let totalDurationMs: Int
+
+    /// Whether anything is moving right now, so the screens showing this know to keep polling.
+    var hasWorkInFlight: Bool { cuttingCount > 0 || transcribingCount > 0 }
 
     enum CodingKeys: String, CodingKey {
         case id, title
         case createdAt = "created_at"
         case sectionCount = "section_count"
         case readyCount = "ready_count"
+        case cuttingCount = "cutting_count"
+        case transcribingCount = "transcribing_count"
+        case failedCount = "failed_count"
         case totalDurationMs = "total_duration_ms"
     }
 }

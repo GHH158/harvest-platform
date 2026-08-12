@@ -197,7 +197,25 @@ def serialise_material(material: dict) -> dict:
     material["failure_title"] = None
     material["failure_summary"] = None
 
-    if material.get("status") in {"pending", "processing"}:
+    is_uncut_section = (
+        not job_kind and material.get("collection_id") is not None and material.get("duration_ms") is None
+    )
+    if material.get("status") in {"pending", "processing"} and is_uncut_section:
+        # A section waiting for or inside its cut has no job of its own to describe: the cut
+        # is one collection-level `split_video` job with `material_id = NULL`. It therefore
+        # used to fall through to the generic default below and promise 「正在准备素材 · 约 3
+        # 分钟」 — for a 20-minute section that is off by an order of magnitude, and saying
+        # "3 minutes" to someone watching nothing happen for twelve is worse than saying
+        # nothing. No ETA is offered because none is knowable here: the honest unit of
+        # progress for a cut is how many sections have landed, which the collection reports.
+        #
+        # `duration_ms` is what separates "not cut yet" from "cut, so this is the upload":
+        # `mark_material_downloaded` writes it the moment the encode lands. Without that
+        # check a section whose job row had been cascade-deleted still claimed to be cutting.
+        # Same discriminator the collection counts use, so the two can never disagree.
+        material["progress_percent"] = 20
+        material["progress_label"] = "正在切这一节"
+    elif material.get("status") in {"pending", "processing"}:
         label, percent, eta = _MATERIAL_JOB_PRESENTATION.get(job_kind, ("正在准备素材", 8, 3))
         if job_status == "pending":
             percent = max(3, percent - 6)

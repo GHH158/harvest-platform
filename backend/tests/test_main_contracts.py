@@ -91,6 +91,81 @@ def test_photo_submission_uses_material_contract(monkeypatch: pytest.MonkeyPatch
     assert Path(repository.thumbnail[1]).read_bytes() == b"photo"
 
 
+def test_section_being_cut_does_not_promise_three_minutes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Real payload from 2026-08-12: section 54 of a 1h52m cut reported
+    `progress_label: "正在准备素材"` with `eta_minutes: 3`, while what it was actually
+    waiting for was a 27-minute encode. A section has no job of its own to describe (the
+    cut is one collection-level `split_video` job with `material_id = NULL`), so it fell
+    through to the generic default. Saying "3 分钟" to someone watching nothing move for
+    twelve is worse than saying nothing.
+    """
+
+    monkeypatch.setattr(main, "get_settings", lambda: Settings(data_dir=tmp_path))
+    section = main.serialise_material(
+        {
+            "id": 54,
+            "status": "pending",
+            "collection_id": 6,
+            "error_message": None,
+            "audio_oss_key": None,
+            "video_oss_key": None,
+            "thumbnail_local_path": None,
+            "current_job_id": None,
+            "current_job_kind": None,
+            "current_job_status": None,
+            "current_job_error_message": None,
+            "current_job_payload": None,
+            "current_job_updated_at": None,
+        }
+    )
+    assert section["progress_label"] == "正在切这一节"
+    assert section["eta_minutes"] is None, "切分没有可知的 ETA，不许编一个"
+
+    # Already cut (duration_ms present) but its job row is gone — a section whose job was
+    # cascade-deleted must not go on claiming to be mid-cut.
+    orphaned = main.serialise_material(
+        {
+            "id": 59,
+            "status": "processing",
+            "collection_id": 6,
+            "duration_ms": 1_642_987,
+            "error_message": None,
+            "audio_oss_key": None,
+            "video_oss_key": None,
+            "thumbnail_local_path": None,
+            "current_job_id": None,
+            "current_job_kind": None,
+            "current_job_status": None,
+            "current_job_error_message": None,
+            "current_job_payload": None,
+            "current_job_updated_at": None,
+        }
+    )
+    assert orphaned["progress_label"] != "正在切这一节"
+
+    # Once 转录 is tapped the section does own a job, and that job's real label must win.
+    transcribing = main.serialise_material(
+        {
+            "id": 54,
+            "status": "processing",
+            "collection_id": 6,
+            "error_message": None,
+            "audio_oss_key": None,
+            "video_oss_key": None,
+            "thumbnail_local_path": None,
+            "current_job_id": 101,
+            "current_job_kind": "upload_video",
+            "current_job_status": "running",
+            "current_job_payload": {},
+            "current_job_error_message": None,
+            "current_job_updated_at": datetime.now(UTC),
+        }
+    )
+    assert transcribing["progress_label"] == "正在上传媒体"
+
+
 def test_material_projection_exposes_stage_progress_and_failure_details(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

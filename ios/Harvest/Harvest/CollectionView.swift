@@ -75,6 +75,20 @@ struct CollectionDetailView: View {
         }
         .refreshable { await load() }
         .task { await load() }
+        .task {
+            // This screen used to load exactly once. Cutting a 1h52m video takes about
+            // twelve minutes and lands section by section, so the one view that shows the
+            // per-section truth sat frozen through all of it — sections finished behind a
+            // screen that kept saying 「正在切」 until a manual pull. Polls only while
+            // something is actually moving, and stops on its own when the work is done.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(4))
+                guard sections.contains(where: { $0.status == "pending" || $0.status == "processing" }) else {
+                    continue
+                }
+                await load(showingProgress: false)
+            }
+        }
     }
 
     private var header: some View {
@@ -94,8 +108,18 @@ struct CollectionDetailView: View {
         if collection.totalDurationMs > 0 {
             parts.append(clock(collection.totalDurationMs))
         }
+        // Counted off the freshly loaded `sections` rather than the `collection` value this
+        // screen was pushed with, so the line moves as the cut lands section by section.
+        let cutting = sections.filter { $0.status == "pending" || ($0.status == "processing" && $0.durationMs == nil) }.count
+        let transcribing = sections.filter { $0.status == "processing" && $0.durationMs != nil }.count
         let ready = sections.filter { $0.status == "ready" }.count
-        parts.append(ready > 0 ? "转录过 \(ready) 节" : "还没转录")
+        if cutting > 0 {
+            parts.append("还有 \(cutting) 节在切")
+        } else if transcribing > 0 {
+            parts.append("正在转录 \(transcribing) 节")
+        } else {
+            parts.append(ready > 0 ? "转录过 \(ready) 节" : "还没转录")
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -161,12 +185,13 @@ struct CollectionDetailView: View {
         section.status == "failed" ? DesignTokens.accent : DesignTokens.muted
     }
 
-    @MainActor private func load() async {
+    @MainActor private func load(showingProgress: Bool = true) async {
         guard let client else {
             errorMessage = "请先在设置中填写服务地址。"
             isLoading = false
             return
         }
+        if showingProgress { isLoading = true }
         do {
             sections = try await client.collectionDetail(id: collection.id).sections
             errorMessage = nil

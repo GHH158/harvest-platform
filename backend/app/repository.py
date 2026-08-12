@@ -2764,9 +2764,29 @@ class Repository:
     #: One definition of a collection row. The detail endpoint and the list must return the
     #: same shape — they did not at first, and the detail screen would have failed to decode
     #: on the very first open (§15.5).
+    #: `cutting_count` / `transcribing_count` / `failed_count` exist because work in
+    #: progress on a collection was invisible. A section being encoded has no job of its
+    #: own to report through — the cut is one collection-level `split_video` job with
+    #: `material_id = NULL` — and sections are excluded from `list_materials`, so nothing
+    #: on the library screen could tell "still cutting" from "finished, untranscribed".
+    #:
+    #: `status = 'processing'` alone cannot say *which* work is running: both the cut and
+    #: the later 转录 put a section there. `duration_ms` is the discriminator, and it is
+    #: not a guess — `mark_material_downloaded` writes it at the moment the cut lands, so
+    #: absent means "not cut yet" and present means "cut, so this must be the upload".
+    #:
+    #: Derived on read like the other counts (§15.5: no aggregate state stored on the
+    #: collection, since a stored copy can disagree with the sections it summarises).
     _COLLECTION_SELECT = """SELECT c.*,
                   count(m.id) AS section_count,
                   count(m.id) FILTER (WHERE m.status = 'ready') AS ready_count,
+                  count(m.id) FILTER (
+                      WHERE m.status IN ('pending', 'processing') AND m.duration_ms IS NULL
+                  ) AS cutting_count,
+                  count(m.id) FILTER (
+                      WHERE m.status = 'processing' AND m.duration_ms IS NOT NULL
+                  ) AS transcribing_count,
+                  count(m.id) FILTER (WHERE m.status = 'failed') AS failed_count,
                   coalesce(sum(m.duration_ms), 0) AS total_duration_ms
            FROM material_collection c
            LEFT JOIN material m ON m.collection_id = c.id"""

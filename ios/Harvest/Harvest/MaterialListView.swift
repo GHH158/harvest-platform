@@ -117,7 +117,13 @@ struct MaterialListView: View {
             // Poll only after the first paint finishes, and only while jobs are active.
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(4))
-                guard materials.contains(where: { $0.status == "pending" || $0.status == "processing" }) else {
+                // Collections have to be part of this condition, not just materials: their
+                // sections are excluded from the library list by design (`collection_id IS
+                // NULL`), so a collection could be mid-cut while `materials` held nothing
+                // active — the poll never fired and the card sat frozen until a manual pull.
+                let materialActive = materials.contains { $0.status == "pending" || $0.status == "processing" }
+                let collectionActive = collections.contains { $0.hasWorkInFlight }
+                guard materialActive || collectionActive else {
                     continue
                 }
                 await load(showingProgress: false)
@@ -177,7 +183,18 @@ struct MaterialListView: View {
                 parts.append("\(total) 秒")
             }
         }
-        parts.append(collection.readyCount > 0 ? "转录过 \(collection.readyCount) 节" : "还没转录")
+        // Work in flight outranks the transcription tally. A cut that is still running used
+        // to read exactly like a finished one — "4 节 · 还没转录" whether three sections were
+        // encoded or none — which is what made a 12-minute cut look like a hang.
+        if collection.cuttingCount > 0 {
+            parts.append("正在切 \(collection.cuttingCount) 节")
+        } else if collection.transcribingCount > 0 {
+            parts.append("正在转录 \(collection.transcribingCount) 节")
+        } else if collection.failedCount > 0 {
+            parts.append("\(collection.failedCount) 节没成功")
+        } else {
+            parts.append(collection.readyCount > 0 ? "转录过 \(collection.readyCount) 节" : "还没转录")
+        }
         return parts.joined(separator: " · ")
     }
 
