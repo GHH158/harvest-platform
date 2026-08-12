@@ -38,6 +38,12 @@ struct ReaderView: View {
     /// §16: shown on the toolbar so "there are questions waiting" is visible without a
     /// separate trip to check.
     @State private var pendingQuestionCount = 0
+    /// A sheet, not a push: opening this list used to share the same `NavigationStack` as
+    /// the reader, so ReaderView's `onDisappear` tore the player down every time and
+    /// coming back had to re-run the whole restore-position dance. A quick peek at the
+    /// list should not cost a stop/reseek round trip — the fix is to stop making the
+    /// reader disappear at all.
+    @State private var showingQuestions = false
     private let startsOffline: Bool
 
     init(materialID: Int) {
@@ -229,15 +235,28 @@ struct ReaderView: View {
         }
         .task(id: material.id) { await loadPendingQuestionCount(materialID: material.id) }
         .onAppear { Task { await loadPendingQuestionCount(materialID: material.id) } }
+        .sheet(isPresented: $showingQuestions, onDismiss: {
+            Task { await loadPendingQuestionCount(materialID: material.id) }
+        }) {
+            NavigationStack {
+                ReadingQuestionListView(materialID: material.id, materialTitle: material.title)
+                    .navigationDestination(for: HomeDestination.self) { destination in
+                        if case let .chatForMaterial(id) = destination {
+                            ChatView(initialMaterialID: id)
+                        }
+                    }
+            }
+            .environmentObject(configuration)
+        }
     }
 
     /// §16: 常驻,待处理为 0 时也要在——全部归档之后这里是进"已归档"的唯一入口,藏起来
     /// 就等于把看过的记录锁死了。计数只在有待处理时显示,空托盘用空心图标区分。
     @ViewBuilder
     private func questionsToolbarButton(_ material: MaterialDetail) -> some View {
-        NavigationLink(
-            value: HomeDestination.questions(materialID: material.id, materialTitle: material.title)
-        ) {
+        Button {
+            showingQuestions = true
+        } label: {
             HStack(spacing: 3) {
                 Image(systemName: pendingQuestionCount > 0 ? "tray.full" : "tray")
                 if pendingQuestionCount > 0 {

@@ -225,6 +225,10 @@ struct VideoLearningView: View {
     @State private var flagMessage: String?
     /// §16: shown next to the title so "there are questions waiting" is visible.
     @State private var pendingQuestionCount = 0
+    /// A sheet, not a push: pushing shared this view's `NavigationStack`, so leaving to
+    /// peek at the list paused every player via `onDisappear` and coming back needed a
+    /// full reseek. A sheet never triggers that — this view simply keeps playing.
+    @State private var showingQuestions = false
     @StateObject private var onlineVideo = OnlineMediaPlayer()
     @StateObject private var onlineAudio = OnlineMediaPlayer()
     @StateObject private var offlineVideoPlayer = OnlineMediaPlayer()
@@ -296,6 +300,19 @@ struct VideoLearningView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: flagMessage)
+        .sheet(isPresented: $showingQuestions, onDismiss: {
+            Task { await loadPendingQuestionCount() }
+        }) {
+            NavigationStack {
+                ReadingQuestionListView(materialID: material.id, materialTitle: material.title)
+                    .navigationDestination(for: HomeDestination.self) { destination in
+                        if case let .chatForMaterial(id) = destination {
+                            ChatView(initialMaterialID: id)
+                        }
+                    }
+            }
+            .environmentObject(configuration)
+        }
         .task { await restorePlaybackPosition() }
         .task(id: material.id) { await loadPendingQuestionCount() }
         .onAppear { Task { await loadPendingQuestionCount() } }
@@ -358,9 +375,9 @@ struct VideoLearningView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             // §16: 常驻,待处理为 0 时也在——全部归档之后这是进"已归档"的唯一入口。
-            NavigationLink(
-                value: HomeDestination.questions(materialID: material.id, materialTitle: material.title)
-            ) {
+            Button {
+                showingQuestions = true
+            } label: {
                 HStack(spacing: 3) {
                     Image(systemName: pendingQuestionCount > 0 ? "tray.full" : "tray")
                     if pendingQuestionCount > 0 {

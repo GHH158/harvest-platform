@@ -39,7 +39,11 @@ VOICE_TEACHER_SYSTEM_PROMPT = (
 )
 
 
-JOURNAL_PROMPT_VERSION = "journal-v1"
+# v2 (2026-08-12): build_journal_messages now injects a relative-time system note before
+# the new entry when there is a prior one — the prompt text below is unchanged, but the
+# actual message list sent to the model is not, so replies from before/after this date
+# have a version to attribute the difference to.
+JOURNAL_PROMPT_VERSION = "journal-v2"
 
 # §14.4. Deliberately does NOT build on INTERACTIVE_TEACHING_CORE_PROMPT: every line of
 # the teaching core (Chinese-native contrastive explanation, an N5 starting point, example

@@ -6,6 +6,10 @@ struct ReadingQuestionListView: View {
     let materialID: Int
     let materialTitle: String
     @EnvironmentObject private var configuration: AppConfiguration
+    /// §16 补记(2026-08-12): this is always presented as a sheet now (never pushed), so
+    /// there is no back button to fall back on — swipe-to-dismiss works but is not
+    /// discoverable enough to be the only way out.
+    @Environment(\.dismiss) private var dismiss
     @State private var questions: [ReadingQuestion] = []
     @State private var isLoading = true
     @State private var errorMessage: String?
@@ -42,6 +46,12 @@ struct ReadingQuestionListView: View {
         .background(DesignTokens.canvas.ignoresSafeArea())
         .navigationTitle(materialTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("完成") { dismiss() }
+                    .foregroundStyle(DesignTokens.accent)
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             askTeacherButton
         }

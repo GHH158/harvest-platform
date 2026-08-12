@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from app.config import Settings
@@ -20,7 +21,7 @@ def test_journal_prompt_is_not_built_on_the_teaching_core() -> None:
     assert INTERACTIVE_TEACHING_CORE_PROMPT not in JOURNAL_SYSTEM_PROMPT
     assert "N5" not in JOURNAL_SYSTEM_PROMPT
     assert "语法" not in JOURNAL_SYSTEM_PROMPT.split("边界")[0]
-    assert JOURNAL_PROMPT_VERSION == "journal-v1"
+    assert JOURNAL_PROMPT_VERSION == "journal-v2"
 
 
 def test_journal_prompt_asks_for_a_person_before_it_forbids_anything() -> None:
@@ -62,6 +63,61 @@ def test_journal_messages_flatten_history_then_end_with_the_new_entry() -> None:
     # The blank entry contributes nothing rather than an empty turn.
     assert messages[-1] == {"role": "user", "content": "现在还在加班。"}
     assert len(messages) == 4
+
+
+def test_no_history_means_no_time_note() -> None:
+    """A brand-new session has nothing to measure a gap against."""
+
+    messages = build_journal_messages(history=[], body="第一次写。")
+    assert messages == [
+        {"role": "system", "content": JOURNAL_SYSTEM_PROMPT},
+        {"role": "user", "content": "第一次写。"},
+    ]
+
+
+def test_time_note_names_the_real_gap_that_was_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§14 补记(2026-08-12): the actual bug. Five entries written within two minutes on
+    2026-08-10 evening, then this sixth one ~38 hours later — the model answered as if no
+    time had passed, because `history` carried no clock at all. Pinned with the real
+    timestamps rather than round numbers so a future refactor cannot quietly drop the
+    field this depends on (`entry.get("created_at")`) without a test noticing.
+    """
+
+    last_entry_at = datetime(2026, 8, 10, 21, 32, 48, tzinfo=timezone(timedelta(hours=8)))
+    now = datetime(2026, 8, 12, 11, 54, 37, tzinfo=timezone(timedelta(hours=8)))
+
+    messages = build_journal_messages(
+        history=[{"body": "今天开会开到八点。", "replies": [], "created_at": last_entry_at}],
+        body="又是加班的一天。",
+        now=now,
+    )
+
+    note = messages[-2]
+    assert note["role"] == "system"
+    assert "上一条是前天写的" in note["content"]
+    assert "08月12日 11:54" in note["content"]
+    # It is calibration for the model, not a script — must not tell it to recite the gap.
+    assert "原样念出来" in note["content"]
+    assert messages[-1] == {"role": "user", "content": "又是加班的一天。"}
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (30, "刚才"),
+        (5 * 60, "5 分钟前"),
+        (3 * 3_600, "3 小时前"),
+        (30 * 3_600, "昨天"),
+        (48 * 3_600, "前天"),
+        (5 * 86_400, "5 天前"),
+        (20 * 86_400, "3 周前"),
+        (90 * 86_400, "3 个月前"),
+    ],
+)
+def test_relative_gap_phrasing_covers_minutes_through_months(seconds: int, expected: str) -> None:
+    from app.journal import _relative_gap_zh
+
+    assert _relative_gap_zh(seconds) == expected
 
 
 def test_journal_reply_is_plain_text_with_no_json_contract() -> None:

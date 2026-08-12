@@ -58,8 +58,6 @@ struct HomeView: View {
             case let .material(materialID): ReaderView(materialID: materialID)
             case let .grammar(point): GrammarDetailView(point: point)
             case .settings: SettingsView(isOnboarding: false)
-            case let .questions(materialID, materialTitle):
-                ReadingQuestionListView(materialID: materialID, materialTitle: materialTitle)
             case let .chatForMaterial(materialID): ChatView(initialMaterialID: materialID)
             }
         }
@@ -307,9 +305,11 @@ enum HomeDestination: Hashable {
     case material(Int)
     case grammar(GrammarPoint)
     case settings
-    /// §16: the flagged-questions list for one material.
-    case questions(materialID: Int, materialTitle: String)
     /// §16: "去问老师" — a chat session pre-loaded with one material's flagged questions.
+    /// The list itself (§16) used to be another case here, pushed onto this same stack —
+    /// §16 补记(2026-08-12) moved it to a sheet from the reader/watch page instead (peeking
+    /// at it must not stop playback the way leaving this stack did), so it no longer needs
+    /// a case of its own; each presenter constructs `ReadingQuestionListView` directly.
     case chatForMaterial(Int)
 }
 
