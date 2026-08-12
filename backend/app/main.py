@@ -32,6 +32,7 @@ from .chat import (
     generate_chat_turn,
     suppress_follow_up,
     topic_for,
+    translate_to_chinese,
 )
 from .config import ROOT_DIR, get_settings
 from .db import apply_schema, make_engine
@@ -1230,6 +1231,37 @@ def delete_chat_session(session_id: str) -> Response:
     if not repository().delete_chat_session(session_id):
         raise HTTPException(status_code=404, detail="聊天会话不存在。")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/chat/messages/{message_id}/translation")
+def post_chat_message_translation(message_id: int) -> dict:
+    """§18.1: the Chinese translation of one assistant reply, generated on first ask.
+
+    Idempotent by design — a stored translation is returned as-is rather than
+    regenerated, so toggling the switch repeatedly costs one model call in total and the
+    text does not quietly change under the learner between taps.
+
+    Only assistant replies: the learner's own messages are their own words, and there is
+    nothing to reveal by translating them back.
+    """
+
+    repo = repository()
+    message = repo.get_chat_message(message_id)
+    if message is None:
+        raise HTTPException(status_code=404, detail="这条消息不存在。")
+    if message["role"] != "assistant":
+        raise HTTPException(status_code=422, detail="只翻译老师的回答。")
+    existing = (message.get("translation_zh") or "").strip()
+    if existing:
+        return {"id": message_id, "translation_zh": existing, "cached": True}
+    try:
+        translated = translate_to_chinese(llm_service(), message["content"])
+    except Exception as error:
+        raise _llm_error(error) from error
+    updated = repo.set_chat_message_translation(message_id, translated)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="这条消息不存在。")
+    return {"id": message_id, "translation_zh": translated, "cached": False}
 
 
 @app.post("/chat/sessions/{session_id}/messages")

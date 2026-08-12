@@ -158,6 +158,12 @@ CREATE TABLE IF NOT EXISTS chat_message (
     content       TEXT NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- §18.1: the Chinese translation of an assistant reply, filled in the first time the
+-- learner asks for one and kept afterwards. Null is the normal state: the toggle is off
+-- by default, so generating a translation with every turn would pay for something usually
+-- never read. Pure addition, so it belongs in the baseline by §7.5's test — running it
+-- twice cannot change a row.
+ALTER TABLE chat_message ADD COLUMN IF NOT EXISTS translation_zh TEXT;
 -- Stays in the baseline despite being an INSERT (§7.5): it must run before the
 -- foreign key below, and that same foreign key is what makes it permanently a
 -- no-op. ON DELETE CASCADE means chat_message can never again hold a session_id

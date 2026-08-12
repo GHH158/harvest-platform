@@ -108,12 +108,27 @@ struct ConversationMessage: Codable, Identifiable, Hashable {
     let sessionID: String?
     let role: String
     let content: String
+    /// §18.1: filled the first time the learner opens the translation on this reply, and
+    /// kept afterwards. Nil means "never asked for", not "not translatable".
+    let translationZH: String?
     let createdAt: String
 
     enum CodingKeys: String, CodingKey {
         case id, role, content
         case sessionID = "session_id"
+        case translationZH = "translation_zh"
         case createdAt = "created_at"
+    }
+}
+
+/// §18.1 response of `POST /chat/messages/{id}/translation`.
+struct ChatMessageTranslation: Codable {
+    let id: Int
+    let translationZH: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case translationZH = "translation_zh"
     }
 }
 

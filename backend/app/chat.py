@@ -527,3 +527,33 @@ def correction_payload(turn: ChatModelTurn) -> dict | None:
 # see it, so there was no way to tell whether it helped. The visible version stayed.
 # Before that it was `build_correction_guidance`, which re-derived categories from raw
 # `chat_correction_item` rows on every call. Neither exists now.
+
+
+# §18.1: translating a reply is not teaching it. The card in §18.2 is where explanation
+# belongs; this is for the moment the learner just wants to know what the sentence said,
+# so anything added here (grammar notes, encouragement, alternatives) is noise that makes
+# the toggle worse than useless.
+TRANSLATION_PROMPT = """把日语句子翻译成简体中文。
+
+- 只输出译文本身,不要加解释、注释、语法说明或任何前后缀。
+- 忠实于原文的意思和语气:随意的说法译得随意,礼貌的说法译得礼貌。
+- 保持原文的分段和换行。
+- 遇到没有恰当中文对应的说法,选最接近的自然中文,不要音译,也不要保留日语原词。
+- 原文里出现的人名、书名、作品名照原样保留。"""
+
+
+def translate_to_chinese(llm: LLMService, text_ja: str) -> str:
+    """One reply in, one Chinese translation out. No JSON: the whole output is the answer."""
+
+    reply = llm.reply(
+        [
+            {"role": "system", "content": TRANSLATION_PROMPT},
+            {"role": "user", "content": text_ja},
+        ],
+        enable_thinking=False,
+        max_tokens=800,
+    )
+    translated = (reply or "").strip()
+    if not translated:
+        raise ChatOutputError("翻译返回为空。")
+    return translated

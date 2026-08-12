@@ -284,6 +284,15 @@ struct APIClient {
         return try await send(request)
     }
 
+    /// §18.1: generates the Chinese translation on first ask and returns the stored one
+    /// afterwards, so repeated toggling costs a single model call.
+    func translateChatMessage(id: Int) async throws -> ChatMessageTranslation {
+        var request = URLRequest(url: baseURL.appending(path: "chat/messages/\(id)/translation"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        return try await send(request)
+    }
+
     /// §5.18: at most one fact about where you left off, or nil.
     func resumeHint() async throws -> ResumeHint? {
         let envelope: ResumeHintEnvelope = try await get("home/resume")

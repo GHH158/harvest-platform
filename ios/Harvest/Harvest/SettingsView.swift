@@ -5,6 +5,10 @@ struct SettingsView: View {
     let isOnboarding: Bool
     @State private var endpoint = ""
     @State private var errorMessage: String?
+    /// §18.1: the starting position of the per-reply translation switch in chat. Off by
+    /// default — reading the Japanese first is the point, and the switch is one tap away
+    /// on any reply that does not land.
+    @AppStorage("chatTranslationDefaultsOn") private var translationDefaultsOn = false
 
     init(isOnboarding: Bool) {
         self.isOnboarding = isOnboarding
@@ -74,6 +78,10 @@ struct SettingsView: View {
                     .foregroundStyle(DesignTokens.accent)
                 }
 
+                if !isOnboarding {
+                    chatSection
+                }
+
                 if !isOnboarding, configuration.endpoint != nil {
                     downloadsSection
                 }
@@ -88,6 +96,26 @@ struct SettingsView: View {
             if endpoint.isEmpty {
                 endpoint = configuration.endpoint?.absoluteString ?? ""
             }
+        }
+    }
+
+    /// §18.1: only the default. The switch under each reply still overrides it per reply,
+    /// so this is "how should it start", not "always show" — nothing here forces a
+    /// translation the learner did not ask for.
+    private var chatSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SectionHeader(title: "聊天", caption: "老师回答下面那个中文翻译开关，一开始是开还是关。")
+            Toggle(isOn: $translationDefaultsOn) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("默认显示中文翻译")
+                        .font(.system(size: 17, design: .serif))
+                        .foregroundStyle(DesignTokens.ink)
+                    Text("关着的时候先读日语，读不下来再点开")
+                        .font(.footnote)
+                        .foregroundStyle(DesignTokens.muted)
+                }
+            }
+            .tint(DesignTokens.accent)
         }
     }
 

@@ -848,6 +848,32 @@ class Repository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def get_chat_message(self, message_id: int) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT * FROM chat_message WHERE id = :id"), {"id": message_id}
+            ).mappings().one_or_none()
+        return dict(row) if row else None
+
+    def set_chat_message_translation(self, message_id: int, translation_zh: str) -> dict[str, Any] | None:
+        """§18.1: written once, on the first request, and kept.
+
+        Not part of the turn itself: the toggle defaults to off, so translating every
+        reply as it arrives would spend a model call per turn on something usually never
+        opened. The row is the cache, so the second tap costs nothing and it survives
+        reinstalling the app.
+        """
+
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    """UPDATE chat_message SET translation_zh = :translation_zh
+                       WHERE id = :id RETURNING *"""
+                ),
+                {"id": message_id, "translation_zh": translation_zh},
+            ).mappings().one_or_none()
+        return dict(row) if row else None
+
     def chat_session_detail(self, session_id: str) -> dict[str, Any] | None:
         session = self.get_chat_session(session_id)
         if session is None:

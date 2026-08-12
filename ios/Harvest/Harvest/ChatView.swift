@@ -149,6 +149,9 @@ final class ChatStore: ObservableObject {
             sessionID: activeSession.id,
             role: "user",
             content: message,
+            // The learner's own message is never translated (§18.1), and this placeholder
+            // is replaced by the server's row as soon as the turn returns.
+            translationZH: nil,
             createdAt: ISO8601DateFormatter().string(from: Date())
         )
         draft = ""
@@ -266,6 +269,9 @@ struct ChatView: View {
     @State private var lookupWord: LookupWord?
     @FocusState private var isInputFocused: Bool
     @AppStorage("showFurigana") private var showFurigana = false
+    /// §18.1: the learner's chosen default for the per-reply translation toggle. Off unless
+    /// they turned it on in settings — reading the Japanese first is the point of the app.
+    @AppStorage("chatTranslationDefaultsOn") private var translationDefaultsOn = false
     /// Avoid loading chat topics until the user opens this tab (TabView would otherwise fire on cold start).
     var isActive: Bool = true
     /// §16: "去问老师" arrives here wanting a session pre-loaded with one lesson's
@@ -502,9 +508,14 @@ struct ChatView: View {
                 message: message,
                 showFurigana: showFurigana,
                 furiganaCache: store.furiganaCache,
+                translationDefaultsOn: translationDefaultsOn,
                 onWordTap: { word in
                     isInputFocused = false
                     lookupWord = LookupWord(word: word, context: message.content)
+                },
+                onRequestTranslation: { id in
+                    guard let client else { return nil }
+                    return try? await client.translateChatMessage(id: id).translationZH
                 }
             )
         case .correction(let correction):
@@ -640,11 +651,33 @@ private struct MessageBubble: View {
     let message: ConversationMessage
     var showFurigana = false
     var furiganaCache: [String: [FuriganaSegment]] = [:]
+    /// §18.1: what the switch starts as, from settings. Per-reply state still wins after a tap.
+    var translationDefaultsOn = false
     var onWordTap: ((String) -> Void)?
+    /// Returns the Chinese translation, generating it server-side on first ask. Nil on failure.
+    var onRequestTranslation: ((Int) async -> String?)?
+
+    @State private var showsTranslation: Bool?
+    @State private var translation: String?
+    @State private var isTranslating = false
+    @State private var translationFailed = false
 
     private var isUser: Bool { message.role == "user" }
+    private var isShowingTranslation: Bool { showsTranslation ?? translationDefaultsOn }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            bubble
+            // §18.1: only the teacher's replies. The learner's own messages are their own
+            // words — translating them back says nothing.
+            if !isUser {
+                translationRow
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+    }
+
+    private var bubble: some View {
         // Tap a word to look it up directly; long-press still selects/copies for phrases.
         SelectableText(
             text: message.content,
@@ -678,6 +711,82 @@ private struct MessageBubble: View {
             } label: {
                 Label("复制全文", systemImage: "doc.on.doc")
             }
+        }
+    }
+
+    /// The toggle plus, when open, the translation itself. Deliberately an icon with no
+    /// label: it sits under every single reply, and a word there would repeat down the
+    /// whole transcript.
+    @ViewBuilder
+    private var translationRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Button {
+                    toggle()
+                } label: {
+                    if isTranslating {
+                        ProgressView().controlSize(.small).tint(DesignTokens.muted)
+                    } else {
+                        Image(systemName: isShowingTranslation ? "character.bubble.fill" : "character.bubble")
+                            .font(.footnote)
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(isShowingTranslation ? DesignTokens.accent : DesignTokens.muted)
+                .disabled(isTranslating)
+                .accessibilityLabel(isShowingTranslation ? "隐藏中文翻译" : "显示中文翻译")
+
+                if translationFailed {
+                    Text("翻译没取到，再点一下试试")
+                        .font(.caption2)
+                        .foregroundStyle(DesignTokens.accent)
+                }
+            }
+            .padding(.leading, 4)
+
+            if isShowingTranslation, let translation, !translation.isEmpty {
+                Text(translation)
+                    .font(.subheadline)
+                    .foregroundStyle(DesignTokens.muted)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 15)
+                    .frame(
+                        maxWidth: UIScreen.main.bounds.width * 0.88,
+                        alignment: .leading
+                    )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(.easeOut(duration: 0.18), value: isShowingTranslation)
+        .task(id: message.id) {
+            // Arrives already translated when it was opened before, so a reopened session
+            // shows it without a round trip.
+            translation = message.translationZH
+            // Honour a settings default of "on" by fetching on first appearance.
+            if translation == nil, translationDefaultsOn { await fetch() }
+        }
+    }
+
+    private func toggle() {
+        let next = !isShowingTranslation
+        showsTranslation = next
+        guard next, translation == nil else { return }
+        Task { await fetch() }
+    }
+
+    @MainActor
+    private func fetch() async {
+        guard let onRequestTranslation, !isTranslating else { return }
+        isTranslating = true
+        translationFailed = false
+        defer { isTranslating = false }
+        if let text = await onRequestTranslation(message.id), !text.isEmpty {
+            translation = text
+        } else {
+            translationFailed = true
+            // Do not leave the switch reading "on" over nothing.
+            showsTranslation = false
         }
     }
 }
