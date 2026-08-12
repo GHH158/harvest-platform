@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     video_download_max_height: int = Field(default=720, ge=240, le=2_160)
     video_download_max_fps: int = Field(default=30, ge=15, le=120)
     video_transcode_max_threads: int = Field(default=2, ge=1, le=8)
+    # What gets *delivered*, kept separate from `video_download_max_height` (what gets
+    # fetched). One knob used to serve both, so shrinking the published HLS would also have
+    # degraded the source we cut from — and the source is worth keeping better than the
+    # stream, because re-cutting reads it again.
+    video_hls_max_height: int = Field(default=480, ge=240, le=1_080)
+    video_hls_video_bitrate_kbps: int = Field(default=600, ge=200, le=4_000)
     data_dir: Path = ROOT_DIR / "backend" / "data"
 
     @property

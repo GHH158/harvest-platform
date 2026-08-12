@@ -129,6 +129,28 @@ def test_video_processor_directly_packages_compatible_h264(monkeypatch, tmp_path
     assert "-vf" not in calls[0]
 
 
+def test_delivered_hls_uses_the_configured_size_and_derives_its_ceilings(monkeypatch, tmp_path: Path) -> None:
+    """720p/1500k made one 27-minute section 252MB, and this machine publishes to OSS at
+    about 145 KB/s — half an hour of waiting before a section could be watched. The default
+    is 480p/600k; `maxrate` and `bufsize` are derived so raising the bitrate cannot leave a
+    ceiling behind that forbids using it.
+    """
+
+    processor = VideoProcessor(max_threads=2, max_height=480, video_bitrate_kbps=600)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(processor, "_run", lambda *arguments: calls.append(arguments))
+
+    processor._video_hls(tmp_path / "source.mp4", tmp_path / "video", direct_video_copy=False)
+
+    arguments = calls[0]
+    assert "scale=-2:min(480\\,ih)" in arguments
+    assert arguments[arguments.index("-b:v") + 1] == "600k"
+    assert arguments[arguments.index("-maxrate") + 1] == "720k"
+    assert arguments[arguments.index("-bufsize") + 1] == "1200k"
+    # The audio track is the material in a listening app; it did not come down with the video.
+    assert arguments[arguments.index("-b:a") + 1] == "128k"
+
+
 def test_video_processor_limits_software_fallback_threads(monkeypatch, tmp_path: Path) -> None:
     processor = VideoProcessor(max_threads=2)
     calls: list[tuple[str, ...]] = []

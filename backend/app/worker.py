@@ -57,7 +57,8 @@ class Worker:
         self.storage = ObjectStorage(settings)
         self.video = VideoProcessor(
             max_threads=settings.video_transcode_max_threads,
-            max_height=settings.video_download_max_height,
+            max_height=settings.video_hls_max_height,
+            video_bitrate_kbps=settings.video_hls_video_bitrate_kbps,
         )
         self.video_downloader = VideoDownloader(
             max_bytes=settings.max_video_upload_bytes,

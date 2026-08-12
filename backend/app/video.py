@@ -144,10 +144,28 @@ class VideoProcessor:
 
     segment_seconds = 6
 
-    def __init__(self, *, max_threads: int = 2, max_height: int = 720) -> None:
+    def __init__(
+        self,
+        *,
+        max_threads: int = 2,
+        max_height: int = 480,
+        video_bitrate_kbps: int = 600,
+    ) -> None:
+        """`max_height` / `video_bitrate_kbps` size the *delivered* HLS, not the fetch.
+
+        Measured 2026-08-12 on a real 1h52m film: at 720p/1500k one 27-minute section was
+        252MB, and this machine's real uplink to OSS is about 145 KB/s (`upload_tree`, the
+        production path), so a single section took ~30 minutes to publish before it could be
+        watched. 480p/600k puts the same section near 146MB — about 17 minutes.
+        The judgement behind the numbers: this is a language app watched on a phone with
+        subtitles, where audio carries the learning and video only has to be legible, so
+        480p is spent where it matters and the audio track stays at 128k untouched.
+        """
+
         self.ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         self.max_threads = max_threads
         self.max_height = max_height
+        self.video_bitrate_kbps = video_bitrate_kbps
 
     def create_hls(
         self,
@@ -290,14 +308,20 @@ class VideoProcessor:
                     "high",
                     "-level",
                     "4.1",
+                    # Derived from one number so they cannot drift apart: a bitrate raised
+                    # without its ceiling is not actually allowed to use it, and a ceiling
+                    # raised without the bitrate only widens spikes.
                     "-b:v",
-                    "1500k",
+                    f"{self.video_bitrate_kbps}k",
                     "-maxrate",
-                    "1800k",
+                    f"{round(self.video_bitrate_kbps * 1.2)}k",
                     "-bufsize",
-                    "3000k",
+                    f"{self.video_bitrate_kbps * 2}k",
                     "-c:a",
                     "aac",
+                    # Left at 128k on purpose while the video bitrate came down: in a
+                    # listening-practice app the audio is the material, and it is only ~26MB
+                    # of a 27-minute section either way.
                     "-b:a",
                     "128k",
                     "-force_key_frames",
