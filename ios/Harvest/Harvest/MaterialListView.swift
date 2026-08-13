@@ -464,6 +464,14 @@ private struct MaterialCard: View {
             .foregroundStyle(DesignTokens.ink)
             ProgressView(value: Double(material.progressPercent ?? 0), total: 100)
                 .tint(DesignTokens.accent)
+            // Which step of three, plus measured bytes on the step that has a size. Absent
+            // for everything that is not 转录, and the countdown is absent for the two cloud
+            // steps — an absent countdown is the honest state there, not a missing feature.
+            if let stepLine = material.stepLine {
+                Text(stepLine)
+                    .font(.caption)
+                    .foregroundStyle(DesignTokens.muted)
+            }
             if let eta = material.etaMinutes {
                 Text("预计还需要约 \(eta) 分钟")
                     .font(.caption)

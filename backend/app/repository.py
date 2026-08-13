@@ -1870,7 +1870,7 @@ class Repository:
         self,
         *,
         material_id: int,
-        source_path: str,
+        source_path: str | None,
         video_playlist_path: str,
         audio_playlist_path: str,
         video_playlist_key: str,
@@ -1895,11 +1895,22 @@ class Repository:
                 ),
                 {"material_id": material_id},
             )
-            connection.execute(
-                text("""INSERT INTO media_asset (material_id, kind, purpose, local_path, bytes)
-                VALUES (:material_id, 'video', 'archive', :local_path, :bytes)"""),
-                {"material_id": material_id, "local_path": source_path, "bytes": Path(source_path).stat().st_size},
-            )
+            # No archive row when there is no archive. A split section never has one — §15.2
+            # deletes the uploaded original as soon as its cut lands — and this method used
+            # to require it, so 转录 for a section died here *after* pushing 265MB to OSS,
+            # on `Path(None)`. §15.7 loses nothing: a file that does not exist has no bytes
+            # to leak. (Second time tonight that one contract drifted between two layers;
+            # the integration test below now pins this side of it.)
+            if source_path is not None:
+                connection.execute(
+                    text("""INSERT INTO media_asset (material_id, kind, purpose, local_path, bytes)
+                    VALUES (:material_id, 'video', 'archive', :local_path, :bytes)"""),
+                    {
+                        "material_id": material_id,
+                        "local_path": source_path,
+                        "bytes": Path(source_path).stat().st_size,
+                    },
+                )
             if asr_audio_path is not None:
                 connection.execute(
                     text("""INSERT INTO media_asset (material_id, kind, purpose, local_path, bytes)

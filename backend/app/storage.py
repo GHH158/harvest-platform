@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mimetypes
 import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
 
@@ -105,7 +106,21 @@ class ObjectStorage:
     def upload_audio(self, local_path: Path, oss_key: str) -> str:
         return self.upload_file(local_path, oss_key)
 
-    def upload_tree(self, directory: Path, oss_prefix: str) -> list[str]:
+    def upload_tree(
+        self,
+        directory: Path,
+        oss_prefix: str,
+        *,
+        on_bytes: Callable[[int], None] | None = None,
+    ) -> list[str]:
+        """`on_bytes` receives each file's size once that file is settled.
+
+        It is called for skipped files too, because "already up there" is progress from the
+        caller's point of view — the number it is building is "how much of this is done",
+        not "how much did we transmit". Called after the fact rather than during, since a
+        per-file `put` gives no sub-file signal to forward.
+        """
+
         files = sorted(
             (path for path in directory.rglob("*") if path.is_file()),
             key=lambda path: (path.suffix.lower() == ".m3u8", path.as_posix()),
@@ -117,10 +132,19 @@ class ObjectStorage:
         for path in files:
             relative = path.relative_to(directory).as_posix()
             key = f"{oss_prefix.rstrip('/')}/{relative}"
-            if remote_sizes.get(key) != path.stat().st_size:
+            size = path.stat().st_size
+            if remote_sizes.get(key) != size:
                 self.upload_file(path, key)
             keys.append(key)
+            if on_bytes is not None:
+                on_bytes(size)
         return keys
+
+    @staticmethod
+    def tree_bytes(directory: Path) -> int:
+        """Total bytes `upload_tree` will account for — the denominator of its progress."""
+
+        return sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
 
     def _remote_sizes(self, prefix: str) -> dict[str, int]:
         try:

@@ -20,6 +20,13 @@ struct Material: Codable, Identifiable, Hashable {
     let retryable: Bool?
     let failureTitle: String?
     let failureSummary: String?
+    /// 转录 is three machine steps (上传 → 听写 → 翻译). Naming which one is running, out of a
+    /// known total, is what makes a long wait bearable. `stepDetail` carries measured bytes
+    /// and is present only for the upload — the two cloud calls have nothing real to report.
+    let stepIndex: Int?
+    let stepTotal: Int?
+    let stepLabel: String?
+    let stepDetail: String?
     /// §15.5: present only for a section of a split collection.
     let collectionID: Int?
     let collectionIndex: Int?
@@ -49,6 +56,26 @@ struct Material: Codable, Identifiable, Hashable {
         case retryable
         case failureTitle = "failure_title"
         case failureSummary = "failure_summary"
+        case stepIndex = "step_index"
+        case stepTotal = "step_total"
+        case stepLabel = "step_label"
+        case stepDetail = "step_detail"
+    }
+
+    /// 「第 1 / 3 步 上传到云端 · 168 MB / 273 MB」 — nil unless a 转录 step is actually running.
+    /// The byte detail appears only where it is measured, so nothing here is invented.
+    var stepLine: String? {
+        guard let stepIndex, let stepTotal, let stepLabel else { return nil }
+        let head = "第 \(stepIndex) / \(stepTotal) 步 \(stepLabel)"
+        guard let stepDetail else { return head }
+        return "\(head) · \(stepDetail)"
+    }
+
+    /// Same line with the countdown folded in, for places that show one line only.
+    var stepDescription: String? {
+        guard let stepLine else { return nil }
+        guard let etaMinutes else { return stepLine }
+        return "\(stepLine) · 还要约 \(etaMinutes) 分钟"
     }
 }
 

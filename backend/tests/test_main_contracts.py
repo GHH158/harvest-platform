@@ -166,6 +166,48 @@ def test_section_being_cut_does_not_promise_three_minutes(
     assert transcribing["progress_label"] == "正在上传媒体"
 
 
+def test_upload_step_reports_measured_bytes_and_a_rate_based_eta(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """转录 step 1 is the long one, and it is the only step whose size is knowable.
+
+    `_upload_video` writes `done_bytes` / `total_bytes` / `started_at` as it goes, so the
+    countdown comes from the rate this upload is actually achieving instead of a constant.
+    Half of 200MB in 60 seconds is 1.67 MB/s, so the remaining 100MB is about one minute.
+    """
+
+    monkeypatch.setattr(main, "get_settings", lambda: Settings(data_dir=tmp_path))
+    monkeypatch.setattr(main.time, "time", lambda: 1_000_060.0)
+    uploading = main.serialise_material(
+        {
+            "id": 59,
+            "status": "processing",
+            "collection_id": 7,
+            "duration_ms": 1_642_987,
+            "error_message": None,
+            "audio_oss_key": None,
+            "video_oss_key": None,
+            "thumbnail_local_path": None,
+            "current_job_id": 104,
+            "current_job_kind": "upload_video",
+            "current_job_status": "running",
+            "current_job_payload": {
+                "done_bytes": 100 * 1024 * 1024,
+                "total_bytes": 200 * 1024 * 1024,
+                "started_at": 1_000_000.0,
+            },
+            "current_job_error_message": None,
+            "current_job_updated_at": datetime.now(UTC),
+        }
+    )
+
+    assert uploading["step_index"] == 1
+    assert uploading["step_total"] == 3
+    assert uploading["step_label"] == "上传到云端"
+    assert uploading["step_detail"] == "100 MB / 200 MB"
+    assert uploading["eta_minutes"] == 1
+
+
 def test_material_projection_exposes_stage_progress_and_failure_details(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -188,8 +230,14 @@ def test_material_projection_exposes_stage_progress_and_failure_details(
     )
     assert processing["progress_label"] == "正在转录字幕"
     assert processing["progress_percent"] == 82
-    assert processing["eta_minutes"] == 5
     assert processing["thumbnail_path"] == "/materials/7/thumbnail"
+    # 听写 is one opaque cloud call, so it names the step and offers no countdown. It used to
+    # promise 5 minutes from a constant, which is the kind of number this screen shouldn't
+    # state as fact.
+    assert processing["step_index"] == 2
+    assert processing["step_total"] == 3
+    assert processing["step_label"] == "听写字幕"
+    assert processing["eta_minutes"] is None
 
     failed = main.serialise_material(
         {

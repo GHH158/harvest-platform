@@ -474,9 +474,41 @@ class Worker:
         video_playlist_key = f"{video_prefix}/index.m3u8"
         audio_playlist_key = f"{audio_prefix}/index.m3u8"
         temporary_audio_key = f"temporary/materials/{job.material_id}/asr-audio.m4a"
-        self.storage.upload_tree(video_directory, video_prefix)
-        self.storage.upload_tree(audio_directory, audio_prefix)
+
+        # Publishing one 27-minute section is a few hundred MB, and while it ran the screen
+        # said only 「正在上传媒体」 with a countdown invented from a constant. These are the
+        # real numbers — bytes settled out of bytes required — reported into the job payload
+        # so the phone can show them. Written at most every 2 seconds because the denominator
+        # is ~460 files and a row update per file would be ~460 writes for one upload.
+        total_bytes = (
+            self.storage.tree_bytes(video_directory)
+            + self.storage.tree_bytes(audio_directory)
+            + asr_audio.stat().st_size
+        )
+        done_bytes = 0
+        last_written = 0.0
+        # Wall clock, not `monotonic`: the API reads it back out of the payload in a different
+        # process to work out the rate this upload is actually achieving, and only an absolute
+        # epoch is comparable across the two.
+        started_at = time.time()
+
+        def report(size: int, *, force: bool = False) -> None:
+            nonlocal done_bytes, last_written
+            done_bytes += size
+            now = time.monotonic()
+            if not force and now - last_written < 2.0:
+                return
+            last_written = now
+            self.repository.merge_job_payload(
+                job.id,
+                {"done_bytes": done_bytes, "total_bytes": total_bytes, "started_at": started_at},
+            )
+
+        report(0, force=True)
+        self.storage.upload_tree(video_directory, video_prefix, on_bytes=report)
+        self.storage.upload_tree(audio_directory, audio_prefix, on_bytes=report)
         self.storage.upload_file(asr_audio, temporary_audio_key)
+        report(asr_audio.stat().st_size, force=True)
         self.repository.store_video_assets(
             material_id=job.material_id,
             source_path=str(source) if source is not None else None,

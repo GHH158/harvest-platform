@@ -12,6 +12,68 @@ from sqlalchemy import create_engine, text
 
 
 @pytest.mark.integration
+def test_store_video_assets_accepts_a_section_with_no_archive_original(tmp_path) -> None:
+    """A split section reaches this method with `source_path=None` and must not blow up.
+
+    Real failure 2026-08-13: `_upload_video` was fixed to pass None (a section's original is
+    deleted by §15.2 as soon as the cut lands) but this method still declared `source_path:
+    str` and called `Path(source_path).stat()` unguarded — so 转录 died here *after* pushing
+    265MB to OSS. Same "one contract, two layers, one of them not updated" shape as the bug
+    it was fixing.
+    """
+
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    material_id, _ = repository.create_material_with_job(
+        title="section without an archive",
+        source_type="file",
+        source_ref=None,
+        job_kind="upload_video",
+        payload={},
+    )
+    video_directory = tmp_path / "hls-video"
+    audio_directory = tmp_path / "hls-audio"
+    for directory in (video_directory, audio_directory):
+        directory.mkdir()
+        (directory / "index.m3u8").write_text("#EXTM3U\n")
+    asr_audio = tmp_path / "asr-audio.m4a"
+    asr_audio.write_bytes(b"audio")
+
+    try:
+        repository.store_video_assets(
+            material_id=material_id,
+            source_path=None,
+            video_playlist_path=str(video_directory / "index.m3u8"),
+            audio_playlist_path=str(audio_directory / "index.m3u8"),
+            video_playlist_key=f"materials/{material_id}/hls/video/index.m3u8",
+            audio_playlist_key=f"materials/{material_id}/hls/audio/index.m3u8",
+            asr_audio_path=str(asr_audio),
+        )
+
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """SELECT kind, purpose FROM media_asset
+                       WHERE material_id = :material_id ORDER BY kind, purpose"""
+                ),
+                {"material_id": material_id},
+            ).all()
+        assert ("video", "archive") not in rows, "没有原片就不该登记原片行"
+        assert ("video", "delivery") in rows
+        assert ("audio", "delivery") in rows
+        assert ("audio", "archive") in rows
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = :material_id"), {"material_id": material_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
 def test_interrupted_upload_video_recovers_to_downloaded_not_pending() -> None:
     """An interrupted 转录 must hand the 转录 button back, not claim to be preparing.
 

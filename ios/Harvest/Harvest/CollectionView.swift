@@ -174,7 +174,10 @@ struct CollectionDetailView: View {
         switch section.status {
         case "ready": break
         case "downloaded": parts.append("还没转录")
-        case "processing": parts.append(section.progressLabel ?? "正在处理")
+        // The step line replaces the bare stage label while 转录 runs: this is the row someone
+        // sits and watches for ten minutes, so it should say which step of three it is on and
+        // how far through the one step that has a measurable size.
+        case "processing": parts.append(section.stepDescription ?? section.progressLabel ?? "正在处理")
         case "failed": parts.append(section.failureTitle ?? "失败了")
         default: parts.append("正在切")
         }

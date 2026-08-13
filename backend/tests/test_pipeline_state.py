@@ -356,13 +356,19 @@ class FakeStorage:
     def upload_file(self, local_path: Path, oss_key: str) -> str:
         return self.upload_audio(local_path, oss_key)
 
-    def upload_tree(self, directory: Path, oss_prefix: str) -> list[str]:
+    def upload_tree(self, directory: Path, oss_prefix: str, *, on_bytes=None) -> list[str]:
         keys = []
         for path in sorted(item for item in directory.rglob("*") if item.is_file()):
             key = f"{oss_prefix}/{path.relative_to(directory).as_posix()}"
             self.uploads.append((path, key))
             keys.append(key)
+            if on_bytes is not None:
+                on_bytes(path.stat().st_size)
         return keys
+
+    @staticmethod
+    def tree_bytes(directory: Path) -> int:
+        return sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
 
     def delete(self, oss_key: str) -> None:
         self.deleted_key = oss_key
@@ -699,7 +705,7 @@ def test_video_upload_failure_returns_material_to_downloaded_for_retry(tmp_path:
     worker = Worker(repository, Settings(data_dir=tmp_path))  # type: ignore[arg-type]
 
     class FailingStorage(FakeStorage):
-        def upload_tree(self, directory: Path, oss_prefix: str) -> list[str]:
+        def upload_tree(self, directory: Path, oss_prefix: str, *, on_bytes=None) -> list[str]:
             raise RuntimeError("OSS timeout")
 
     worker.storage = FailingStorage()  # type: ignore[assignment]

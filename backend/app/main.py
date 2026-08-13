@@ -132,6 +132,56 @@ _MATERIAL_JOB_PRESENTATION: dict[str, tuple[str, int, int]] = {
     "translate_video": ("正在翻译字幕", 95, 2),
 }
 
+#: 转录 is three machine steps, and naming them beats one opaque "processing". Waiting is
+#: easier when you can see which of a known number of steps you are on — and only the first
+#: one has a knowable size, so it is the only one that gets a number (see `_transcription_step`).
+_TRANSCRIPTION_STEPS: dict[str, tuple[int, str]] = {
+    "upload_video": (1, "上传到云端"),
+    "asr_video": (2, "听写字幕"),
+    "translate_video": (3, "翻译字幕"),
+}
+_TRANSCRIPTION_STEP_TOTAL = 3
+
+
+def _format_megabytes(value: int) -> str:
+    return f"{value / 1024 / 1024:.0f} MB"
+
+
+def _transcription_step(job_kind: str, job_payload: dict) -> dict | None:
+    """The step display for a 转录 job, or None when this job is not part of 转录.
+
+    `done_bytes` / `total_bytes` are written by `_upload_video` as it goes, so step 1 reports
+    measured bytes and an ETA derived from the rate actually observed on this upload. Steps 2
+    and 3 are single opaque cloud calls: they get a name and nothing else, because inventing a
+    countdown for them is what made the old display untrustworthy.
+    """
+
+    step = _TRANSCRIPTION_STEPS.get(job_kind)
+    if step is None:
+        return None
+    index, label = step
+    detail: str | None = None
+    eta_minutes: int | None = None
+    total_bytes = int(job_payload.get("total_bytes") or 0)
+    done_bytes = int(job_payload.get("done_bytes") or 0)
+    if job_kind == "upload_video" and total_bytes > 0:
+        detail = f"{_format_megabytes(done_bytes)} / {_format_megabytes(total_bytes)}"
+        remaining = max(0, total_bytes - done_bytes)
+        started_at = job_payload.get("started_at")
+        if isinstance(started_at, (int, float)) and done_bytes > 0:
+            elapsed = max(1.0, time.time() - float(started_at))
+            rate = done_bytes / elapsed
+            if rate > 0:
+                eta_minutes = max(1, round(remaining / rate / 60))
+    return {
+        "step_index": index,
+        "step_total": _TRANSCRIPTION_STEP_TOTAL,
+        "step_label": label,
+        "step_detail": detail,
+        "eta_minutes": eta_minutes,
+    }
+
+
 _MATERIAL_FAILURE_TITLES = {
     "fetch": "网页导入失败",
     "vision": "照片识别失败",
@@ -196,6 +246,10 @@ def serialise_material(material: dict) -> dict:
     material["retryable"] = False
     material["failure_title"] = None
     material["failure_summary"] = None
+    material["step_index"] = None
+    material["step_total"] = None
+    material["step_label"] = None
+    material["step_detail"] = None
 
     is_uncut_section = (
         not job_kind and material.get("collection_id") is not None and material.get("duration_ms") is None
@@ -222,6 +276,16 @@ def serialise_material(material: dict) -> dict:
         material["progress_percent"] = percent
         material["progress_label"] = label
         material["eta_minutes"] = _job_eta_minutes(job_kind, job_payload, job_updated_at, eta)
+        step = _transcription_step(job_kind, job_payload)
+        if step is not None:
+            material["step_index"] = step["step_index"]
+            material["step_total"] = step["step_total"]
+            material["step_label"] = step["step_label"]
+            material["step_detail"] = step["step_detail"]
+            # Measured bytes beat the constant in `_MATERIAL_JOB_PRESENTATION`; when they are
+            # absent (steps 2 and 3, or before the first report) leave the countdown off
+            # rather than fall back to a guess this screen would present as fact.
+            material["eta_minutes"] = step["eta_minutes"]
     elif material.get("status") == "downloaded":
         material["progress_percent"] = 45
         material["progress_label"] = "视频已准备，等待开始转录"
