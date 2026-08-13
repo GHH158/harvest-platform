@@ -12,6 +12,73 @@ from sqlalchemy import create_engine, text
 
 
 @pytest.mark.integration
+def test_transcription_assets_found_whether_the_row_holds_a_directory_or_a_playlist(tmp_path) -> None:
+    """A `delivery` row's `local_path` has two shapes and both must resolve.
+
+    After a transcode `store_downloaded_video_assets` registers the *directory*; after an
+    upload `store_video_assets` overwrites it with the *playlist file*. Reading only the
+    first shape made 转录 answer 「找不到本地视频文件」 for every section that had already been
+    transcribed once — the real symptom on 2026-08-13, tapping 转录 on a section whose earlier
+    transcription had been cleared.
+    """
+
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    video_directory = tmp_path / "hls-video"
+    audio_directory = tmp_path / "hls-audio"
+    for directory in (video_directory, audio_directory):
+        directory.mkdir()
+        (directory / "index.m3u8").write_text("#EXTM3U\n")
+    asr_audio = tmp_path / "asr-audio.m4a"
+    asr_audio.write_bytes(b"audio")
+
+    material_id, _ = repository.create_material_with_job(
+        title="re-transcribed section",
+        source_type="file",
+        source_ref=None,
+        job_kind="upload_video",
+        payload={},
+    )
+    try:
+        # Shape 1 — straight out of a transcode: directories.
+        repository.store_downloaded_video_assets(
+            material_id,
+            video_directory=str(video_directory),
+            audio_directory=str(audio_directory),
+            asr_audio_path=str(asr_audio),
+        )
+        from_directories = repository.local_video_transcription_assets(material_id)
+        assert from_directories == {
+            "video_directory": str(video_directory),
+            "audio_directory": str(audio_directory),
+            "asr_audio_path": str(asr_audio),
+        }
+
+        # Shape 2 — after a completed upload: playlist files.
+        repository.store_video_assets(
+            material_id=material_id,
+            source_path=None,
+            video_playlist_path=str(video_directory / "index.m3u8"),
+            audio_playlist_path=str(audio_directory / "index.m3u8"),
+            video_playlist_key=f"materials/{material_id}/hls/video/index.m3u8",
+            audio_playlist_key=f"materials/{material_id}/hls/audio/index.m3u8",
+            asr_audio_path=str(asr_audio),
+        )
+        assert repository.local_video_transcription_assets(material_id) == from_directories, (
+            "转录成功过一次之后，再次转录必须还能找到同一批本地文件"
+        )
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = :material_id"), {"material_id": material_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
 def test_store_video_assets_accepts_a_section_with_no_archive_original(tmp_path) -> None:
     """A split section reaches this method with `source_path=None` and must not blow up.
 

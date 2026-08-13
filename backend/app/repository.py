@@ -42,6 +42,25 @@ RESUME_MIN_RATIO = 0.02
 RESUME_MAX_RATIO = 0.80
 
 
+def _hls_directory(registered_path: str) -> Path | None:
+    """The directory holding an HLS stream, from whichever shape got registered for it.
+
+    A `delivery` row's `local_path` means two different things depending on who wrote it:
+    `store_downloaded_video_assets` (after a transcode) writes the **directory**, while
+    `store_video_assets` (after an upload) writes the **playlist file** inside it. Reading
+    only one shape is what made 转录 answer 「找不到本地视频文件」 for any section that had
+    already been transcribed once — the path came back as the playlist, and looking for
+    `index.m3u8` under it produced `…/index.m3u8/index.m3u8`.
+
+    Returns None when the stream is not actually on disk, so callers cannot start work that
+    has nothing to read.
+    """
+
+    path = Path(registered_path)
+    directory = path.parent if path.suffix == ".m3u8" else path
+    return directory if (directory / "index.m3u8").is_file() else None
+
+
 @dataclass(frozen=True)
 class Job:
     id: int
@@ -1502,16 +1521,14 @@ class Repository:
             ).mappings().all()
         paths = {(str(row["kind"]), str(row["purpose"])): str(row["local_path"]) for row in rows}
         try:
-            video_directory = Path(paths[("video", "delivery")])
-            audio_directory = Path(paths[("audio", "delivery")])
+            video_directory = _hls_directory(paths[("video", "delivery")])
+            audio_directory = _hls_directory(paths[("audio", "delivery")])
             asr_audio = Path(paths[("audio", "archive")])
         except KeyError:
             return None
         # Registered but missing bytes are not startable. Checked here rather than in the
         # worker so the phone gets a 409 it can show, instead of a job that fails later.
-        if not (video_directory / "index.m3u8").is_file():
-            return None
-        if not (audio_directory / "index.m3u8").is_file() or not asr_audio.is_file():
+        if video_directory is None or audio_directory is None or not asr_audio.is_file():
             return None
         return {
             "video_directory": str(video_directory),
