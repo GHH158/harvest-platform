@@ -988,7 +988,15 @@ def get_material_thumbnail(material_id: int) -> FileResponse:
     if not path or not Path(path).is_file():
         raise HTTPException(status_code=404, detail="该素材没有可用封面。")
     media_type = "image/png" if Path(path).suffix.lower() == ".png" else "image/jpeg"
-    return FileResponse(path, media_type=media_type)
+    # Measured 2026-08-13: this response carried no Cache-Control at all, so every visit to
+    # the library re-fetched every thumbnail from scratch — real cost on a relayed Tailscale
+    # connection where each round trip runs 200-400ms. `max-age` lets the phone skip the
+    # network entirely on a repeat visit within the window; not `immutable`, because a retry
+    # can regenerate a thumbnail for the same material_id (`_split_video` / `_transcode_video`
+    # re-run `create_thumbnail`) — the existing `Last-Modified`/`ETag` still let a client
+    # revalidate correctly once the window expires, so the worst case is a stale thumbnail
+    # for up to an hour, not a wrong one forever.
+    return FileResponse(path, media_type=media_type, headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.get("/materials/{material_id}/playback")

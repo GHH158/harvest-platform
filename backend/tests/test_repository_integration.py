@@ -141,6 +141,51 @@ def test_store_video_assets_accepts_a_section_with_no_archive_original(tmp_path)
 
 
 @pytest.mark.integration
+@pytest.mark.filterwarnings("ignore:Using `httpx` with `starlette.testclient` is deprecated")
+def test_thumbnail_response_is_cacheable(tmp_path) -> None:
+    """A thumbnail carried no `Cache-Control` at all, measured 2026-08-13 with real curl
+    headers — so the phone re-fetched every thumbnail on every visit to the library. Over a
+    relayed Tailscale connection (200-400ms per round trip, confirmed with `tailscale
+    netcheck` the same day) that cost is real and repeats every time the screen opens.
+    `max-age` lets a repeat visit skip the network for images that essentially never change;
+    not `immutable`, because a retry can regenerate a thumbnail for the same material_id.
+    """
+
+    from fastapi.testclient import TestClient
+
+    database_url = os.getenv("HARVEST_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("requires HARVEST_TEST_DATABASE_URL")
+
+    engine = make_engine(Settings(database_url=database_url))
+    apply_schema(engine)
+    repository = Repository(engine)
+    material_id, _ = repository.create_material_with_job(
+        title="thumbnail cache header",
+        source_type="paste",
+        source_ref=None,
+        job_kind="tts",
+        payload={"text": "test"},
+    )
+    thumbnail = tmp_path / "thumbnail.jpg"
+    thumbnail.write_bytes(b"\xff\xd8\xff")
+    repository.store_material_thumbnail(material_id, str(thumbnail))
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(main, "make_engine", lambda: engine)
+        with TestClient(main.app) as client:
+            response = client.get(f"/materials/{material_id}/thumbnail")
+            assert response.status_code == 200
+            assert response.headers["cache-control"] == "public, max-age=3600"
+    finally:
+        monkeypatch.undo()
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM material WHERE id = :material_id"), {"material_id": material_id})
+        engine.dispose()
+
+
+@pytest.mark.integration
 def test_interrupted_upload_video_recovers_to_downloaded_not_pending() -> None:
     """An interrupted 转录 must hand the 转录 button back, not claim to be preparing.
 
